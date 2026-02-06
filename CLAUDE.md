@@ -1,0 +1,250 @@
+# PCB Panelizer
+
+## Projektübersicht
+
+Desktop-/Web-Anwendung zur Erstellung von Leiterplatten-Nutzen (Panels) aus Gerber-Daten.
+
+**URL:** http://localhost:3003
+**Start:** `npm run dev` oder Doppelklick auf `PCB-Panelizer-Starten.bat`
+
+---
+
+## Tech-Stack
+
+| Technologie | Zweck |
+|-------------|-------|
+| Next.js 14 | Framework (App Router) |
+| TypeScript | Typsicherheit |
+| **PixiJS 8** | WebGL Canvas-Rendering (Hardware-beschleunigt) |
+| Zustand | State Management |
+| Tailwind CSS | Styling |
+| @tracespace/parser | Gerber-Parsing |
+| pdf-lib | PDF-Generierung (Maßzeichnung) |
+| jszip | ZIP-Handling |
+| file-saver | Datei-Download |
+
+**Wichtig:** React StrictMode ist deaktiviert (`next.config.js`) um doppelte PixiJS-Initialisierung zu vermeiden.
+
+---
+
+## Projektstruktur
+
+```
+pcb-panelizer/
+├── src/
+│   ├── app/                    # Next.js App Router
+│   │   ├── layout.tsx          # Root Layout
+│   │   ├── page.tsx            # Hauptseite
+│   │   └── globals.css         # Globale Styles
+│   │
+│   ├── components/
+│   │   ├── ui/                 # Basis UI-Komponenten
+│   │   ├── layout/             # Layout-Komponenten
+│   │   │   ├── header.tsx      # Obere Toolbar (Import, Export, PDF)
+│   │   │   ├── sidebar.tsx     # Linke Sidebar (Layer, Boards, Tools)
+│   │   │   ├── properties-panel.tsx  # Rechte Sidebar (Einstellungen)
+│   │   │   ├── statusbar.tsx   # Untere Statusleiste
+│   │   │   └── main-layout.tsx # Gesamt-Layout
+│   │   ├── canvas/             # Canvas-Komponenten
+│   │   │   ├── pixi-panel-canvas.tsx # WebGL Canvas mit PixiJS
+│   │   │   └── gerber-layer-renderer.tsx # Gerber-Layer Rendering
+│   │   ├── panels/             # Panel-spezifische Komponenten
+│   │   └── dialogs/            # Dialoge (Import, Export, etc.)
+│   │
+│   ├── lib/
+│   │   ├── gerber/             # Gerber-Verarbeitung
+│   │   │   ├── parser.ts       # Wrapper um @tracespace/parser
+│   │   │   └── layer-detector.ts # Auto-Layer-Erkennung
+│   │   ├── canvas/             # Canvas-Utilities
+│   │   │   └── gerber-renderer.ts # Gerber → PixiJS Graphics
+│   │   ├── export/             # Export-Funktionen
+│   │   │   └── dimension-drawing.ts # PDF-Maßzeichnung Generator
+│   │   └── utils/              # Allgemeine Utilities
+│   │       └── index.ts        # cn(), formatMM(), snapToGrid()
+│   │
+│   ├── stores/
+│   │   └── panel-store.ts      # Zustand Store (State Management)
+│   │
+│   └── types/
+│       └── index.ts            # TypeScript Typdefinitionen
+│
+├── public/                     # Statische Assets
+├── package.json
+├── tsconfig.json
+├── tailwind.config.ts
+├── next.config.js              # StrictMode: false für PixiJS
+└── CLAUDE.md                   # Diese Datei
+```
+
+---
+
+## Wichtige Konzepte
+
+### Datenmodell
+
+1. **Board** - Ein importiertes PCB-Design mit allen Gerber-Layern
+2. **BoardInstance** - Eine platzierte Kopie eines Boards im Panel
+3. **Panel** - Das fertige Nutzen mit Rahmen, Boards, Tabs, Fiducials
+4. **Tab** - Verbindungssteg zwischen Board und Rahmen (Solid, Mouse Bites, V-Score)
+5. **Fiducial** - Referenzmarke für Pick & Place Maschinen
+6. **ToolingHole** - Bohrung für Fertigungsaufnahme
+
+### Koordinatensystem
+
+- Alle Koordinaten sind intern in **Millimetern** gespeichert
+- Ursprung (0,0) ist links oben (PixiJS Standard)
+- Canvas zeigt rotes **Fadenkreuz am Nullpunkt** zur Orientierung
+- `PIXELS_PER_MM = 4` als Skalierungsfaktor für Rendering
+
+### State Management (Zustand)
+
+Der `usePanelStore` enthält:
+- `panel` - Alle Panel-Daten (Boards, Instanzen, Tabs, Fiducials, etc.)
+- `viewport` - Zoom und Pan
+- `grid` - Grid-Einstellungen
+- `activeTool` - Ausgewähltes Werkzeug
+- `selectedInstances` - Ausgewählte Board-Instanzen
+- `selectedFiducialId` - Ausgewähltes Fiducial (für Bearbeitung)
+
+---
+
+## Implementierte Features
+
+### Phase 1 (MVP) - Erledigt
+
+- [x] Projekt-Setup (Next.js, TypeScript, Tailwind)
+- [x] Basis-Layout (Header, Sidebar, Properties, Statusbar)
+- [x] **PixiJS WebGL Canvas** mit Hardware-Beschleunigung
+- [x] Zoom/Pan mit Mausrad und Drag
+- [x] State Management (Zustand Store)
+- [x] TypeScript-Typen definiert
+- [x] Gerber-Import Dialog (ZIP Upload)
+- [x] Automatische Layer-Erkennung
+- [x] Gerber-Layer Rendering (Pads, Leiterbahnen, Bögen)
+
+### Phase 2 - Erledigt
+
+- [x] **Panel-Größe** manuell einstellbar
+- [x] **Board-Array** erstellen (NxM mit Abstand)
+- [x] Auto-Berechnung Panel-Größe aus Rahmen + Array
+- [x] **Fiducials** hinzufügen (3 Ecken, 4 Ecken)
+- [x] **Fiducials auswählen** im Canvas (klickbar, orange Hervorhebung)
+- [x] **Fiducial-Koordinaten** editieren im Properties Panel
+- [x] **Tooling Holes** hinzufügen
+- [x] **Tabs** automatisch verteilen (Solid, Mouse Bites, V-Score)
+- [x] **PDF-Maßzeichnung** exportieren (A4 quer mit Bemaßungen)
+- [x] Fadenkreuz am Nullpunkt
+
+### Noch offen
+
+- [ ] Gerber-Export (RS-274X)
+- [ ] V-Score Linien zeichnen
+- [ ] Projekt speichern/laden (.panelizer.json)
+- [ ] Undo/Redo
+- [ ] Tastenkürzel
+
+---
+
+## Bedienung
+
+### Gerber importieren
+1. Klick auf **"Import"** im Header
+2. ZIP-Datei mit Gerber-Dateien hochladen (Drag & Drop oder Datei wählen)
+3. Layer werden automatisch erkannt
+4. Board erscheint in der linken Sidebar
+
+### Board-Array erstellen
+1. Board in der Sidebar auswählen
+2. Rechts unter **"Array"** Spalten und Reihen einstellen
+3. Abstände (Gap) konfigurieren
+4. **"Array erstellen"** klicken
+
+### Fiducials hinzufügen
+1. Rechts **"Fiducials"** aufklappen
+2. Pad-Durchmesser und Masköffnung einstellen
+3. **"3 Eck-Fiducials"** oder **"4 Eck-Fiducials"** klicken
+4. Fiducials im Canvas anklicken um sie auszuwählen
+5. X/Y-Koordinaten rechts anpassen
+
+### Tabs hinzufügen
+1. Rechts **"Tabs"** aufklappen
+2. Tab-Typ wählen:
+   - **Solid** (orange): Durchgehender Steg
+   - **Mouse Bites** (blau): Perforiert mit Bohrungen
+   - **V-Score** (pink): V-förmiger Einschnitt
+3. Tab-Breite und Anzahl pro Kante einstellen
+4. **"Tabs automatisch verteilen"** klicken
+
+### PDF-Maßzeichnung exportieren
+1. Klick auf **"Zeichnung"** im Header
+2. PDF wird generiert und heruntergeladen
+3. Enthält: Panel-Layout, Bemaßungen, Legende, Titelblock
+
+---
+
+## Entwicklung
+
+### Starten
+
+```bash
+cd C:\Users\SMTEC\pcb-panelizer
+npm run dev
+```
+
+Öffnet http://localhost:3003
+
+### Build
+
+```bash
+npm run build
+npm start
+```
+
+---
+
+## Bekannte Einschränkungen
+
+1. **Gerber-Export** - noch nicht implementiert
+2. **Undo/Redo** - nur Grundgerüst vorhanden
+3. **Mixed Panels** - nur Arrays gleicher Boards (kein Mix verschiedener Boards)
+4. **V-Score** - Tab-Typ vorhanden, aber keine durchgehenden Linien
+
+---
+
+## Rendering (PixiJS)
+
+### Canvas-Komponente
+`src/components/canvas/pixi-panel-canvas.tsx`
+
+### Gerenderte Elemente
+- **Panel-Rahmen** (dunkelgrau)
+- **Grid** (nur Major-Linien bei 10x Grid-Size)
+- **Fadenkreuz** am Nullpunkt (rot)
+- **Boards** mit Gerber-Layern
+- **Fiducials** (grün, ausgewählt: gold mit orange Glow)
+- **Tooling Holes** (mit Kupferring wenn plated)
+- **Tabs** (farbcodiert nach Typ)
+
+### Farben
+```javascript
+const COLORS = {
+  background: 0x0f0f0f,    // Dunkelgrau
+  panelFrame: 0x1a1a1a,    // Panel-Hintergrund
+  panelBorder: 0x404040,   // Panel-Rand
+  boardStroke: 0x3b82f6,   // Board-Umriss (blau)
+  boardSelected: 0x60a5fa, // Board ausgewählt
+  grid: 0x2a2a2a,          // Grid-Linien
+  gridMajor: 0x3a3a3a,     // Major Grid
+};
+```
+
+---
+
+## Referenzen
+
+- [Gerber RS-274X Format](https://www.ucamco.com/en/gerber)
+- [Excellon Drill Format](https://www.ucamco.com/en/gerber/excellon)
+- [@tracespace/parser Dokumentation](https://github.com/tracespace/tracespace)
+- [PixiJS Dokumentation](https://pixijs.com/)
+- [Zustand Dokumentation](https://github.com/pmndrs/zustand)
+- [pdf-lib Dokumentation](https://pdf-lib.js.org/)
