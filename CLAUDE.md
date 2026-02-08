@@ -133,7 +133,7 @@ Der `usePanelStore` enthält:
 - [x] **Fiducial-Koordinaten** editieren im Properties Panel
 - [x] **Tooling Holes** hinzufügen
 - [x] **Tabs** automatisch verteilen (Solid, Mouse Bites, V-Score)
-- [x] **PDF-Maßzeichnung** exportieren (A4 quer mit Bemaßungen)
+- [x] **PDF-Maßzeichnung** exportieren (A4 quer, vollständig vermast)
 - [x] Fadenkreuz am Nullpunkt
 
 ### Phase 3 - Erledigt
@@ -150,10 +150,21 @@ Der `usePanelStore` enthält:
 - [x] **Tooling Holes Koordinaten** editierbar im Properties Panel (wie Fiducials)
 - [x] **Fiducials auf Stirnseiten** (kurze Seiten, nicht Ecken, damit Klemmungen nicht abdecken)
 
+### Phase 4 - Erledigt
+
+- [x] **V-Score Linien** im Canvas und PDF (gestrichelt pink, mit Tiefe/Winkel)
+- [x] **Tabs in PDF** farbcodiert (Solid=Orange, Mouse Bites=Cyan, V-Score=Pink)
+- [x] **Fiducial-Koordinaten** in PDF mit Hilfslinien zum Panel-Rand
+- [x] **Tooling-Hole-Koordinaten** in PDF mit PTH/NPTH und Hilfslinien
+- [x] **Board-Positionsbemaßungen** (X/Y-Offset, Breite, Höhe, Gaps)
+- [x] **Nutzenrand alle 4 Seiten** bemaßt (links, rechts, oben, unten)
+- [x] **Detail-Tabelle** in PDF (Board-Info, Fiducials, Holes, V-Score, Tabs)
+- [x] **Erweiterte Legende** in PDF (dynamisch, nur vorhandene Elementtypen)
+- [x] **Erweiterter Titelblock** mit Tab-/V-Score-Anzahl und SMTEC AG
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
-- [ ] V-Score Linien zeichnen
 - [ ] Projekt speichern/laden (.panelizer.json)
 - [ ] Undo/Redo
 - [ ] Tastenkürzel
@@ -214,8 +225,19 @@ Der `usePanelStore` enthält:
 
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
-2. PDF wird generiert und heruntergeladen
-3. Enthält: Panel-Layout, Bemaßungen, Legende, Titelblock
+2. PDF wird generiert und heruntergeladen (A4 Querformat)
+3. Enthält:
+   - Panel-Umriss mit allen Board-Positionen
+   - **Gesamtbemaßungen** (Breite unten, Höhe rechts)
+   - **Nutzenrand-Bemaßungen** alle 4 Seiten (links, rechts, oben, unten)
+   - **Board-Positionsbemaßungen** (X/Y-Offset, Board-Größe, Gaps)
+   - **V-Score Linien** (gestrichelt pink, mit Y/X-Position, Tiefe %, Winkel°)
+   - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
+   - **Fiducials** mit Koordinaten `FID (X.X / Y.Y)` und Hilfslinien zum Panel-Rand
+   - **Tooling Holes** mit Koordinaten `Ø3.0 NPTH (X.X / Y.Y)` und Hilfslinien
+   - **Detail-Tabelle** rechts: Board-Info, Fiducials, Tooling Holes, V-Score, Tabs
+   - **Legende** (dynamisch, nur vorhandene Elementtypen)
+   - **Titelblock** mit Projekt, Autor, Datum, Panel-Größe, alle Zähler
 
 ---
 
@@ -244,7 +266,6 @@ npm start
 1. **Gerber-Export** - noch nicht implementiert
 2. **Undo/Redo** - nur Grundgerüst vorhanden
 3. **Mixed Panels** - nur Arrays gleicher Boards (kein Mix verschiedener Boards)
-4. **V-Score** - Tab-Typ vorhanden, aber keine durchgehenden Linien
 
 ---
 

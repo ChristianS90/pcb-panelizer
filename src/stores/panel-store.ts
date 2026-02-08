@@ -23,6 +23,8 @@ import type {
   Fiducial,
   ToolingHole,
   VScoreLine,
+  RoutingContour,
+  RoutingConfig,
   Viewport,
   Tool,
   GridConfig,
@@ -63,6 +65,15 @@ interface PanelStore {
 
   /** Aktuell ausgewählte Tooling-Bohrung (für Bearbeitung im Properties Panel) */
   selectedToolingHoleId: string | null;
+
+  /** Aktuell ausgewählter Tab (für Bearbeitung im Properties Panel und Canvas-Glow) */
+  selectedTabId: string | null;
+
+  /** Aktuell ausgewählte V-Score Linie (für Bearbeitung im Properties Panel und Canvas-Glow) */
+  selectedVScoreLineId: string | null;
+
+  /** Aktuell ausgewählte Fräskontur (für Hervorhebung im Canvas und Properties Panel) */
+  selectedRoutingContourId: string | null;
 
   /** Undo/Redo History (für später) */
   history: {
@@ -162,6 +173,12 @@ interface PanelStore {
   /** Entfernt alle Tabs */
   clearAllTabs: () => void;
 
+  /** Wählt einen Tab aus (oder null zum Abwählen) */
+  selectTab: (tabId: string | null) => void;
+
+  /** Aktualisiert die Position eines Tabs entlang der Kante (0-1) */
+  updateTabPosition: (tabId: string, position: number) => void;
+
   /** Verteilt Tabs automatisch auf alle Board-Instanzen */
   autoDistributeTabs: (config: {
     type: 'solid' | 'mousebites' | 'vscore';
@@ -206,6 +223,44 @@ interface PanelStore {
 
   /** Entfernt eine V-Score Linie */
   removeVScoreLine: (lineId: string) => void;
+
+  /** Entfernt alle V-Score Linien */
+  clearAllVScoreLines: () => void;
+
+  /** Wählt eine V-Score Linie aus (oder null zum Abwählen) */
+  selectVScoreLine: (lineId: string | null) => void;
+
+  /** Aktualisiert die Position einer V-Score Linie (achsenbeschränkt) */
+  updateVScoreLinePosition: (lineId: string, position: number) => void;
+
+  /** Generiert V-Score Linien automatisch an allen Board-Kanten */
+  autoDistributeVScoreLines: (config: {
+    depth: number;
+    angle: number;
+    includeOuterEdges: boolean;
+  }) => void;
+
+  // --------------------------------------------------------------------------
+  // Fräskonturen (Routing Contours)
+  // --------------------------------------------------------------------------
+
+  /** Wählt eine Fräskontur aus (oder null zum Abwählen) */
+  selectRoutingContour: (contourId: string | null) => void;
+
+  /** Entfernt eine einzelne Fräskontur */
+  removeRoutingContour: (contourId: string) => void;
+
+  /** Entfernt alle Fräskonturen */
+  clearAllRoutingContours: () => void;
+
+  /** Schaltet die Sichtbarkeit einer Fräskontur um */
+  toggleRoutingContourVisibility: (contourId: string) => void;
+
+  /** Aktualisiert die Fräskonturen-Konfiguration */
+  setRoutingConfig: (config: Partial<RoutingConfig>) => void;
+
+  /** Generiert Fräskonturen automatisch aus Board-Positionen und Tabs */
+  autoGenerateRoutingContours: () => void;
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
@@ -300,6 +355,13 @@ function createEmptyPanel(): Panel {
     fiducials: [],
     toolingHoles: [],
     vscoreLines: [],
+    routingContours: [],
+    routingConfig: {
+      toolDiameter: 2.0,
+      generateBoardOutlines: true,
+      generatePanelOutline: true,
+      clearance: 0,
+    },
     createdAt: new Date(),
     modifiedAt: new Date(),
   };
@@ -324,6 +386,78 @@ const initialGrid: GridConfig = {
 };
 
 // ============================================================================
+// Hilfsfunktionen für Fräskonturen-Generierung
+// ============================================================================
+
+/**
+ * Interpoliert einen Punkt entlang einer Linie zwischen start und end.
+ * @param start Startpunkt
+ * @param end Endpunkt
+ * @param t Normalisierte Position (0 = start, 1 = end)
+ */
+function interpolatePoint(
+  start: { x: number; y: number },
+  end: { x: number; y: number },
+  t: number
+): { x: number; y: number } {
+  return {
+    x: start.x + (end.x - start.x) * t,
+    y: start.y + (end.y - start.y) * t,
+  };
+}
+
+/**
+ * Approximiert eine Viertelkreis-Ecke durch kurze gerade Segmente.
+ * Der Bogen geht von startAngle bis endAngle um den Mittelpunkt.
+ *
+ * @param startX X-Startpunkt (Tangente trifft den Bogen)
+ * @param startY Y-Startpunkt
+ * @param endX X-Endpunkt (Tangente verlässt den Bogen)
+ * @param endY Y-Endpunkt
+ * @param startAngle Winkel in Radians (Startrichtung des Bogens)
+ * @param endAngle Winkel in Radians (Endrichtung des Bogens)
+ * @param numSegments Anzahl der Segmente für die Approximation
+ */
+function approximateCorner(
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+  startAngle: number,
+  endAngle: number,
+  numSegments: number
+): { start: { x: number; y: number }; end: { x: number; y: number } }[] {
+  // Mittelpunkt des Kreisbogens berechnen
+  // Wir berechnen den Mittelpunkt aus Start/End und den Winkeln
+  const cx = startX - Math.cos(startAngle) * Math.abs(endX - startX || endY - startY);
+  const cy = startY - Math.sin(startAngle) * Math.abs(endX - startX || endY - startY);
+
+  // Radius aus dem Abstand zwischen Start und Mitte
+  const r = Math.sqrt((startX - cx) ** 2 + (startY - cy) ** 2);
+
+  const segments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+  const angleStep = (endAngle - startAngle) / numSegments;
+
+  for (let i = 0; i < numSegments; i++) {
+    const a1 = startAngle + i * angleStep;
+    const a2 = startAngle + (i + 1) * angleStep;
+
+    segments.push({
+      start: {
+        x: Math.round((cx + Math.cos(a1) * r) * 1000) / 1000,
+        y: Math.round((cy + Math.sin(a1) * r) * 1000) / 1000,
+      },
+      end: {
+        x: Math.round((cx + Math.cos(a2) * r) * 1000) / 1000,
+        y: Math.round((cy + Math.sin(a2) * r) * 1000) / 1000,
+      },
+    });
+  }
+
+  return segments;
+}
+
+// ============================================================================
 // Store Implementierung
 // ============================================================================
 
@@ -340,6 +474,9 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   selectedInstances: [],
   selectedFiducialId: null,
   selectedToolingHoleId: null,
+  selectedTabId: null,
+  selectedVScoreLineId: null,
+  selectedRoutingContourId: null,
   history: {
     past: [],
     future: [],
@@ -542,6 +679,16 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         cornerRadius: panel.frame.cornerRadius,
       };
 
+      // --- Routing-Konturen rotieren ---
+      // Jedes Segment: (x, y) → (y, oldWidth - x)
+      const newRoutingContours = panel.routingContours.map((contour) => ({
+        ...contour,
+        segments: contour.segments.map((seg) => ({
+          start: { x: seg.start.y, y: oldWidth - seg.start.x },
+          end: { x: seg.end.y, y: oldWidth - seg.end.x },
+        })),
+      }));
+
       return {
         panel: {
           ...panel,
@@ -552,6 +699,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           fiducials: newFiducials,
           toolingHoles: newToolingHoles,
           vscoreLines: newVScoreLines,
+          routingContours: newRoutingContours,
           frame: newFrame,
           // Tabs müssen nach Rotation neu verteilt werden
           tabs: [],
@@ -831,14 +979,42 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       },
     })),
 
+  // Entfernt einen Tab UND alle "entsprechenden" Tabs an anderen Instanzen
+  // (gleiche Kante + gleicher Index), damit alle Boards identisch bleiben.
   removeTab: (tabId) =>
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        tabs: state.panel.tabs.filter((t) => t.id !== tabId),
-        modifiedAt: new Date(),
-      },
-    })),
+    set((state) => {
+      const tab = state.panel.tabs.find((t) => t.id === tabId);
+      if (!tab) return state;
+
+      // Index dieses Tabs innerhalb seiner (Instanz + Kante)-Gruppe ermitteln
+      const sameGroupTabs = state.panel.tabs.filter(
+        (t) => t.boardInstanceId === tab.boardInstanceId && t.edge === tab.edge
+      );
+      const indexInGroup = sameGroupTabs.findIndex((t) => t.id === tabId);
+
+      // IDs aller zu löschenden Tabs sammeln (dieser + gleiche an anderen Instanzen)
+      const idsToRemove = new Set<string>([tabId]);
+      for (const instance of state.panel.instances) {
+        if (instance.id === tab.boardInstanceId) continue;
+        const otherGroupTabs = state.panel.tabs.filter(
+          (t) => t.boardInstanceId === instance.id && t.edge === tab.edge
+        );
+        if (indexInGroup < otherGroupTabs.length) {
+          idsToRemove.add(otherGroupTabs[indexInGroup].id);
+        }
+      }
+
+      return {
+        panel: {
+          ...state.panel,
+          tabs: state.panel.tabs.filter((t) => !idsToRemove.has(t.id)),
+          modifiedAt: new Date(),
+        },
+        selectedTabId: state.selectedTabId && idsToRemove.has(state.selectedTabId)
+          ? null
+          : state.selectedTabId,
+      };
+    }),
 
   clearAllTabs: () =>
     set((state) => ({
@@ -847,7 +1023,56 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         tabs: [],
         modifiedAt: new Date(),
       },
+      selectedTabId: null,
     })),
+
+  // Wählt einen Tab aus (oder null zum Abwählen)
+  selectTab: (tabId) =>
+    set(() => ({
+      selectedTabId: tabId,
+    })),
+
+  // Aktualisiert die Position eines Tabs entlang der Kante (0-1)
+  // SYNCHRONISATION: Die gleiche Position wird automatisch auf alle
+  // "entsprechenden" Tabs an den anderen Board-Instanzen übertragen.
+  // "Entsprechend" = gleiche Kante + gleicher Index innerhalb der Kante.
+  updateTabPosition: (tabId, position) =>
+    set((state) => {
+      const tab = state.panel.tabs.find((t) => t.id === tabId);
+      if (!tab) return state;
+
+      const clampedPosition = Math.max(0, Math.min(1, position));
+
+      // Schritt 1: Index dieses Tabs innerhalb seiner Kanten-Gruppe ermitteln
+      const sourceGroupTabs = state.panel.tabs.filter(
+        (t) => t.boardInstanceId === tab.boardInstanceId && t.edge === tab.edge
+      );
+      const indexInGroup = sourceGroupTabs.findIndex((t) => t.id === tabId);
+      if (indexInGroup < 0) return state;
+
+      // Schritt 2: ALLE Tab-IDs sammeln die aktualisiert werden müssen
+      // Für JEDE Board-Instanz den Tab am gleichen Kanten-Index finden
+      const tabIdsToUpdate = new Set<string>();
+      for (const instance of state.panel.instances) {
+        const instanceEdgeTabs = state.panel.tabs.filter(
+          (t) => t.boardInstanceId === instance.id && t.edge === tab.edge
+        );
+        if (indexInGroup < instanceEdgeTabs.length) {
+          tabIdsToUpdate.add(instanceEdgeTabs[indexInGroup].id);
+        }
+      }
+
+      // Schritt 3: Alle gesammelten Tabs in einem Durchgang aktualisieren
+      return {
+        panel: {
+          ...state.panel,
+          tabs: state.panel.tabs.map((t) =>
+            tabIdsToUpdate.has(t.id) ? { ...t, position: clampedPosition } : t
+          ),
+          modifiedAt: new Date(),
+        },
+      };
+    }),
 
   // Verteilt Tabs automatisch auf alle Board-Kanten
   autoDistributeTabs: (config) =>
@@ -1009,7 +1234,386 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         vscoreLines: state.panel.vscoreLines.filter((l) => l.id !== lineId),
         modifiedAt: new Date(),
       },
+      // Falls die gelöschte Linie ausgewählt war, Auswahl zurücksetzen
+      selectedVScoreLineId:
+        state.selectedVScoreLineId === lineId ? null : state.selectedVScoreLineId,
     })),
+
+  clearAllVScoreLines: () =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        vscoreLines: [],
+        modifiedAt: new Date(),
+      },
+      selectedVScoreLineId: null,
+    })),
+
+  // Wählt eine V-Score Linie aus (oder null zum Abwählen)
+  selectVScoreLine: (lineId) =>
+    set(() => ({
+      selectedVScoreLineId: lineId,
+    })),
+
+  // Aktualisiert die Position einer V-Score Linie.
+  // Achsenbeschränkt: Horizontale Linien → nur Y-Position ändert sich,
+  // vertikale Linien → nur X-Position ändert sich.
+  // Start und End werden automatisch auf volle Panel-Breite/-Höhe gesetzt.
+  updateVScoreLinePosition: (lineId, position) =>
+    set((state) => {
+      const line = state.panel.vscoreLines.find((l) => l.id === lineId);
+      if (!line) return state;
+
+      // Orientierung bestimmen: horizontal wenn Y gleich, vertikal wenn X gleich
+      const isHorizontal = Math.abs(line.start.y - line.end.y) < 0.001;
+
+      return {
+        panel: {
+          ...state.panel,
+          vscoreLines: state.panel.vscoreLines.map((l) => {
+            if (l.id !== lineId) return l;
+
+            if (isHorizontal) {
+              // Horizontale Linie: Y-Position ändern, X bleibt 0 bis Panel-Breite
+              return {
+                ...l,
+                start: { x: 0, y: position },
+                end: { x: state.panel.width, y: position },
+              };
+            } else {
+              // Vertikale Linie: X-Position ändern, Y bleibt 0 bis Panel-Höhe
+              return {
+                ...l,
+                start: { x: position, y: 0 },
+                end: { x: position, y: state.panel.height },
+              };
+            }
+          }),
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
+  // Generiert V-Score Linien automatisch an allen Board-Kanten.
+  // V-Score Linien laufen immer von Kante zu Kante über das gesamte Panel.
+  autoDistributeVScoreLines: (config) =>
+    set((state) => {
+      const { panel } = state;
+      const { depth, angle, includeOuterEdges } = config;
+
+      // Alle einzigartigen X- und Y-Positionen der Board-Kanten sammeln
+      const xPositions = new Set<number>();
+      const yPositions = new Set<number>();
+
+      for (const instance of panel.instances) {
+        const board = panel.boards.find((b) => b.id === instance.boardId);
+        if (!board) continue;
+
+        // Board-Größe berechnen (berücksichtigt Layer-Rotation + Instanz-Rotation)
+        const layerRotation = board.layerRotation || 0;
+        const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+        const effectiveW = isLayerRotated ? board.height : board.width;
+        const effectiveH = isLayerRotated ? board.width : board.height;
+        const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
+        const displayW = isInstanceRotated ? effectiveH : effectiveW;
+        const displayH = isInstanceRotated ? effectiveW : effectiveH;
+
+        // Kanten-Positionen (auf 3 Dezimalstellen gerundet gegen Floating-Point)
+        const left = Math.round(instance.position.x * 1000) / 1000;
+        const right = Math.round((instance.position.x + displayW) * 1000) / 1000;
+        const bottom = Math.round(instance.position.y * 1000) / 1000;
+        const top = Math.round((instance.position.y + displayH) * 1000) / 1000;
+
+        xPositions.add(left);
+        xPositions.add(right);
+        yPositions.add(bottom);
+        yPositions.add(top);
+      }
+
+      // Sortieren für späteres Filtern
+      const sortedX = Array.from(xPositions).sort((a, b) => a - b);
+      const sortedY = Array.from(yPositions).sort((a, b) => a - b);
+
+      // Optional: Äußerste Kanten weglassen (nur innere Board-Kanten)
+      const filteredX = includeOuterEdges
+        ? sortedX
+        : sortedX.slice(1, -1); // Erste und letzte X-Position weglassen
+      const filteredY = includeOuterEdges
+        ? sortedY
+        : sortedY.slice(1, -1); // Erste und letzte Y-Position weglassen
+
+      // V-Score Linien erstellen
+      const newVScoreLines: VScoreLine[] = [];
+
+      // Für jede Y-Position: horizontale Linie (von x=0 bis x=panelWidth)
+      for (const y of filteredY) {
+        newVScoreLines.push({
+          id: uuidv4(),
+          start: { x: 0, y },
+          end: { x: panel.width, y },
+          depth,
+          angle,
+        });
+      }
+
+      // Für jede X-Position: vertikale Linie (von y=0 bis y=panelHeight)
+      for (const x of filteredX) {
+        newVScoreLines.push({
+          id: uuidv4(),
+          start: { x, y: 0 },
+          end: { x, y: panel.height },
+          depth,
+          angle,
+        });
+      }
+
+      return {
+        panel: {
+          ...panel,
+          vscoreLines: newVScoreLines,
+          modifiedAt: new Date(),
+        },
+        selectedVScoreLineId: null,
+      };
+    }),
+
+  // --------------------------------------------------------------------------
+  // Fräskonturen (Routing Contours)
+  // --------------------------------------------------------------------------
+
+  // Wählt eine Fräskontur aus (oder null zum Abwählen)
+  selectRoutingContour: (contourId) =>
+    set(() => ({
+      selectedRoutingContourId: contourId,
+    })),
+
+  // Entfernt eine einzelne Fräskontur
+  removeRoutingContour: (contourId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        routingContours: state.panel.routingContours.filter((c) => c.id !== contourId),
+        modifiedAt: new Date(),
+      },
+      selectedRoutingContourId:
+        state.selectedRoutingContourId === contourId ? null : state.selectedRoutingContourId,
+    })),
+
+  // Entfernt alle Fräskonturen
+  clearAllRoutingContours: () =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        routingContours: [],
+        modifiedAt: new Date(),
+      },
+      selectedRoutingContourId: null,
+    })),
+
+  // Schaltet die Sichtbarkeit einer Fräskontur um
+  toggleRoutingContourVisibility: (contourId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        routingContours: state.panel.routingContours.map((c) =>
+          c.id === contourId ? { ...c, visible: !c.visible } : c
+        ),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Aktualisiert die Fräskonturen-Konfiguration
+  setRoutingConfig: (config) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        routingConfig: { ...state.panel.routingConfig, ...config },
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Generiert Fräskonturen automatisch aus Board-Positionen und Tabs.
+  // Kern-Algorithmus:
+  // A) Board-Outline-Konturen: Für jedes Board eine Kontur mit Lücken an Tab-Positionen
+  // B) Panel-Außenkontur: Einfaches Rechteck (optional mit Eckenradius-Approximation)
+  autoGenerateRoutingContours: () =>
+    set((state) => {
+      const { panel } = state;
+      const { routingConfig } = panel;
+      const newContours: RoutingContour[] = [];
+
+      // === A) Board-Outline-Konturen ===
+      // Die Fräser-Mittellinie liegt NICHT auf der Board-Kante, sondern um den
+      // halben Fräser-Ø nach aussen versetzt (im Gap-Bereich). So schneidet
+      // der Fräser genau an der Board-Kante und ragt nicht ins Board hinein.
+      if (routingConfig.generateBoardOutlines) {
+        const toolRadius = routingConfig.toolDiameter / 2;
+
+        for (const instance of panel.instances) {
+          const board = panel.boards.find((b) => b.id === instance.boardId);
+          if (!board) continue;
+
+          // Board-Größe berechnen (berücksichtigt Layer-Rotation + Instanz-Rotation)
+          const layerRotation = board.layerRotation || 0;
+          const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+          const effectiveW = isLayerRotated ? board.height : board.width;
+          const effectiveH = isLayerRotated ? board.width : board.height;
+          const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
+          const displayW = isInstanceRotated ? effectiveH : effectiveW;
+          const displayH = isInstanceRotated ? effectiveW : effectiveH;
+
+          // Board-Position in absoluten Panel-Koordinaten
+          const bx = instance.position.x;
+          const by = instance.position.y;
+
+          // Versetzte Ecken (Fräser-Mittellinie im Gap)
+          // Das versetzte Rechteck ist um toolRadius grösser als das Board
+          const ox1 = bx - toolRadius;
+          const oy1 = by - toolRadius;
+          const ox2 = bx + displayW + toolRadius;
+          const oy2 = by + displayH + toolRadius;
+
+          // 4 Kanten der VERSETZTEN Kontur (Fräser-Mittellinie)
+          // Reihenfolge: bottom, right, top, left (im Uhrzeigersinn)
+          // boardEdgeLength = Kantenlänge des BOARDS (für Tab-Umrechnung)
+          const edges: Array<{
+            start: { x: number; y: number };
+            end: { x: number; y: number };
+            edgeName: 'bottom' | 'right' | 'top' | 'left';
+            boardEdgeLength: number;
+          }> = [
+            { start: { x: ox1, y: oy1 }, end: { x: ox2, y: oy1 }, edgeName: 'bottom', boardEdgeLength: displayW },
+            { start: { x: ox2, y: oy1 }, end: { x: ox2, y: oy2 }, edgeName: 'right', boardEdgeLength: displayH },
+            { start: { x: ox2, y: oy2 }, end: { x: ox1, y: oy2 }, edgeName: 'top', boardEdgeLength: displayW },
+            { start: { x: ox1, y: oy2 }, end: { x: ox1, y: oy1 }, edgeName: 'left', boardEdgeLength: displayH },
+          ];
+
+          // Alle Tabs für diese Board-Instanz holen
+          const instanceTabs = panel.tabs.filter(
+            (t) => t.boardInstanceId === instance.id
+          );
+
+          const segments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+
+          for (const edge of edges) {
+            const tabEdge = edge.edgeName;
+
+            // Tabs an dieser Kante finden (nur nicht-vscore Tabs)
+            const edgeTabs = instanceTabs.filter(
+              (t) => t.edge === tabEdge && t.type !== 'vscore'
+            );
+
+            if (edgeTabs.length === 0) {
+              // Keine Tabs → ganze Kante als ein Segment
+              segments.push({ start: edge.start, end: edge.end });
+              continue;
+            }
+
+            // Versetzte Kantenlänge = Board-Kante + 2 × toolRadius
+            const offsetEdgeLength = edge.boardEdgeLength + 2 * toolRadius;
+
+            // Tab-Lücken berechnen: Tab-Position (0-1 auf Board-Kante) auf
+            // versetzte Kante umrechnen, dann Lücke in normalisierten Einheiten
+            const gaps = edgeTabs
+              .map((t) => {
+                // Tab-Mitte auf der versetzten Kante (normalisiert 0-1)
+                const tabCenterOnOffset = (t.position * edge.boardEdgeLength + toolRadius) / offsetEdgeLength;
+                const halfWidth = t.width / 2 / offsetEdgeLength;
+                return {
+                  start: Math.max(0, tabCenterOnOffset - halfWidth),
+                  end: Math.min(1, tabCenterOnOffset + halfWidth),
+                };
+              })
+              .sort((a, b) => a.start - b.start);
+
+            // Kante in Segmente aufteilen (zwischen den Lücken)
+            let currentPos = 0;
+
+            for (const gap of gaps) {
+              if (gap.start > currentPos) {
+                const segStart = interpolatePoint(edge.start, edge.end, currentPos);
+                const segEnd = interpolatePoint(edge.start, edge.end, gap.start);
+                segments.push({ start: segStart, end: segEnd });
+              }
+              currentPos = gap.end;
+            }
+
+            // Rest nach letztem Tab
+            if (currentPos < 1) {
+              const segStart = interpolatePoint(edge.start, edge.end, currentPos);
+              segments.push({ start: segStart, end: edge.end });
+            }
+          }
+
+          newContours.push({
+            id: uuidv4(),
+            contourType: 'boardOutline',
+            boardInstanceId: instance.id,
+            segments,
+            toolDiameter: routingConfig.toolDiameter,
+            visible: true,
+          });
+        }
+      }
+
+      // === B) Panel-Außenkontur ===
+      if (routingConfig.generatePanelOutline) {
+        const w = panel.width;
+        const h = panel.height;
+        const r = panel.frame.cornerRadius;
+        const panelSegments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+
+        if (r > 0) {
+          // Ecken durch kurze Segmente annähern (8 Punkte pro Ecke)
+          const cornerSegments = 4; // Anzahl der Segmente pro Ecke
+
+          // Unten-links Ecke (0,0) nach (r,0) - mit Bogen
+          const blCorner = approximateCorner(r, 0, 0, r, Math.PI, Math.PI * 1.5, cornerSegments);
+          // Unten-rechts Ecke (w-r,0) nach (w,r) - mit Bogen
+          const brCorner = approximateCorner(w - r, 0, w, r, Math.PI * 1.5, Math.PI * 2, cornerSegments);
+          // Oben-rechts Ecke (w,h-r) nach (w-r,h) - mit Bogen
+          const trCorner = approximateCorner(w, h - r, w - r, h, 0, Math.PI * 0.5, cornerSegments);
+          // Oben-links Ecke (r,h) nach (0,h-r) - mit Bogen
+          const tlCorner = approximateCorner(r, h, 0, h - r, Math.PI * 0.5, Math.PI, cornerSegments);
+
+          // Bottom: BL-Ecke → gerade → BR-Ecke
+          panelSegments.push(...blCorner);
+          panelSegments.push({ start: { x: r, y: 0 }, end: { x: w - r, y: 0 } });
+          panelSegments.push(...brCorner);
+          // Right: BR-Ecke → gerade → TR-Ecke
+          panelSegments.push({ start: { x: w, y: r }, end: { x: w, y: h - r } });
+          panelSegments.push(...trCorner);
+          // Top: TR-Ecke → gerade → TL-Ecke
+          panelSegments.push({ start: { x: w - r, y: h }, end: { x: r, y: h } });
+          panelSegments.push(...tlCorner);
+          // Left: TL-Ecke → gerade → BL-Ecke
+          panelSegments.push({ start: { x: 0, y: h - r }, end: { x: 0, y: r } });
+        } else {
+          // Einfaches Rechteck: 4 Kanten
+          panelSegments.push({ start: { x: 0, y: 0 }, end: { x: w, y: 0 } }); // bottom
+          panelSegments.push({ start: { x: w, y: 0 }, end: { x: w, y: h } }); // right
+          panelSegments.push({ start: { x: w, y: h }, end: { x: 0, y: h } }); // top
+          panelSegments.push({ start: { x: 0, y: h }, end: { x: 0, y: 0 } }); // left
+        }
+
+        newContours.push({
+          id: uuidv4(),
+          contourType: 'panelOutline',
+          segments: panelSegments,
+          toolDiameter: routingConfig.toolDiameter,
+          visible: true,
+        });
+      }
+
+      return {
+        panel: {
+          ...panel,
+          routingContours: newContours,
+          modifiedAt: new Date(),
+        },
+        selectedRoutingContourId: null,
+      };
+    }),
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen
@@ -1187,3 +1791,18 @@ export const useSelectedFiducialId = () => usePanelStore((state) => state.select
  * Gibt die ausgewählte Tooling-Bohrung zurück
  */
 export const useSelectedToolingHoleId = () => usePanelStore((state) => state.selectedToolingHoleId);
+
+/**
+ * Gibt den ausgewählten Tab zurück
+ */
+export const useSelectedTabId = () => usePanelStore((state) => state.selectedTabId);
+
+/**
+ * Gibt die ausgewählte V-Score Linie zurück
+ */
+export const useSelectedVScoreLineId = () => usePanelStore((state) => state.selectedVScoreLineId);
+
+/**
+ * Gibt die ausgewählte Fräskontur zurück
+ */
+export const useSelectedRoutingContourId = () => usePanelStore((state) => state.selectedRoutingContourId);

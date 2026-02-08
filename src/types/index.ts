@@ -327,6 +327,52 @@ export interface ToolingHole {
 }
 
 /**
+ * Ein Segment einer Fräskontur (gerade Linie von Start bis End)
+ * Lücken zwischen Segmenten = Tabs (dort wird nicht gefräst)
+ */
+export interface RoutingSegment {
+  /** Startpunkt des Segments in mm */
+  start: Point;
+  /** Endpunkt des Segments in mm */
+  end: Point;
+}
+
+/**
+ * Eine vollständige Fräskontur (z.B. um ein Board oder um das Panel)
+ *
+ * Besteht aus mehreren Segmenten mit Lücken dazwischen (Tabs).
+ * Der Fräser fährt entlang dieser Segmente und schneidet das Material weg.
+ */
+export interface RoutingContour {
+  /** Eindeutige ID */
+  id: string;
+  /** Typ der Kontur: boardOutline = um ein Board, panelOutline = um das Panel */
+  contourType: 'boardOutline' | 'panelOutline';
+  /** Bei boardOutline: Referenz zur Board-Instanz */
+  boardInstanceId?: string;
+  /** Einzelne Liniensegmente (Lücken = Tabs, dort wird nicht gefräst) */
+  segments: RoutingSegment[];
+  /** Fräser-Durchmesser in mm */
+  toolDiameter: number;
+  /** Sichtbarkeit im Canvas */
+  visible: boolean;
+}
+
+/**
+ * Konfiguration für die automatische Fräskonturen-Generierung
+ */
+export interface RoutingConfig {
+  /** Fräser-Durchmesser in mm (Standard: 2.0) */
+  toolDiameter: number;
+  /** Board-Konturen automatisch generieren */
+  generateBoardOutlines: boolean;
+  /** Panel-Außenkontur automatisch generieren */
+  generatePanelOutline: boolean;
+  /** Zusätzlicher Sicherheitsabstand in mm (Standard: 0) */
+  clearance: number;
+}
+
+/**
  * V-Score Linie
  */
 export interface VScoreLine {
@@ -367,6 +413,10 @@ export interface Panel {
   toolingHoles: ToolingHole[];
   /** V-Score Linien */
   vscoreLines: VScoreLine[];
+  /** Fräskonturen (um Boards und Panel) */
+  routingContours: RoutingContour[];
+  /** Konfiguration für Fräskonturen-Generierung */
+  routingConfig: RoutingConfig;
   /** Erstellungsdatum */
   createdAt: Date;
   /** Letzte Änderung */

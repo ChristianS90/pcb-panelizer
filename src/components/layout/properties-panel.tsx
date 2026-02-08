@@ -23,9 +23,13 @@ import {
   Circle,
   Info,
   RotateCcw,
+  Scissors,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
-import { usePanelStore, usePanel, useGrid } from '@/stores/panel-store';
+import { usePanelStore, usePanel, useGrid, useSelectedTabId, useSelectedVScoreLineId, useSelectedRoutingContourId } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
+import type { Tab, VScoreLine, RoutingContour } from '@/types';
 
 // ============================================================================
 // Haupt Properties Panel
@@ -37,6 +41,8 @@ export function PropertiesPanel() {
     frame: true,
     array: false,
     tabs: false,
+    vscore: false,
+    routing: false,
     fiducials: false,
     tooling: false,
     dimensions: true,
@@ -79,6 +85,26 @@ export function PropertiesPanel() {
         onToggle={() => toggleSection('tabs')}
       >
         <TabsConfig />
+      </PropertySection>
+
+      {/* V-Score Konfiguration */}
+      <PropertySection
+        title="V-Score"
+        icon={<Minus className="w-4 h-4 -rotate-45" />}
+        expanded={expandedSections.vscore}
+        onToggle={() => toggleSection('vscore')}
+      >
+        <VScoreConfig />
+      </PropertySection>
+
+      {/* Fräskonturen-Konfiguration */}
+      <PropertySection
+        title="Fräskonturen"
+        icon={<Scissors className="w-4 h-4" />}
+        expanded={expandedSections.routing}
+        onToggle={() => toggleSection('routing')}
+      >
+        <RoutingContoursConfig />
       </PropertySection>
 
       {/* Fiducial-Konfiguration */}
@@ -462,6 +488,9 @@ function TabsConfig() {
   const autoDistributeTabs = usePanelStore((state) => state.autoDistributeTabs);
   const clearAllTabs = usePanelStore((state) => state.clearAllTabs);
   const removeTab = usePanelStore((state) => state.removeTab);
+  const selectTab = usePanelStore((state) => state.selectTab);
+  const updateTabPosition = usePanelStore((state) => state.updateTabPosition);
+  const selectedTabId = useSelectedTabId();
 
   const tabCount = panel.tabs.length;
   const instanceCount = panel.instances.length;
@@ -482,6 +511,31 @@ function TabsConfig() {
       holeDiameter: tabType === 'mousebites' ? holeDiameter : undefined,
       holeSpacing: tabType === 'mousebites' ? holeSpacing : undefined,
     });
+  };
+
+  // Hilfsfunktion: Kantenlänge für einen Tab berechnen
+  const getEdgeLength = (tab: Tab): number => {
+    const instance = panel.instances.find((i) => i.id === tab.boardInstanceId);
+    if (!instance) return 0;
+    const board = panel.boards.find((b) => b.id === instance.boardId);
+    if (!board) return 0;
+
+    const isRotated = instance.rotation === 90 || instance.rotation === 270;
+    const bWidth = isRotated ? board.height : board.width;
+    const bHeight = isRotated ? board.width : board.height;
+
+    return (tab.edge === 'top' || tab.edge === 'bottom') ? bWidth : bHeight;
+  };
+
+  // Kanten-Label auf Deutsch
+  const edgeLabel = (edge: string) => {
+    switch (edge) {
+      case 'top': return 'Oben';
+      case 'bottom': return 'Unten';
+      case 'left': return 'Links';
+      case 'right': return 'Rechts';
+      default: return edge;
+    }
   };
 
   return (
@@ -580,6 +634,725 @@ function TabsConfig() {
           Zuerst Boards im Panel platzieren.
         </p>
       )}
+
+      {/* ================================================================ */}
+      {/* Liste der platzierten Tabs (nur erste Instanz, Rest wird sync) */}
+      {/* ================================================================ */}
+      {tabCount > 0 && panel.instances.length > 0 && (() => {
+        // Nur Tabs der ERSTEN Board-Instanz anzeigen
+        // Änderungen werden automatisch auf alle anderen Boards übertragen
+        const firstInstanceId = panel.instances[0].id;
+        const firstInstanceTabs = panel.tabs.filter(
+          (t) => t.boardInstanceId === firstInstanceId
+        );
+
+        return (
+          <div className="border-t pt-3 mt-3 space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-gray-700">Platzierte Tabs:</span>
+            </div>
+
+            {/* Hinweis: Synchronisation */}
+            {panel.instances.length > 1 && (
+              <div className="text-[10px] text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                Änderungen werden auf alle {panel.instances.length} Boards übertragen.
+              </div>
+            )}
+
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {firstInstanceTabs.map((tab, index) => {
+                const edgeLen = getEdgeLength(tab);
+
+                return (
+                  <TabItem
+                    key={tab.id}
+                    index={index + 1}
+                    tab={tab}
+                    edgeLength={edgeLen}
+                    edgeLabelText={edgeLabel(tab.edge)}
+                    isSelected={tab.id === selectedTabId}
+                    onSelect={() => selectTab(tab.id)}
+                    onUpdatePosition={(pos) => updateTabPosition(tab.id, pos)}
+                    onRemove={() => removeTab(tab.id)}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ============================================================================
+// Einzelnes Tab-Item mit editierbaren Koordinaten
+// ============================================================================
+
+interface TabItemProps {
+  index: number;
+  tab: Tab;
+  edgeLength: number;
+  edgeLabelText: string;
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdatePosition: (normalizedPosition: number) => void;
+  onRemove: () => void;
+}
+
+function TabItem({
+  index,
+  tab,
+  edgeLength,
+  edgeLabelText,
+  isSelected,
+  onSelect,
+  onUpdatePosition,
+  onRemove,
+}: TabItemProps) {
+  // Absolute Position in mm = normalisierte Position * Kantenlänge
+  const absoluteMM = tab.position * edgeLength;
+  const [posValue, setPosValue] = useState(absoluteMM.toFixed(2));
+
+  // Aktualisiere lokalen Wert wenn sich die Position ändert (z.B. durch Drag)
+  useEffect(() => {
+    setPosValue((tab.position * edgeLength).toFixed(2));
+  }, [tab.position, edgeLength]);
+
+  // Position-Eingabe übernehmen: mm → normalisiert (0-1)
+  const handlePosBlur = () => {
+    const mm = parseFloat(posValue);
+    if (!isNaN(mm) && edgeLength > 0) {
+      const normalized = Math.max(0.05, Math.min(0.95, mm / edgeLength));
+      onUpdatePosition(normalized);
+    } else {
+      setPosValue(absoluteMM.toFixed(2));
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handlePosBlur();
+  };
+
+  // Farbige Markierung je nach Tab-Typ
+  const typeColor = tab.type === 'mousebites'
+    ? 'text-blue-600'
+    : tab.type === 'vscore'
+      ? 'text-pink-600'
+      : 'text-orange-600';
+
+  const typeBg = tab.type === 'mousebites'
+    ? 'bg-blue-50'
+    : tab.type === 'vscore'
+      ? 'bg-pink-50'
+      : 'bg-orange-50';
+
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        "rounded p-2 text-xs cursor-pointer transition-all",
+        isSelected
+          ? "bg-orange-100 ring-2 ring-orange-400 shadow-lg shadow-orange-200"
+          : "bg-gray-50 hover:bg-gray-100"
+      )}
+    >
+      {/* Kopfzeile: Tab-Nummer, Typ, Kante, Löschen */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-1.5">
+          <span className={cn("font-medium", isSelected ? "text-orange-700" : "text-gray-700")}>
+            Tab {index} {isSelected && "✓"}
+          </span>
+          <span className={cn("px-1 py-0.5 rounded text-[10px]", typeBg, typeColor)}>
+            {tab.type === 'mousebites' ? 'MB' : tab.type === 'vscore' ? 'VS' : 'Solid'}
+          </span>
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="text-red-400 hover:text-red-600 text-xs"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Infos: Kante */}
+      <div className="text-[10px] text-gray-500 mb-1.5">
+        Kante: {edgeLabelText}
+      </div>
+
+      {/* Position in mm (editierbar) */}
+      <div className="flex items-center gap-1">
+        <span className="text-gray-500 w-8">Pos:</span>
+        <input
+          type="text"
+          value={posValue}
+          onChange={(e) => setPosValue(e.target.value)}
+          onBlur={handlePosBlur}
+          onKeyDown={handleKeyDown}
+          onClick={(e) => e.stopPropagation()}
+          className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
+        />
+        <span className="text-gray-400 text-[10px]">mm / {edgeLength.toFixed(1)}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// V-Score-Konfiguration
+// ============================================================================
+
+function VScoreConfig() {
+  // Einstellungen für Auto-Generierung
+  const [depth, setDepth] = useState(33);
+  const [angle, setAngle] = useState(30);
+  const [includeOuterEdges, setIncludeOuterEdges] = useState(false);
+
+  const panel = usePanel();
+  const addVScoreLine = usePanelStore((state) => state.addVScoreLine);
+  const removeVScoreLine = usePanelStore((state) => state.removeVScoreLine);
+  const clearAllVScoreLines = usePanelStore((state) => state.clearAllVScoreLines);
+  const selectVScoreLine = usePanelStore((state) => state.selectVScoreLine);
+  const updateVScoreLinePosition = usePanelStore((state) => state.updateVScoreLinePosition);
+  const autoDistributeVScoreLines = usePanelStore((state) => state.autoDistributeVScoreLines);
+  const selectedVScoreLineId = useSelectedVScoreLineId();
+
+  const lineCount = panel.vscoreLines.length;
+  const instanceCount = panel.instances.length;
+
+  /**
+   * Generiert V-Score Linien automatisch an allen Board-Kanten
+   */
+  const handleAutoGenerate = () => {
+    if (instanceCount === 0) {
+      alert('Bitte zuerst mindestens ein Board platzieren!');
+      return;
+    }
+
+    autoDistributeVScoreLines({ depth, angle, includeOuterEdges });
+  };
+
+  /**
+   * Fügt eine horizontale V-Score Linie in der Panel-Mitte hinzu
+   */
+  const addHorizontalLine = () => {
+    addVScoreLine({
+      start: { x: 0, y: panel.height / 2 },
+      end: { x: panel.width, y: panel.height / 2 },
+      depth,
+      angle,
+    });
+  };
+
+  /**
+   * Fügt eine vertikale V-Score Linie in der Panel-Mitte hinzu
+   */
+  const addVerticalLine = () => {
+    addVScoreLine({
+      start: { x: panel.width / 2, y: 0 },
+      end: { x: panel.width / 2, y: panel.height },
+      depth,
+      angle,
+    });
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Info-Text */}
+      <p className="text-xs text-gray-500">
+        V-Score Linien sind durchgehende Ritzlinien von Kante zu Kante.
+        Sie ermöglichen das Auseinanderbrechen der Boards.
+      </p>
+
+      {/* Vorhandene V-Scores anzeigen */}
+      {lineCount > 0 && (
+        <div className="flex items-center justify-between bg-pink-50 text-pink-700 text-xs px-2 py-1 rounded">
+          <span>{lineCount} V-Score Linie(n)</span>
+          <button
+            onClick={clearAllVScoreLines}
+            className="text-red-500 hover:text-red-700"
+          >
+            Alle löschen
+          </button>
+        </div>
+      )}
+
+      {/* Tiefe und Winkel */}
+      <div className="grid grid-cols-2 gap-2">
+        <NumberInput
+          label="Tiefe"
+          value={depth}
+          onChange={setDepth}
+          unit="%"
+          min={10}
+          max={80}
+          step={1}
+        />
+        <NumberInput
+          label="Winkel"
+          value={angle}
+          onChange={setAngle}
+          unit="°"
+          min={15}
+          max={60}
+          step={5}
+        />
+      </div>
+
+      {/* Äußere Kanten Checkbox */}
+      <div className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          id="includeOuterEdges"
+          className="rounded"
+          checked={includeOuterEdges}
+          onChange={(e) => setIncludeOuterEdges(e.target.checked)}
+        />
+        <label htmlFor="includeOuterEdges" className="text-xs text-gray-600">
+          Auch äußere Board-Kanten
+        </label>
+      </div>
+
+      {/* Auto-Generierung */}
+      <button
+        onClick={handleAutoGenerate}
+        disabled={instanceCount === 0}
+        className="w-full btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        V-Score automatisch generieren
+      </button>
+
+      {instanceCount === 0 && (
+        <p className="text-xs text-amber-600">
+          Zuerst Boards im Panel platzieren.
+        </p>
+      )}
+
+      {/* Manuelle Linien hinzufügen */}
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          onClick={addHorizontalLine}
+          className="btn-secondary text-xs py-1.5"
+        >
+          + Horizontal
+        </button>
+        <button
+          onClick={addVerticalLine}
+          className="btn-secondary text-xs py-1.5"
+        >
+          + Vertikal
+        </button>
+      </div>
+
+      {/* Liste der V-Score Linien */}
+      {lineCount > 0 && (
+        <div className="border-t pt-3 mt-3 space-y-2">
+          <span className="text-xs font-medium text-gray-700">Platzierte V-Scores:</span>
+
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {panel.vscoreLines.map((line, index) => (
+              <VScoreLineItem
+                key={line.id}
+                index={index + 1}
+                line={line}
+                panelWidth={panel.width}
+                panelHeight={panel.height}
+                isSelected={line.id === selectedVScoreLineId}
+                onSelect={() => selectVScoreLine(line.id)}
+                onUpdatePosition={(pos) => updateVScoreLinePosition(line.id, pos)}
+                onRemove={() => removeVScoreLine(line.id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Einzelnes V-Score-Line-Item mit editierbarer Position
+// ============================================================================
+
+interface VScoreLineItemProps {
+  index: number;
+  line: VScoreLine;
+  panelWidth: number;
+  panelHeight: number;
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdatePosition: (position: number) => void;
+  onRemove: () => void;
+}
+
+function VScoreLineItem({
+  index,
+  line,
+  panelWidth,
+  panelHeight,
+  isSelected,
+  onSelect,
+  onUpdatePosition,
+  onRemove,
+}: VScoreLineItemProps) {
+  // Orientierung bestimmen: horizontal wenn Y gleich, vertikal wenn X gleich
+  const isHorizontal = Math.abs(line.start.y - line.end.y) < 0.001;
+
+  // Position: Y für horizontal, X für vertikal
+  const position = isHorizontal ? line.start.y : line.start.x;
+  const [posValue, setPosValue] = useState(position.toFixed(2));
+
+  // Aktualisiere lokalen Wert wenn sich die Position ändert (z.B. durch Drag)
+  useEffect(() => {
+    const pos = isHorizontal ? line.start.y : line.start.x;
+    setPosValue(pos.toFixed(2));
+  }, [line.start, isHorizontal]);
+
+  // Position-Eingabe übernehmen
+  const handlePosBlur = () => {
+    const mm = parseFloat(posValue);
+    if (!isNaN(mm)) {
+      // Begrenzen auf Panel-Größe
+      const maxVal = isHorizontal ? panelHeight : panelWidth;
+      const clamped = Math.max(0, Math.min(maxVal, mm));
+      onUpdatePosition(clamped);
+    } else {
+      setPosValue(position.toFixed(2));
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handlePosBlur();
+  };
+
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        "rounded p-2 text-xs cursor-pointer transition-all",
+        isSelected
+          ? "bg-pink-100 ring-2 ring-pink-400 shadow-lg shadow-pink-200"
+          : "bg-gray-50 hover:bg-gray-100"
+      )}
+    >
+      {/* Kopfzeile: V-Score-Nummer, H/V Badge, Löschen */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-1.5">
+          <span className={cn("font-medium", isSelected ? "text-pink-700" : "text-gray-700")}>
+            V-Score {index} {isSelected && "✓"}
+          </span>
+          <span className={cn(
+            "px-1 py-0.5 rounded text-[10px]",
+            isHorizontal ? "bg-pink-50 text-pink-600" : "bg-purple-50 text-purple-600"
+          )}>
+            {isHorizontal ? 'H' : 'V'}
+          </span>
+        </div>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="text-red-400 hover:text-red-600 text-xs"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Position in mm (editierbar) */}
+      <div className="flex items-center gap-1">
+        <span className="text-gray-500 w-4">{isHorizontal ? 'Y:' : 'X:'}</span>
+        <input
+          type="text"
+          value={posValue}
+          onChange={(e) => setPosValue(e.target.value)}
+          onBlur={handlePosBlur}
+          onKeyDown={handleKeyDown}
+          onClick={(e) => e.stopPropagation()}
+          className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
+        />
+        <span className="text-gray-400 text-[10px]">mm</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Fräskonturen-Konfiguration
+// ============================================================================
+
+function RoutingContoursConfig() {
+  const panel = usePanel();
+  const setRoutingConfig = usePanelStore((state) => state.setRoutingConfig);
+  const autoGenerateRoutingContours = usePanelStore((state) => state.autoGenerateRoutingContours);
+  const clearAllRoutingContours = usePanelStore((state) => state.clearAllRoutingContours);
+  const removeRoutingContour = usePanelStore((state) => state.removeRoutingContour);
+  const toggleRoutingContourVisibility = usePanelStore((state) => state.toggleRoutingContourVisibility);
+  const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
+  const selectedRoutingContourId = useSelectedRoutingContourId();
+
+  const { routingConfig, routingContours } = panel;
+  const contourCount = routingContours.length;
+  const instanceCount = panel.instances.length;
+
+  // Warnung wenn Gap < Fräser-Ø
+  // Wir berechnen den Gap aus dem Array-Abstand (Differenz zwischen Board-Positionen)
+  const boards = panel.boards;
+  const instances = panel.instances;
+  let gapWarning: string | null = null;
+
+  if (instances.length >= 2 && boards.length > 0) {
+    const board = boards.find((b) => b.id === instances[0].boardId);
+    if (board) {
+      // Einfache Heuristik: Abstand zwischen erstem und zweitem Board prüfen
+      const sortedByX = [...instances].sort((a, b) => a.position.x - b.position.x);
+      const sortedByY = [...instances].sort((a, b) => a.position.y - b.position.y);
+
+      // Gap X berechnen (Abstand zwischen nebeneinanderliegenden Boards)
+      if (sortedByX.length >= 2) {
+        const isRotated = sortedByX[0].rotation === 90 || sortedByX[0].rotation === 270;
+        const bWidth = isRotated ? board.height : board.width;
+        const gapX = sortedByX[1].position.x - sortedByX[0].position.x - bWidth;
+        if (gapX > 0 && gapX < routingConfig.toolDiameter) {
+          gapWarning = `Abstand X (${gapX.toFixed(1)} mm) < Fräser-Ø (${routingConfig.toolDiameter} mm)!`;
+        }
+      }
+
+      // Gap Y berechnen
+      if (!gapWarning && sortedByY.length >= 2) {
+        const isRotated = sortedByY[0].rotation === 90 || sortedByY[0].rotation === 270;
+        const bHeight = isRotated ? board.width : board.height;
+        const gapY = sortedByY[1].position.y - sortedByY[0].position.y - bHeight;
+        if (gapY > 0 && gapY < routingConfig.toolDiameter) {
+          gapWarning = `Abstand Y (${gapY.toFixed(1)} mm) < Fräser-Ø (${routingConfig.toolDiameter} mm)!`;
+        }
+      }
+    }
+  }
+
+  // Board-Name für eine Board-Instanz-ID finden
+  const getBoardNameForInstance = (instanceId: string): string => {
+    const instance = instances.find((i) => i.id === instanceId);
+    if (!instance) return '?';
+    const board = boards.find((b) => b.id === instance.boardId);
+    return board?.name || '?';
+  };
+
+  return (
+    <div className="space-y-3">
+      {/* Info-Text */}
+      <p className="text-xs text-gray-500">
+        Fräskonturen definieren den Fräsverlauf um und zwischen den Boards.
+      </p>
+
+      {/* Vorhandene Konturen anzeigen */}
+      {contourCount > 0 && (
+        <div className="flex items-center justify-between bg-cyan-50 text-cyan-700 text-xs px-2 py-1 rounded">
+          <span>{contourCount} Fräskontur(en)</span>
+          <button
+            onClick={clearAllRoutingContours}
+            className="text-red-500 hover:text-red-700"
+          >
+            Alle löschen
+          </button>
+        </div>
+      )}
+
+      {/* Fräser-Ø */}
+      <NumberInput
+        label="Fräser-Ø"
+        value={routingConfig.toolDiameter}
+        onChange={(v) => setRoutingConfig({ toolDiameter: v })}
+        min={0.5}
+        max={5.0}
+        step={0.1}
+      />
+
+      {/* Sicherheitsabstand */}
+      <NumberInput
+        label="Sicherheitsabstand"
+        value={routingConfig.clearance}
+        onChange={(v) => setRoutingConfig({ clearance: v })}
+        min={0}
+        max={2.0}
+        step={0.1}
+      />
+
+      {/* Checkboxen */}
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="genBoardOutlines"
+            className="rounded"
+            checked={routingConfig.generateBoardOutlines}
+            onChange={(e) => setRoutingConfig({ generateBoardOutlines: e.target.checked })}
+          />
+          <label htmlFor="genBoardOutlines" className="text-xs text-gray-600">
+            Board-Konturen
+          </label>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            id="genPanelOutline"
+            className="rounded"
+            checked={routingConfig.generatePanelOutline}
+            onChange={(e) => setRoutingConfig({ generatePanelOutline: e.target.checked })}
+          />
+          <label htmlFor="genPanelOutline" className="text-xs text-gray-600">
+            Panel-Außenkontur
+          </label>
+        </div>
+      </div>
+
+      {/* Warnung bei zu kleinem Gap */}
+      {gapWarning && (
+        <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">
+          ⚠ {gapWarning}
+        </div>
+      )}
+
+      {/* Generieren-Button */}
+      <button
+        onClick={autoGenerateRoutingContours}
+        disabled={instanceCount === 0}
+        className="w-full btn-primary text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        Fräskonturen generieren
+      </button>
+
+      {instanceCount === 0 && (
+        <p className="text-xs text-amber-600">
+          Zuerst Boards im Panel platzieren.
+        </p>
+      )}
+
+      {/* Liste der Fräskonturen */}
+      {contourCount > 0 && (
+        <div className="border-t pt-3 mt-3 space-y-2">
+          <span className="text-xs font-medium text-gray-700">Platzierte Konturen:</span>
+
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {routingContours.map((contour, index) => (
+              <RoutingContourItem
+                key={contour.id}
+                index={index + 1}
+                contour={contour}
+                boardName={contour.boardInstanceId ? getBoardNameForInstance(contour.boardInstanceId) : undefined}
+                isSelected={contour.id === selectedRoutingContourId}
+                onSelect={() => selectRoutingContour(contour.id)}
+                onToggleVisibility={() => toggleRoutingContourVisibility(contour.id)}
+                onRemove={() => removeRoutingContour(contour.id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Einzelnes Routing-Contour-Item
+// ============================================================================
+
+interface RoutingContourItemProps {
+  index: number;
+  contour: RoutingContour;
+  boardName?: string;
+  isSelected: boolean;
+  onSelect: () => void;
+  onToggleVisibility: () => void;
+  onRemove: () => void;
+}
+
+function RoutingContourItem({
+  index,
+  contour,
+  boardName,
+  isSelected,
+  onSelect,
+  onToggleVisibility,
+  onRemove,
+}: RoutingContourItemProps) {
+  const isBoardOutline = contour.contourType === 'boardOutline';
+
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        "rounded p-2 text-xs cursor-pointer transition-all",
+        isSelected
+          ? isBoardOutline
+            ? "bg-cyan-100 ring-2 ring-cyan-400 shadow-lg shadow-cyan-200"
+            : "bg-orange-100 ring-2 ring-orange-400 shadow-lg shadow-orange-200"
+          : "bg-gray-50 hover:bg-gray-100"
+      )}
+    >
+      {/* Kopfzeile: Kontur-Nummer, Typ-Badge, Sichtbarkeit, Löschen */}
+      <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center gap-1.5">
+          <span className={cn(
+            "font-medium",
+            isSelected
+              ? isBoardOutline ? "text-cyan-700" : "text-orange-700"
+              : "text-gray-700"
+          )}>
+            Kontur {index} {isSelected && "✓"}
+          </span>
+          <span className={cn(
+            "px-1 py-0.5 rounded text-[10px]",
+            isBoardOutline
+              ? "bg-cyan-50 text-cyan-600"
+              : "bg-orange-50 text-orange-600"
+          )}>
+            {isBoardOutline ? 'Board' : 'Panel'}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          {/* Sichtbarkeits-Toggle */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onToggleVisibility();
+            }}
+            className="text-gray-400 hover:text-gray-600"
+            title={contour.visible ? 'Ausblenden' : 'Einblenden'}
+          >
+            {contour.visible ? (
+              <Eye className="w-3.5 h-3.5" />
+            ) : (
+              <EyeOff className="w-3.5 h-3.5" />
+            )}
+          </button>
+          {/* Löschen */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onRemove();
+            }}
+            className="text-red-400 hover:text-red-600 text-xs"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {/* Board-Name bei boardOutline */}
+      {isBoardOutline && boardName && (
+        <div className="text-[10px] text-gray-500">
+          Board: {boardName}
+        </div>
+      )}
+
+      {/* Segment-Anzahl */}
+      <div className="text-[10px] text-gray-400">
+        {contour.segments.length} Segment(e)
+      </div>
     </div>
   );
 }

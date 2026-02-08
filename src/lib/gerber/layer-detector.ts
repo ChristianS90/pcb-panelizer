@@ -233,20 +233,20 @@ export function getAllLayerTypes(): { type: GerberLayerType; label: string }[] {
  */
 export function getLayerLabel(type: GerberLayerType): string {
   const labels: Record<GerberLayerType, string> = {
-    'top-copper': 'Top Copper',
-    'bottom-copper': 'Bottom Copper',
-    'inner-copper': 'Inner Copper',
-    'top-soldermask': 'Top Soldermask',
-    'bottom-soldermask': 'Bottom Soldermask',
-    'top-silkscreen': 'Top Silkscreen',
-    'bottom-silkscreen': 'Bottom Silkscreen',
-    'top-paste': 'Top Paste',
-    'bottom-paste': 'Bottom Paste',
-    'outline': 'Outline',
-    'drill': 'Drill (PTH)',
-    'drill-npth': 'Drill (NPTH)',
-    'unknown': 'Unknown',
+    'top-copper': 'Top Kupfer',
+    'bottom-copper': 'Bottom Kupfer',
+    'inner-copper': 'Innenlage Kupfer',
+    'top-soldermask': 'Top Lötstopplack',
+    'bottom-soldermask': 'Bottom Lötstopplack',
+    'top-silkscreen': 'Top Bestückungsdruck',
+    'bottom-silkscreen': 'Bottom Bestückungsdruck',
+    'top-paste': 'Top Lötpaste',
+    'bottom-paste': 'Bottom Lötpaste',
+    'outline': 'Kontur / Outline',
+    'drill': 'Bohrungen (PTH)',
+    'drill-npth': 'Bohrungen (NPTH)',
+    'unknown': '⚠ Unbekannt',
   };
 
-  return labels[type] || 'Unknown';
+  return labels[type] || '⚠ Unbekannt';
 }

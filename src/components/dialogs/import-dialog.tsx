@@ -55,8 +55,9 @@ type ImportStep = 'upload' | 'review' | 'importing' | 'success' | 'error';
 // ============================================================================
 
 export function ImportDialog({ isOpen, onClose }: ImportDialogProps) {
-  // Store-Aktion
+  // Store-Aktionen
   const addBoard = usePanelStore((state) => state.addBoard);
+  const addBoardInstance = usePanelStore((state) => state.addBoardInstance);
 
   // Lokaler State
   const [step, setStep] = useState<ImportStep>('upload');
@@ -209,6 +210,10 @@ export function ImportDialog({ isOpen, onClose }: ImportDialogProps) {
 
     // Zum Store hinzufügen
     addBoard(board);
+
+    // Board automatisch im Panel platzieren (innerhalb des Nutzenrands)
+    const frame = usePanelStore.getState().panel.frame;
+    addBoardInstance(board.id, { x: frame.left, y: frame.top });
 
     // Erfolg anzeigen
     setStep('success');
@@ -586,7 +591,7 @@ function SuccessStep({ boardName }: { boardName: string }) {
       <CheckCircle className="w-16 h-16 mx-auto mb-4 text-green-500" />
       <p className="text-lg font-medium text-gray-700">Import erfolgreich!</p>
       <p className="text-sm text-gray-500 mt-2">
-        &quot;{boardName}&quot; wurde zur Board-Library hinzugefügt.
+        &quot;{boardName}&quot; wurde importiert und im Panel platziert.
       </p>
     </div>
   );

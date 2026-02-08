@@ -16,14 +16,12 @@ import {
   Wrench,
   Eye,
   EyeOff,
-  Plus,
   Trash2,
   ChevronDown,
   ChevronRight,
   CircleDot,
   Circle,
   Minus,
-  RotateCw,
   RotateCcw,
   FlipHorizontal,
   FlipVertical,
@@ -293,7 +291,6 @@ function LayerPanel() {
 
 function BoardsPanel() {
   const boards = useBoards();
-  const addBoardInstance = usePanelStore((state) => state.addBoardInstance);
   const rotateBoardLayers = usePanelStore((state) => state.rotateBoardLayers);
   const toggleBoardMirrorX = usePanelStore((state) => state.toggleBoardMirrorX);
   const toggleBoardMirrorY = usePanelStore((state) => state.toggleBoardMirrorY);
@@ -309,15 +306,6 @@ function BoardsPanel() {
       </div>
     );
   }
-
-  /**
-   * Platziert ein Board im Panel
-   */
-  const handlePlaceBoard = (boardId: string) => {
-    // Board in der Mitte des Rahmens platzieren
-    // (später: basierend auf Panel-Konfiguration)
-    addBoardInstance(boardId, { x: 10, y: 10 });
-  };
 
   return (
     <div className="space-y-2">
@@ -387,25 +375,7 @@ function BoardsPanel() {
             </button>
           </div>
 
-          {/* Aktionen */}
-          <div className="flex gap-2">
-            <button
-              onClick={() => handlePlaceBoard(board.id)}
-              className="flex-1 text-xs bg-gray-100 hover:bg-primary-100
-                         text-gray-700 hover:text-primary-700 py-1.5 px-2
-                         rounded transition-colors flex items-center justify-center gap-1"
-            >
-              <Plus className="w-3 h-3" />
-              Platzieren
-            </button>
-            <button
-              className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-700
-                         py-1.5 px-2 rounded transition-colors"
-              title="Array erstellen"
-            >
-              <LayoutGrid className="w-3 h-3" />
-            </button>
-          </div>
+          {/* Hinweis: Board wird beim Import automatisch platziert */}
         </div>
       ))}
     </div>
@@ -500,6 +470,17 @@ function ToolsPanel() {
           </li>
           <li>
             <kbd className="px-1 bg-white rounded border">Del</kbd> Löschen
+          </li>
+          <li>
+            <kbd className="px-1 bg-white rounded border">ESC</kbd> Werkzeug abbrechen
+          </li>
+        </ul>
+        <p className="mt-2 font-medium mb-1">Werkzeug-Tipps:</p>
+        <ul className="space-y-0.5">
+          <li>Klick ins Canvas = Element platzieren</li>
+          <li>Mehrfach klicken = mehrere platzieren</li>
+          <li>
+            <kbd className="px-1 bg-white rounded border">Shift</kbd>+Klick = V-Score vertikal
           </li>
         </ul>
       </div>

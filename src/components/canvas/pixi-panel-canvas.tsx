@@ -19,10 +19,13 @@ import {
   useActiveTool,
   useSelectedFiducialId,
   useSelectedToolingHoleId,
+  useSelectedTabId,
+  useSelectedVScoreLineId,
+  useSelectedRoutingContourId,
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
-import type { BoardInstance, Board, GerberFile, Fiducial, ToolingHole, Tab } from '@/types';
+import type { BoardInstance, Board, GerberFile, Fiducial, ToolingHole, Tab, VScoreLine, RoutingContour } from '@/types';
 
 // ============================================================================
 // Konstanten
@@ -55,13 +58,31 @@ export function PixiPanelCanvas() {
   const instances = useInstances();
   const selectedFiducialId = useSelectedFiducialId();
   const selectedToolingHoleId = useSelectedToolingHoleId();
+  const selectedTabId = useSelectedTabId();
+  const selectedVScoreLineId = useSelectedVScoreLineId();
+  const selectedRoutingContourId = useSelectedRoutingContourId();
+
+  // Aktives Werkzeug (z.B. 'select', 'place-fiducial', 'place-hole', 'place-vscore', 'place-tab')
+  const activeTool = useActiveTool();
 
   // Store-Aktionen
   const setViewport = usePanelStore((state) => state.setViewport);
+  const setActiveTool = usePanelStore((state) => state.setActiveTool);
   const selectFiducial = usePanelStore((state) => state.selectFiducial);
   const updateFiducialPosition = usePanelStore((state) => state.updateFiducialPosition);
   const selectToolingHole = usePanelStore((state) => state.selectToolingHole);
   const updateToolingHolePosition = usePanelStore((state) => state.updateToolingHolePosition);
+  const selectTab = usePanelStore((state) => state.selectTab);
+  const updateTabPosition = usePanelStore((state) => state.updateTabPosition);
+  const selectVScoreLine = usePanelStore((state) => state.selectVScoreLine);
+  const updateVScoreLinePosition = usePanelStore((state) => state.updateVScoreLinePosition);
+  const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
+
+  // Store-Aktionen zum Hinzufügen neuer Elemente (für die Werkzeuge)
+  const addFiducial = usePanelStore((state) => state.addFiducial);
+  const addToolingHole = usePanelStore((state) => state.addToolingHole);
+  const addVScoreLine = usePanelStore((state) => state.addVScoreLine);
+  const addTab = usePanelStore((state) => state.addTab);
 
   // Lokaler State
   const [isReady, setIsReady] = useState(false);
@@ -76,7 +97,18 @@ export function PixiPanelCanvas() {
   // Generisch: dragItemType bestimmt ob Fiducial oder Tooling Hole gezogen wird
   const isDraggingItemRef = useRef(false);
   const draggedItemIdRef = useRef<string | null>(null);
-  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | null>(null);
+  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | 'tab' | 'vscoreLine' | null>(null);
+  // Für V-Score Drag: Orientierung der Linie (horizontal/vertikal)
+  const dragVScoreInfoRef = useRef<{ isHorizontal: boolean } | null>(null);
+  // Für Tab-Drag: gespeicherte Info über Kante, Board-Instanz und Board-Größe
+  const dragTabInfoRef = useRef<{
+    edge: 'top' | 'bottom' | 'left' | 'right';
+    boardInstanceId: string;
+    boardX: number;
+    boardY: number;
+    boardWidth: number;
+    boardHeight: number;
+  } | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
   // Grid-Ref damit der Drag-Handler immer den aktuellen Wert hat
   const gridRef = useRef(grid);
@@ -84,10 +116,45 @@ export function PixiPanelCanvas() {
     gridRef.current = grid;
   }, [grid]);
 
+  // ActiveTool-Ref damit die Callbacks immer den aktuellen Wert haben
+  const activeToolRef = useRef(activeTool);
+  useEffect(() => {
+    activeToolRef.current = activeTool;
+  }, [activeTool]);
+
   // Viewport-Ref aktuell halten
   useEffect(() => {
     viewportRef.current = viewport;
   }, [viewport]);
+
+  // ----------------------------------------------------------------
+  // Cursor-Logik: Fadenkreuz wenn ein Platzierungs-Werkzeug aktiv ist
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    if (activeTool !== 'select') {
+      setCursorStyle('crosshair');
+    } else {
+      // Nur zurücksetzen wenn gerade nicht gepannt oder gezogen wird
+      if (!isPanningRef.current && !isDraggingItemRef.current) {
+        setCursorStyle('grab');
+      }
+    }
+  }, [activeTool]);
+
+  // ----------------------------------------------------------------
+  // ESC-Taste: Werkzeug zurücksetzen auf 'select'
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        // Werkzeug auf "Auswählen" zurücksetzen
+        setActiveTool('select');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [setActiveTool]);
 
   // ----------------------------------------------------------------
   // PixiJS Application initialisieren
@@ -309,7 +376,7 @@ export function PixiPanelCanvas() {
       container.addChild(holeGraphics);
     }
 
-    // Tabs rendern
+    // Tabs rendern (interaktiv - klickbar und ziehbar)
     for (const tab of panel.tabs) {
       // Board-Instanz finden für Position
       const instance = instances.find((i) => i.id === tab.boardInstanceId);
@@ -318,19 +385,117 @@ export function PixiPanelCanvas() {
       const board = boards.find((b) => b.id === instance.boardId);
       if (!board) continue;
 
-      const tabGraphics = createTabGraphics(tab, instance, board);
+      const isTabSelected = tab.id === selectedTabId;
+      const tabGraphics = createTabGraphics(tab, instance, board, isTabSelected);
+
+      // Interaktiv machen für Mausklicks und Drag & Drop
+      tabGraphics.eventMode = 'static';
+      tabGraphics.cursor = 'pointer';
+
+      // Board-Größe berechnen (für Drag-Umrechnung)
+      const isRotated = instance.rotation === 90 || instance.rotation === 270;
+      const bWidth = isRotated ? board.height : board.width;
+      const bHeight = isRotated ? board.width : board.height;
+
+      // Pointerdown-Handler: Tab auswählen UND Drag starten
+      tabGraphics.on('pointerdown', (event) => {
+        event.stopPropagation();
+        // Tab auswählen, andere abwählen
+        selectTab(tab.id);
+        selectFiducial(null);
+        selectToolingHole(null);
+
+        // Drag starten
+        isDraggingItemRef.current = true;
+        draggedItemIdRef.current = tab.id;
+        dragItemTypeRef.current = 'tab';
+        // Tab-Info für die Drag-Umrechnung speichern
+        dragTabInfoRef.current = {
+          edge: tab.edge,
+          boardInstanceId: tab.boardInstanceId,
+          boardX: instance.position.x,
+          boardY: instance.position.y,
+          boardWidth: bWidth,
+          boardHeight: bHeight,
+        };
+        // Kein Offset nötig - wir berechnen die Position relativ zur Kante
+        dragOffsetRef.current = { x: 0, y: 0 };
+        setCursorStyle('grabbing');
+      });
+
       container.addChild(tabGraphics);
     }
 
-    // Klick auf leere Fläche: Auswahl aufheben (Fiducials + Tooling Holes)
+    // V-Score Linien rendern (interaktiv - klickbar und ziehbar)
+    for (const line of panel.vscoreLines) {
+      const isLineSelected = line.id === selectedVScoreLineId;
+      const lineGraphics = createVScoreLineGraphics(line, panelW, panelH, isLineSelected);
+
+      // Interaktiv machen für Mausklicks und Drag & Drop
+      lineGraphics.eventMode = 'static';
+      // Cursor je nach Orientierung: horizontal → hoch/runter, vertikal → links/rechts
+      const isHorizontal = Math.abs(line.start.y - line.end.y) < 0.001;
+      lineGraphics.cursor = isHorizontal ? 'ns-resize' : 'ew-resize';
+
+      // Pointerdown-Handler: V-Score Linie auswählen UND Drag starten
+      lineGraphics.on('pointerdown', (event) => {
+        event.stopPropagation();
+        // V-Score Linie auswählen, andere abwählen
+        selectVScoreLine(line.id);
+        selectFiducial(null);
+        selectToolingHole(null);
+        selectTab(null);
+
+        // Drag starten
+        isDraggingItemRef.current = true;
+        draggedItemIdRef.current = line.id;
+        dragItemTypeRef.current = 'vscoreLine';
+        dragVScoreInfoRef.current = { isHorizontal };
+        dragOffsetRef.current = { x: 0, y: 0 };
+        setCursorStyle(isHorizontal ? 'ns-resize' : 'ew-resize');
+      });
+
+      container.addChild(lineGraphics);
+    }
+
+    // Fräskonturen rendern (interaktiv - klickbar, nicht ziehbar)
+    for (const contour of panel.routingContours) {
+      // Unsichtbare Konturen überspringen
+      if (!contour.visible) continue;
+
+      const isContourSelected = contour.id === selectedRoutingContourId;
+      const contourGraphics = createRoutingContourGraphics(contour, isContourSelected);
+
+      // Interaktiv machen für Mausklicks
+      contourGraphics.eventMode = 'static';
+      contourGraphics.cursor = 'pointer';
+
+      // Pointerdown-Handler: Kontur auswählen
+      contourGraphics.on('pointerdown', (event) => {
+        event.stopPropagation();
+        // Kontur auswählen, alle anderen abwählen
+        selectRoutingContour(contour.id);
+        selectFiducial(null);
+        selectToolingHole(null);
+        selectTab(null);
+        selectVScoreLine(null);
+      });
+
+      container.addChild(contourGraphics);
+    }
+
+    // Klick auf leere Fläche: Auswahl aufheben (Fiducials + Tooling Holes + Tabs + V-Score + Routing)
     container.eventMode = 'static';
     container.on('pointerdown', () => {
       selectFiducial(null);
       selectToolingHole(null);
+      selectTab(null);
+      selectVScoreLine(null);
+      selectRoutingContour(null);
     });
 
-    console.log(`Rendered ${instances.length} boards, ${panel.fiducials.length} fiducials, ${panel.tabs.length} tabs with WebGL`);
-  }, [isReady, panel, grid, boards, instances, selectedFiducialId, selectedToolingHoleId, selectFiducial, selectToolingHole]);
+    console.log(`Rendered ${instances.length} boards, ${panel.fiducials.length} fiducials, ${panel.tabs.length} tabs, ${panel.vscoreLines.length} v-scores, ${panel.routingContours.length} routing contours with WebGL`);
+  }, [isReady, panel, grid, boards, instances, selectedFiducialId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedRoutingContourId, selectFiducial, selectToolingHole, selectTab, selectVScoreLine, selectRoutingContour]);
 
   // ----------------------------------------------------------------
   // Mausrad-Zoom (natives Event für passive: false)
@@ -383,13 +548,165 @@ export function PixiPanelCanvas() {
     // dann KEIN Panning starten - das Item wird stattdessen gezogen
     if (isDraggingItemRef.current) return;
 
+    // ================================================================
+    // Werkzeug-Platzierung: Wenn ein Platzierungs-Werkzeug aktiv ist,
+    // wird per Linksklick ein neues Element an der Mausposition platziert.
+    // ================================================================
+    const currentTool = activeToolRef.current;
+    if (currentTool !== 'select' && e.button === 0) {
+      const vp = viewportRef.current;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      // Mausposition relativ zum Container
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      // Screen-Koordinaten → mm-Koordinaten umrechnen
+      let mmX = (mouseX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+      let mmY = (mouseY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+      // Snap-to-Grid anwenden, wenn aktiviert
+      const currentGrid = gridRef.current;
+      if (currentGrid.snapEnabled) {
+        mmX = snapToGrid(mmX, currentGrid.size);
+        mmY = snapToGrid(mmY, currentGrid.size);
+      }
+
+      // --- Fiducial platzieren ---
+      if (currentTool === 'place-fiducial') {
+        addFiducial({
+          position: { x: mmX, y: mmY },
+          padDiameter: 1.0,    // Standard 1mm Kupfer-Pad
+          maskDiameter: 2.0,   // Standard 2mm Masköffnung
+          type: 'panel',       // Panel-Fiducial (nicht Board-spezifisch)
+        });
+        // Werkzeug bleibt aktiv für Multi-Platzierung
+        return;
+      }
+
+      // --- Tooling Hole (Bohrung) platzieren ---
+      if (currentTool === 'place-hole') {
+        addToolingHole({
+          position: { x: mmX, y: mmY },
+          diameter: 3.0,    // Standard 3mm Durchmesser
+          plated: false,    // Standard: nicht durchkontaktiert (NPTH)
+        });
+        // Werkzeug bleibt aktiv für Multi-Platzierung
+        return;
+      }
+
+      // --- V-Score Linie platzieren ---
+      if (currentTool === 'place-vscore') {
+        // Hole aktuelle Panel-Größe aus dem Store
+        const currentPanel = usePanelStore.getState().panel;
+
+        if (e.shiftKey) {
+          // Shift+Klick → Vertikale V-Score Linie (durch die X-Position)
+          addVScoreLine({
+            start: { x: mmX, y: 0 },
+            end: { x: mmX, y: currentPanel.height },
+            depth: 33,    // Standard 33% Einritztiefe
+            angle: 30,    // Standard 30° V-Winkel
+          });
+        } else {
+          // Normaler Klick → Horizontale V-Score Linie (durch die Y-Position)
+          addVScoreLine({
+            start: { x: 0, y: mmY },
+            end: { x: currentPanel.width, y: mmY },
+            depth: 33,    // Standard 33% Einritztiefe
+            angle: 30,    // Standard 30° V-Winkel
+          });
+        }
+        // Werkzeug bleibt aktiv für Multi-Platzierung
+        return;
+      }
+
+      // --- Tab platzieren (nächste Board-Kante finden) ---
+      if (currentTool === 'place-tab') {
+        const currentState = usePanelStore.getState();
+        const currentInstances = currentState.panel.instances;
+        const currentBoards = currentState.panel.boards;
+
+        let nearestEdge: 'top' | 'bottom' | 'left' | 'right' = 'top';
+        let nearestInstanceId = '';
+        let nearestDistance = Infinity;
+        let normalizedPos = 0.5;
+
+        // Für jede Board-Instanz: alle 4 Kanten prüfen
+        for (const inst of currentInstances) {
+          const brd = currentBoards.find((b) => b.id === inst.boardId);
+          if (!brd) continue;
+
+          // Board-Größe berechnen (berücksichtigt Rotation)
+          const isRot = inst.rotation === 90 || inst.rotation === 270;
+          const bW = isRot ? brd.height : brd.width;
+          const bH = isRot ? brd.width : brd.height;
+          const bX = inst.position.x;
+          const bY = inst.position.y;
+
+          // 4 Kanten definieren: [Kante, Abstand, normalisierte Position]
+          const edges: Array<{ edge: 'top' | 'bottom' | 'left' | 'right'; dist: number; normPos: number }> = [];
+
+          // Top-Kante (unterer Rand des Boards in Screen-Koordinaten, Y wächst nach unten)
+          if (mmX >= bX && mmX <= bX + bW) {
+            const distTop = Math.abs(mmY - (bY + bH));
+            edges.push({ edge: 'top', dist: distTop, normPos: (mmX - bX) / bW });
+          }
+
+          // Bottom-Kante (oberer Rand des Boards)
+          if (mmX >= bX && mmX <= bX + bW) {
+            const distBottom = Math.abs(mmY - bY);
+            edges.push({ edge: 'bottom', dist: distBottom, normPos: (mmX - bX) / bW });
+          }
+
+          // Left-Kante (linker Rand des Boards)
+          if (mmY >= bY && mmY <= bY + bH) {
+            const distLeft = Math.abs(mmX - bX);
+            edges.push({ edge: 'left', dist: distLeft, normPos: (mmY - bY) / bH });
+          }
+
+          // Right-Kante (rechter Rand des Boards)
+          if (mmY >= bY && mmY <= bY + bH) {
+            const distRight = Math.abs(mmX - (bX + bW));
+            edges.push({ edge: 'right', dist: distRight, normPos: (mmY - bY) / bH });
+          }
+
+          // Nächste Kante für diese Instanz finden
+          for (const edgeInfo of edges) {
+            if (edgeInfo.dist < nearestDistance) {
+              nearestDistance = edgeInfo.dist;
+              nearestEdge = edgeInfo.edge;
+              nearestInstanceId = inst.id;
+              normalizedPos = Math.max(0.05, Math.min(0.95, edgeInfo.normPos));
+            }
+          }
+        }
+
+        // Tab nur platzieren, wenn eine Kante nahe genug ist (< 5mm)
+        if (nearestDistance < 5 && nearestInstanceId) {
+          addTab({
+            position: normalizedPos,       // 0-1 entlang der Kante
+            edge: nearestEdge,             // 'top' | 'bottom' | 'left' | 'right'
+            boardInstanceId: nearestInstanceId,
+            type: 'mousebites',            // Standard: Mouse Bites
+            width: 3.0,                    // Standard 3mm Breite
+            holeDiameter: 0.5,             // Standard 0.5mm Bohrungen
+            holeSpacing: 1.0,              // Standard 1mm Abstand
+          });
+        }
+        // Werkzeug bleibt aktiv für Multi-Platzierung
+        return;
+      }
+    }
+
     if (e.button === 1 || e.button === 0) {
       // Mittlere oder linke Maustaste → Panning starten
       isPanningRef.current = true;
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
       setCursorStyle('grabbing');
     }
-  }, []);
+  }, [addFiducial, addToolingHole, addVScoreLine, addTab]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     // === Item Drag (Fiducial oder Tooling Hole): Position aktualisieren ===
@@ -419,6 +736,32 @@ export function PixiPanelCanvas() {
         updateFiducialPosition(draggedItemIdRef.current, { x: mmX, y: mmY });
       } else if (dragItemTypeRef.current === 'toolingHole') {
         updateToolingHolePosition(draggedItemIdRef.current, { x: mmX, y: mmY });
+      } else if (dragItemTypeRef.current === 'vscoreLine' && dragVScoreInfoRef.current) {
+        // V-Score Drag: achsenbeschränkt verschieben
+        // Horizontale Linie → nur Y-Position, Vertikale Linie → nur X-Position
+        if (dragVScoreInfoRef.current.isHorizontal) {
+          updateVScoreLinePosition(draggedItemIdRef.current, mmY);
+        } else {
+          updateVScoreLinePosition(draggedItemIdRef.current, mmX);
+        }
+        return;
+      } else if (dragItemTypeRef.current === 'tab' && dragTabInfoRef.current) {
+        // Tab-Drag: Mausposition in normalisierte Kantenposition (0-1) umrechnen
+        // Tabs bewegen sich NUR entlang ihrer Kante
+        const info = dragTabInfoRef.current;
+        let normalizedPosition: number;
+
+        if (info.edge === 'top' || info.edge === 'bottom') {
+          // Horizontale Kante: X-Position relativ zur Board-Kante umrechnen
+          normalizedPosition = (mmX - info.boardX) / info.boardWidth;
+        } else {
+          // Vertikale Kante: Y-Position relativ zur Board-Kante umrechnen
+          normalizedPosition = (mmY - info.boardY) / info.boardHeight;
+        }
+
+        // Position auf 0-1 begrenzen (Tab darf nicht über die Kante hinaus)
+        normalizedPosition = Math.max(0.05, Math.min(0.95, normalizedPosition));
+        updateTabPosition(draggedItemIdRef.current, normalizedPosition);
       }
       return;
     }
@@ -436,17 +779,24 @@ export function PixiPanelCanvas() {
 
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
     }
-  }, [setViewport, updateFiducialPosition, updateToolingHolePosition]);
+  }, [setViewport, updateFiducialPosition, updateToolingHolePosition, updateTabPosition, updateVScoreLinePosition]);
 
   const handleMouseUp = useCallback(() => {
-    // Item-Drag beenden (Fiducial oder Tooling Hole)
+    // Item-Drag beenden (Fiducial, Tooling Hole, Tab oder V-Score)
     isDraggingItemRef.current = false;
     draggedItemIdRef.current = null;
     dragItemTypeRef.current = null;
+    dragVScoreInfoRef.current = null;
 
     // Panning beenden
     isPanningRef.current = false;
-    setCursorStyle('grab');
+
+    // Cursor wiederherstellen: Fadenkreuz wenn Werkzeug aktiv, sonst Hand
+    if (activeToolRef.current !== 'select') {
+      setCursorStyle('crosshair');
+    } else {
+      setCursorStyle('grab');
+    }
   }, []);
 
   // ----------------------------------------------------------------
@@ -786,7 +1136,7 @@ function createToolingHoleGraphics(hole: ToolingHole, isSelected: boolean = fals
 // Tab Graphics erstellen
 // ============================================================================
 
-function createTabGraphics(tab: Tab, instance: BoardInstance, board: Board): Graphics {
+function createTabGraphics(tab: Tab, instance: BoardInstance, board: Board, isSelected: boolean = false): Graphics {
   const graphics = new Graphics();
 
   // Board-Größe (berücksichtigt Rotation)
@@ -836,11 +1186,24 @@ function createTabGraphics(tab: Tab, instance: BoardInstance, board: Board): Gra
     tabColor = 0xff69b4; // Pink für V-Score
   }
 
+  // Wenn ausgewählt: Leuchtender Rand (Glow-Effekt)
+  if (isSelected) {
+    const glowPadding = 4;
+    graphics
+      .rect(tabX - glowPadding, tabY - glowPadding, tabW + glowPadding * 2, tabH + glowPadding * 2)
+      .stroke({ color: 0xffa500, width: 3, alpha: 0.8 }); // Orange Glow
+    graphics
+      .rect(tabX - glowPadding - 2, tabY - glowPadding - 2, tabW + (glowPadding + 2) * 2, tabH + (glowPadding + 2) * 2)
+      .stroke({ color: 0xffcc00, width: 2, alpha: 0.4 }); // Äußerer gelber Glow
+  }
+
   // Tab-Rechteck zeichnen
-  graphics.rect(tabX, tabY, tabW, tabH).fill({ color: tabColor, alpha: 0.7 });
-  graphics.rect(tabX, tabY, tabW, tabH).stroke({ color: tabColor, width: 1 });
+  graphics.rect(tabX, tabY, tabW, tabH).fill({ color: tabColor, alpha: isSelected ? 1.0 : 0.7 });
+  graphics.rect(tabX, tabY, tabW, tabH).stroke({ color: isSelected ? 0xffffff : tabColor, width: isSelected ? 2 : 1 });
 
   // Bei Mouse Bites: Bohrungen andeuten
+  // WICHTIG: Die Bohrungsmittelpunkte liegen direkt auf der Board-Kante,
+  // damit das Ausbrechen sauber funktioniert.
   if (tab.type === 'mousebites' && tab.holeDiameter && tab.holeSpacing) {
     const holeRadius = (tab.holeDiameter / 2) * PIXELS_PER_MM;
     const spacing = tab.holeSpacing * PIXELS_PER_MM;
@@ -853,11 +1216,19 @@ function createTabGraphics(tab: Tab, instance: BoardInstance, board: Board): Gra
       let holeX, holeY;
 
       if (tab.edge === 'top' || tab.edge === 'bottom') {
+        // Bohrungen entlang der X-Achse verteilen
         holeX = tabX + (i + 0.5) * (tabW / holeCount);
-        holeY = tabY + tabH / 2;
+        // Y-Position: direkt auf der Board-Kante
+        // Top-Kante: unterer Rand des Tabs = Board-Oberkante
+        // Bottom-Kante: oberer Rand des Tabs = Board-Unterkante
+        holeY = tab.edge === 'top' ? tabY : tabY + tabH;
       } else {
-        holeX = tabX + tabW / 2;
+        // Y-Position: Bohrungen entlang der Y-Achse verteilen
         holeY = tabY + (i + 0.5) * (tabH / holeCount);
+        // X-Position: direkt auf der Board-Kante
+        // Left-Kante: rechter Rand des Tabs = Board-Linkskante
+        // Right-Kante: linker Rand des Tabs = Board-Rechtskante
+        holeX = tab.edge === 'left' ? tabX + tabW : tabX;
       }
 
       // Bohrung als dunkler Kreis
@@ -866,4 +1237,277 @@ function createTabGraphics(tab: Tab, instance: BoardInstance, board: Board): Gra
   }
 
   return graphics;
+}
+
+// ============================================================================
+// V-Score Line Graphics erstellen
+// ============================================================================
+
+/**
+ * Erstellt die Grafik für eine V-Score Linie.
+ * V-Score Linien laufen immer von Kante zu Kante über das gesamte Panel.
+ * Sie werden als gestrichelte pink Linien dargestellt.
+ *
+ * @param line - Die V-Score Linie mit Start/End-Koordinaten
+ * @param panelW - Panel-Breite in Pixeln
+ * @param panelH - Panel-Höhe in Pixeln
+ * @param isSelected - Ob die Linie gerade ausgewählt ist
+ */
+function createVScoreLineGraphics(
+  line: VScoreLine,
+  panelW: number,
+  panelH: number,
+  isSelected: boolean = false
+): Container {
+  const container = new Container();
+
+  const startX = line.start.x * PIXELS_PER_MM;
+  const startY = line.start.y * PIXELS_PER_MM;
+  const endX = line.end.x * PIXELS_PER_MM;
+  const endY = line.end.y * PIXELS_PER_MM;
+
+  // Orientierung bestimmen
+  const isHorizontal = Math.abs(line.start.y - line.end.y) < 0.001;
+
+  // Wenn ausgewählt: Leuchtender Rand (Glow-Effekt, wie bei Fiducials)
+  if (isSelected) {
+    const glowGraphics = new Graphics();
+    // Glow als breiter Streifen (orange/gelb)
+    glowGraphics
+      .moveTo(startX, startY)
+      .lineTo(endX, endY)
+      .stroke({ color: 0xffa500, width: 8, alpha: 0.5 }); // Orange Glow
+    glowGraphics
+      .moveTo(startX, startY)
+      .lineTo(endX, endY)
+      .stroke({ color: 0xffcc00, width: 12, alpha: 0.25 }); // Äußerer gelber Glow
+
+    container.addChild(glowGraphics);
+  }
+
+  // Gestrichelte Linie zeichnen (PixiJS hat keinen nativen Dash-Support)
+  // Wir zeichnen kurze Segmente: 4mm Strich, 2mm Lücke
+  const dashLength = 4 * PIXELS_PER_MM; // 4mm Strich
+  const gapLength = 2 * PIXELS_PER_MM;  // 2mm Lücke
+  const lineColor = isSelected ? 0xc71585 : 0xff69b4; // DeepPink wenn ausgewählt, HotPink normal
+  const lineWidth = isSelected ? 3 : 2;
+
+  const dashGraphics = new Graphics();
+
+  if (isHorizontal) {
+    // Horizontale Linie: von links nach rechts
+    let currentX = startX;
+    const y = startY;
+
+    while (currentX < endX) {
+      const dashEnd = Math.min(currentX + dashLength, endX);
+      dashGraphics
+        .moveTo(currentX, y)
+        .lineTo(dashEnd, y)
+        .stroke({ color: lineColor, width: lineWidth });
+      currentX = dashEnd + gapLength;
+    }
+  } else {
+    // Vertikale Linie: von oben nach unten
+    let currentY = startY;
+    const x = startX;
+
+    while (currentY < endY) {
+      const dashEnd = Math.min(currentY + dashLength, endY);
+      dashGraphics
+        .moveTo(x, currentY)
+        .lineTo(x, dashEnd)
+        .stroke({ color: lineColor, width: lineWidth });
+      currentY = dashEnd + gapLength;
+    }
+  }
+
+  container.addChild(dashGraphics);
+
+  // Unsichtbare Hit-Area (4mm breit) damit die Linie leicht anklickbar ist
+  const hitArea = new Graphics();
+  const hitWidth = 4 * PIXELS_PER_MM; // 4mm breite Klickfläche
+
+  if (isHorizontal) {
+    hitArea
+      .rect(startX, startY - hitWidth / 2, endX - startX, hitWidth)
+      .fill({ color: 0xff69b4, alpha: 0.001 }); // Fast unsichtbar
+  } else {
+    hitArea
+      .rect(startX - hitWidth / 2, startY, hitWidth, endY - startY)
+      .fill({ color: 0xff69b4, alpha: 0.001 }); // Fast unsichtbar
+  }
+
+  container.addChild(hitArea);
+
+  return container;
+}
+
+// ============================================================================
+// Routing Contour Graphics erstellen (Fräskonturen)
+// ============================================================================
+
+/**
+ * Erstellt die Grafik für eine Fräskontur.
+ * Board-Outlines werden cyan dargestellt, Panel-Outline orange.
+ * Durchgezogene Linien (nicht gestrichelt wie V-Score).
+ * Halbtransparenter Streifen zeigt die Fräserbreite.
+ *
+ * @param contour - Die Fräskontur mit Segmenten
+ * @param isSelected - Ob die Kontur gerade ausgewählt ist
+ */
+function createRoutingContourGraphics(
+  contour: RoutingContour,
+  isSelected: boolean = false
+): Container {
+  const container = new Container();
+
+  // Farbe je nach Kontur-Typ
+  const lineColor = contour.contourType === 'boardOutline' ? 0x00e5ff : 0xff9100; // Cyan oder Orange
+  const lineWidth = isSelected ? 2.5 : 1.5;
+
+  // Wenn ausgewählt: Glow-Effekt (orange/gelb, wie bei anderen Elementen)
+  if (isSelected) {
+    const glowGraphics = new Graphics();
+    for (const seg of contour.segments) {
+      const startX = seg.start.x * PIXELS_PER_MM;
+      const startY = seg.start.y * PIXELS_PER_MM;
+      const endX = seg.end.x * PIXELS_PER_MM;
+      const endY = seg.end.y * PIXELS_PER_MM;
+
+      // Glow als breiter Streifen (orange/gelb)
+      glowGraphics
+        .moveTo(startX, startY)
+        .lineTo(endX, endY)
+        .stroke({ color: 0xffa500, width: 8, alpha: 0.5 });
+      glowGraphics
+        .moveTo(startX, startY)
+        .lineTo(endX, endY)
+        .stroke({ color: 0xffcc00, width: 12, alpha: 0.25 });
+    }
+    container.addChild(glowGraphics);
+  }
+
+  // Halbtransparenter Streifen für Fräserbreite (Materialabtrag-Visualisierung)
+  const stripGraphics = new Graphics();
+  const toolWidthPx = contour.toolDiameter * PIXELS_PER_MM;
+
+  for (const seg of contour.segments) {
+    const startX = seg.start.x * PIXELS_PER_MM;
+    const startY = seg.start.y * PIXELS_PER_MM;
+    const endX = seg.end.x * PIXELS_PER_MM;
+    const endY = seg.end.y * PIXELS_PER_MM;
+
+    // Breiter Streifen in Fräserbreite
+    stripGraphics
+      .moveTo(startX, startY)
+      .lineTo(endX, endY)
+      .stroke({ color: lineColor, width: toolWidthPx, alpha: 0.12 });
+  }
+  container.addChild(stripGraphics);
+
+  // Durchgezogene Linie für die Fräskontur
+  const lineGraphics = new Graphics();
+  for (const seg of contour.segments) {
+    const startX = seg.start.x * PIXELS_PER_MM;
+    const startY = seg.start.y * PIXELS_PER_MM;
+    const endX = seg.end.x * PIXELS_PER_MM;
+    const endY = seg.end.y * PIXELS_PER_MM;
+
+    lineGraphics
+      .moveTo(startX, startY)
+      .lineTo(endX, endY)
+      .stroke({ color: lineColor, width: lineWidth });
+  }
+  container.addChild(lineGraphics);
+
+  // Fräser-Radius an Tab-Übergängen anzeigen
+  // Die Fräskontur liegt bereits auf der Fräser-Mittellinie (im Gap versetzt).
+  // An jedem offenen Segment-Ende (= Tab-Übergang) zeichnen wir einen Kreis
+  // mit dem Fräser-Radius, der den Auslauf des Fräsers zeigt.
+  const radiusGraphics = new Graphics();
+  const toolRadiusPx = (contour.toolDiameter / 2) * PIXELS_PER_MM;
+  const segments = contour.segments;
+
+  const TOLERANCE = 0.05; // mm Toleranz für Punkt-Vergleich
+
+  const isConnected = (p1: { x: number; y: number }, p2: { x: number; y: number }): boolean => {
+    return Math.abs(p1.x - p2.x) < TOLERANCE && Math.abs(p1.y - p2.y) < TOLERANCE;
+  };
+
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+
+    // Prüfe ob der Startpunkt an ein anderes Segment anschliesst
+    let startConnected = false;
+    for (let j = 0; j < segments.length; j++) {
+      if (i === j) continue;
+      if (isConnected(seg.start, segments[j].end) || isConnected(seg.start, segments[j].start)) {
+        startConnected = true;
+        break;
+      }
+    }
+
+    // Prüfe ob der Endpunkt an ein anderes Segment anschliesst
+    let endConnected = false;
+    for (let j = 0; j < segments.length; j++) {
+      if (i === j) continue;
+      if (isConnected(seg.end, segments[j].start) || isConnected(seg.end, segments[j].end)) {
+        endConnected = true;
+        break;
+      }
+    }
+
+    // Offene Enden = Tab-Übergänge → Fräser-Radius zeichnen
+    // Kreis direkt am Segment-Ende (Linie liegt bereits auf Fräser-Mittellinie)
+    if (!startConnected) {
+      const px = seg.start.x * PIXELS_PER_MM;
+      const py = seg.start.y * PIXELS_PER_MM;
+      radiusGraphics.circle(px, py, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
+      radiusGraphics.circle(px, py, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
+    }
+
+    if (!endConnected) {
+      const px = seg.end.x * PIXELS_PER_MM;
+      const py = seg.end.y * PIXELS_PER_MM;
+      radiusGraphics.circle(px, py, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
+      radiusGraphics.circle(px, py, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
+    }
+  }
+  container.addChild(radiusGraphics);
+
+  // Unsichtbare Hit-Area (3mm breit) für bessere Klickbarkeit
+  const hitArea = new Graphics();
+  const hitWidth = 3 * PIXELS_PER_MM;
+
+  for (const seg of contour.segments) {
+    const startX = seg.start.x * PIXELS_PER_MM;
+    const startY = seg.start.y * PIXELS_PER_MM;
+    const endX = seg.end.x * PIXELS_PER_MM;
+    const endY = seg.end.y * PIXELS_PER_MM;
+
+    // Richtung des Segments
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const length = Math.sqrt(dx * dx + dy * dy);
+
+    if (length < 0.001) continue; // Zu kurzes Segment überspringen
+
+    // Normalen-Vektor (senkrecht zum Segment)
+    const nx = -dy / length * (hitWidth / 2);
+    const ny = dx / length * (hitWidth / 2);
+
+    // Rechteck entlang des Segments als Polygon
+    hitArea
+      .poly([
+        startX + nx, startY + ny,
+        endX + nx, endY + ny,
+        endX - nx, endY - ny,
+        startX - nx, startY - ny,
+      ])
+      .fill({ color: lineColor, alpha: 0.001 }); // Fast unsichtbar
+  }
+  container.addChild(hitArea);
+
+  return container;
 }
