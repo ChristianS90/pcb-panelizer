@@ -2,7 +2,7 @@
  * Properties Panel - Die rechte Seitenleiste für Einstellungen
  *
  * Enthält:
- * - Panel-Rahmen Konfiguration
+ * - Nutzenrand Konfiguration
  * - Array-Einstellungen
  * - Tab-Konfiguration
  * - Fiducial-Einstellungen
@@ -22,6 +22,7 @@ import {
   CircleDot,
   Circle,
   Info,
+  RotateCcw,
 } from 'lucide-react';
 import { usePanelStore, usePanel, useGrid } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
@@ -50,9 +51,9 @@ export function PropertiesPanel() {
 
   return (
     <aside className="w-72 bg-white border-l border-gray-200 h-full overflow-y-auto">
-      {/* Panel-Rahmen */}
+      {/* Nutzenrand */}
       <PropertySection
-        title="Rahmen"
+        title="Nutzenrand"
         icon={<Square className="w-4 h-4" />}
         expanded={expandedSections.frame}
         onToggle={() => toggleSection('frame')}
@@ -229,51 +230,93 @@ function NumberInput({
 }
 
 // ============================================================================
-// Rahmen-Konfiguration
+// Nutzenrand-Konfiguration
 // ============================================================================
 
 function FrameConfig() {
   const panel = usePanel();
   const setFrame = usePanelStore((state) => state.setFrame);
+  const [uniform, setUniform] = useState(false);
+
+  // Bei einheitlicher Breite: Alle vier Seiten auf denselben Wert setzen
+  const handleChange = (side: 'left' | 'right' | 'top' | 'bottom', value: number) => {
+    if (uniform) {
+      setFrame({ left: value, right: value, top: value, bottom: value });
+    } else {
+      setFrame({ [side]: value });
+    }
+  };
 
   return (
     <div className="space-y-3">
       {/* Info-Text */}
       <p className="text-xs text-gray-500">
-        Der Rahmen ist der freie Bereich um die Boards herum.
+        Der Nutzenrand ist der freie Bereich um die Boards herum.
+        Bei Änderung wird die Panel-Größe automatisch angepasst.
       </p>
 
-      {/* Einheitliche Rahmenbreite */}
+      {/* Einheitliche Nutzenrand-Breite */}
       <div className="flex items-center gap-2 mb-3">
-        <input type="checkbox" id="uniformFrame" className="rounded" />
+        <input
+          type="checkbox"
+          id="uniformFrame"
+          className="rounded"
+          checked={uniform}
+          onChange={(e) => {
+            setUniform(e.target.checked);
+            // Beim Aktivieren: Alle Seiten auf den linken Wert angleichen
+            if (e.target.checked) {
+              const v = panel.frame.left;
+              setFrame({ left: v, right: v, top: v, bottom: v });
+            }
+          }}
+        />
         <label htmlFor="uniformFrame" className="text-xs text-gray-600">
           Einheitliche Breite
         </label>
       </div>
 
-      {/* Einzelne Seiten */}
-      <div className="grid grid-cols-2 gap-2">
+      {/* Einzelne Seiten oder ein Feld */}
+      {uniform ? (
         <NumberInput
-          label="Links"
+          label="Alle Seiten"
           value={panel.frame.left}
-          onChange={(v) => setFrame({ left: v })}
+          onChange={(v) => handleChange('left', v)}
         />
-        <NumberInput
-          label="Rechts"
-          value={panel.frame.right}
-          onChange={(v) => setFrame({ right: v })}
-        />
-        <NumberInput
-          label="Oben"
-          value={panel.frame.top}
-          onChange={(v) => setFrame({ top: v })}
-        />
-        <NumberInput
-          label="Unten"
-          value={panel.frame.bottom}
-          onChange={(v) => setFrame({ bottom: v })}
-        />
-      </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <NumberInput
+            label="Links"
+            value={panel.frame.left}
+            onChange={(v) => handleChange('left', v)}
+          />
+          <NumberInput
+            label="Rechts"
+            value={panel.frame.right}
+            onChange={(v) => handleChange('right', v)}
+          />
+          <NumberInput
+            label="Oben"
+            value={panel.frame.top}
+            onChange={(v) => handleChange('top', v)}
+          />
+          <NumberInput
+            label="Unten"
+            value={panel.frame.bottom}
+            onChange={(v) => handleChange('bottom', v)}
+          />
+        </div>
+      )}
+
+      {/* Eckenradius */}
+      <NumberInput
+        label="Eckenradius"
+        value={panel.frame.cornerRadius}
+        onChange={(v) => setFrame({ cornerRadius: v })}
+        min={0}
+        max={20}
+        step={0.5}
+      />
     </div>
   );
 }
@@ -290,7 +333,9 @@ function ArrayConfig() {
   const [gapY, setGapY] = useState(2);
 
   const boards = usePanelStore((state) => state.panel.boards);
+  const instances = usePanelStore((state) => state.panel.instances);
   const createBoardArray = usePanelStore((state) => state.createBoardArray);
+  const rotatePanelCCW = usePanelStore((state) => state.rotatePanelCCW);
   const setPanelSize = usePanelStore((state) => state.setPanelSize);
   const frame = usePanelStore((state) => state.panel.frame);
 
@@ -315,7 +360,7 @@ function ArrayConfig() {
     // Panel-Größe setzen
     setPanelSize(calculatedWidth, calculatedHeight);
 
-    // Array erstellen, Start nach dem linken/unteren Rahmen
+    // Array erstellen, Start nach dem linken/unteren Nutzenrand
     createBoardArray(
       board.id,
       { columns, rows, gapX, gapY },
@@ -383,6 +428,21 @@ function ArrayConfig() {
       >
         Array erstellen & Panel anpassen
       </button>
+
+      {/* Panel drehen - nur sichtbar wenn Boards platziert sind */}
+      {instances.length > 0 && (
+        <button
+          onClick={rotatePanelCCW}
+          className="w-full flex items-center justify-center gap-2 text-sm
+                     bg-gray-100 hover:bg-primary-100 text-gray-700
+                     hover:text-primary-700 py-2 px-3 rounded-lg
+                     transition-colors border border-gray-200"
+          title="Dreht das gesamte Panel (alle Boards, Fiducials, Nutzenrand) um 90° gegen den Uhrzeigersinn"
+        >
+          <RotateCcw className="w-4 h-4" />
+          Panel 90° drehen
+        </button>
+      )}
     </div>
   );
 }
@@ -427,7 +487,7 @@ function TabsConfig() {
   return (
     <div className="space-y-3">
       <p className="text-xs text-gray-500">
-        Tabs verbinden Boards mit dem Rahmen für das Herausbrechen.
+        Tabs verbinden Boards mit dem Nutzenrand für das Herausbrechen.
       </p>
 
       {/* Vorhandene Tabs anzeigen */}
@@ -543,24 +603,68 @@ function FiducialsConfig() {
 
   const fiducialCount = panel.fiducials.length;
 
+  // Fiducials werden immer auf den Stirnseiten (kürzere Seiten) platziert.
+  // In der SMT-Fertigung klemmt die Maschine das Panel an den langen Seiten.
+  // Fiducials auf den kurzen Seiten werden dadurch nicht abgedeckt.
+  //
+  // Die Fiducials sitzen bei 25% und 75% der Stirnseiten-Länge,
+  // damit sie NICHT an den Ecken liegen (dort sind die Tooling Holes).
+  //
+  // Breiter als hoch (width >= height):
+  //   Stirnseiten = links & rechts
+  //   Fiducials bei (offset, 25%/75% der Höhe) und (width-offset, 50%)
+  //
+  // Höher als breit (height > width):
+  //   Stirnseiten = oben & unten
+  //   Fiducials bei (25%/75% der Breite, offset) und (50%, height-offset)
+
   const addCornerFiducials = () => {
-    const positions = [
-      { x: offset, y: offset },
-      { x: panel.width - offset, y: offset },
-      { x: offset, y: panel.height - offset },
-    ];
+    let positions;
+
+    if (panel.width >= panel.height) {
+      // Breiter als hoch: Stirnseiten sind links und rechts
+      // 2 Fiducials links (5% und 95%), 1 rechts (10%)
+      positions = [
+        { x: offset, y: panel.height * 0.05 },              // links, 5%
+        { x: offset, y: panel.height * 0.95 },              // links, 95%
+        { x: panel.width - offset, y: panel.height * 0.10 }, // rechts, 10%
+      ];
+    } else {
+      // Höher als breit: Stirnseiten sind oben und unten
+      // 2 Fiducials oben (5% und 95%), 1 unten (10%)
+      positions = [
+        { x: panel.width * 0.05, y: panel.height - offset }, // oben, 5%
+        { x: panel.width * 0.95, y: panel.height - offset }, // oben, 95%
+        { x: panel.width * 0.10, y: offset },                // unten, 10%
+      ];
+    }
+
     positions.forEach((position) => {
       addFiducial({ position, padDiameter, maskDiameter, type: 'panel' });
     });
   };
 
   const addAllCornerFiducials = () => {
-    const positions = [
-      { x: offset, y: offset },
-      { x: panel.width - offset, y: offset },
-      { x: offset, y: panel.height - offset },
-      { x: panel.width - offset, y: panel.height - offset },
-    ];
+    let positions;
+
+    if (panel.width >= panel.height) {
+      // Breiter als hoch: je 2 Fiducials auf linker und rechter Stirnseite
+      positions = [
+        { x: offset, y: panel.height * 0.05 },              // links, 5%
+        { x: offset, y: panel.height * 0.95 },              // links, 95%
+        { x: panel.width - offset, y: panel.height * 0.05 }, // rechts, 5%
+        { x: panel.width - offset, y: panel.height * 0.95 }, // rechts, 95%
+      ];
+    } else {
+      // Höher als breit: je 2 Fiducials auf oberer und unterer Stirnseite
+      positions = [
+        { x: panel.width * 0.05, y: offset },                 // unten, 5%
+        { x: panel.width * 0.95, y: offset },                 // unten, 95%
+        { x: panel.width * 0.05, y: panel.height - offset },  // oben, 5%
+        { x: panel.width * 0.95, y: panel.height - offset },  // oben, 95%
+      ];
+    }
+
     positions.forEach((position) => {
       addFiducial({ position, padDiameter, maskDiameter, type: 'panel' });
     });
@@ -622,18 +726,24 @@ function FiducialsConfig() {
           />
         </div>
 
+        {/* Hinweis zur Stirnseiten-Platzierung */}
+        <div className="text-xs text-blue-600 bg-blue-50 p-2 rounded mt-2">
+          Fiducials werden auf den <strong>Stirnseiten</strong> (kurze Seiten) platziert,
+          damit sie nicht von den Klemmungen abgedeckt werden.
+        </div>
+
         <div className="space-y-2 mt-3">
           <button
             onClick={addCornerFiducials}
             className="w-full btn-primary text-sm"
           >
-            3 Eck-Fiducials (Standard)
+            3 Stirnseiten-Fiducials (Standard)
           </button>
           <button
             onClick={addAllCornerFiducials}
             className="w-full btn-secondary text-sm"
           >
-            4 Eck-Fiducials
+            4 Stirnseiten-Fiducials
           </button>
         </div>
       </div>
@@ -742,16 +852,22 @@ function FiducialItem({ index, fiducial, isSelected, onSelect, onUpdatePosition,
 function ToolingConfig() {
   const [diameter, setDiameter] = useState(3.0);
   const [plated, setPlated] = useState(false);
+  const [offset, setOffset] = useState(3.0);
 
   const addToolingHole = usePanelStore((state) => state.addToolingHole);
+  const removeToolingHole = usePanelStore((state) => state.removeToolingHole);
+  const clearAllToolingHoles = usePanelStore((state) => state.clearAllToolingHoles);
+  const updateToolingHolePosition = usePanelStore((state) => state.updateToolingHolePosition);
+  const selectToolingHole = usePanelStore((state) => state.selectToolingHole);
+  const selectedToolingHoleId = usePanelStore((state) => state.selectedToolingHoleId);
   const panel = usePanel();
+
+  const holeCount = panel.toolingHoles.length;
 
   /**
    * Fügt Tooling-Bohrungen in den Ecken hinzu
    */
   const addCornerHoles = () => {
-    const offset = 3;
-
     const positions = [
       { x: offset, y: offset },
       { x: panel.width - offset, y: offset },
@@ -774,31 +890,166 @@ function ToolingConfig() {
         Bohrungen für die Aufnahme in der Fertigung.
       </p>
 
-      <NumberInput
-        label="Durchm."
-        value={diameter}
-        onChange={setDiameter}
-      />
+      {/* Liste der vorhandenen Tooling Holes */}
+      {holeCount > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-700">Platzierte Bohrungen:</span>
+            <button
+              onClick={clearAllToolingHoles}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Alle löschen
+            </button>
+          </div>
 
-      <div className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          id="plated"
-          checked={plated}
-          onChange={(e) => setPlated(e.target.checked)}
-          className="rounded"
-        />
-        <label htmlFor="plated" className="text-xs text-gray-600">
-          Durchkontaktiert (PTH)
-        </label>
+          <div className="space-y-2 max-h-48 overflow-y-auto">
+            {panel.toolingHoles.map((hole, index) => (
+              <ToolingHoleItem
+                key={hole.id}
+                index={index + 1}
+                hole={hole}
+                isSelected={hole.id === selectedToolingHoleId}
+                onSelect={() => selectToolingHole(hole.id)}
+                onUpdatePosition={(pos) => updateToolingHolePosition(hole.id, pos)}
+                onRemove={() => removeToolingHole(hole.id)}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Neue Tooling Holes hinzufügen */}
+      <div className={cn(holeCount > 0 ? "border-t pt-3 mt-3" : "")}>
+        <div className="text-xs font-medium text-gray-700 mb-2">Neue Bohrungen:</div>
+
+        <div className="grid grid-cols-2 gap-2">
+          <NumberInput
+            label="Durchm."
+            value={diameter}
+            onChange={setDiameter}
+          />
+          <NumberInput
+            label="Abstand vom Rand"
+            value={offset}
+            onChange={setOffset}
+          />
+        </div>
+
+        <div className="flex items-center gap-2 mt-2">
+          <input
+            type="checkbox"
+            id="plated"
+            checked={plated}
+            onChange={(e) => setPlated(e.target.checked)}
+            className="rounded"
+          />
+          <label htmlFor="plated" className="text-xs text-gray-600">
+            Durchkontaktiert (PTH)
+          </label>
+        </div>
+
+        <button
+          onClick={addCornerHoles}
+          className="w-full btn-secondary text-sm mt-3"
+        >
+          4 Eck-Bohrungen hinzufügen
+        </button>
       </div>
+    </div>
+  );
+}
 
-      <button
-        onClick={addCornerHoles}
-        className="w-full btn-secondary text-sm"
-      >
-        Eck-Bohrungen hinzufügen
-      </button>
+// Einzelnes Tooling Hole Item mit editierbaren Koordinaten (wie FiducialItem)
+interface ToolingHoleItemProps {
+  index: number;
+  hole: { id: string; position: { x: number; y: number }; diameter: number; plated: boolean };
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdatePosition: (position: { x: number; y: number }) => void;
+  onRemove: () => void;
+}
+
+function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, onRemove }: ToolingHoleItemProps) {
+  const [xValue, setXValue] = useState(hole.position.x.toFixed(2));
+  const [yValue, setYValue] = useState(hole.position.y.toFixed(2));
+
+  useEffect(() => {
+    setXValue(hole.position.x.toFixed(2));
+    setYValue(hole.position.y.toFixed(2));
+  }, [hole.position]);
+
+  const handleXBlur = () => {
+    const x = parseFloat(xValue);
+    if (!isNaN(x)) {
+      onUpdatePosition({ x, y: hole.position.y });
+    }
+  };
+
+  const handleYBlur = () => {
+    const y = parseFloat(yValue);
+    if (!isNaN(y)) {
+      onUpdatePosition({ x: hole.position.x, y });
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent, handler: () => void) => {
+    if (e.key === 'Enter') handler();
+  };
+
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        "rounded p-2 text-xs cursor-pointer transition-all",
+        isSelected
+          ? "bg-orange-100 ring-2 ring-orange-400 shadow-lg shadow-orange-200"
+          : "bg-gray-50 hover:bg-gray-100"
+      )}
+    >
+      <div className="flex items-center justify-between mb-1">
+        <span className={cn(
+          "font-medium",
+          isSelected ? "text-orange-700" : "text-gray-700"
+        )}>
+          Bohrung {index} {hole.plated ? '(PTH)' : '(NPTH)'} {isSelected && "✓"}
+        </span>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove();
+          }}
+          className="text-red-400 hover:text-red-600 text-xs"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500 w-4">X:</span>
+          <input
+            type="text"
+            value={xValue}
+            onChange={(e) => setXValue(e.target.value)}
+            onBlur={handleXBlur}
+            onKeyDown={(e) => handleKeyDown(e, handleXBlur)}
+            className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
+          />
+          <span className="text-gray-400">mm</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500 w-4">Y:</span>
+          <input
+            type="text"
+            value={yValue}
+            onChange={(e) => setYValue(e.target.value)}
+            onBlur={handleYBlur}
+            onKeyDown={(e) => handleKeyDown(e, handleYBlur)}
+            className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
+          />
+          <span className="text-gray-400">mm</span>
+        </div>
+      </div>
     </div>
   );
 }

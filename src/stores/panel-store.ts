@@ -7,7 +7,7 @@
  * Der Store enthält:
  * - Alle importierten Boards
  * - Alle Board-Instanzen im Panel
- * - Panel-Konfiguration (Rahmen, Tabs, Fiducials, etc.)
+ * - Panel-Konfiguration (Nutzenrand, Tabs, Fiducials, etc.)
  * - Viewport-Zustand (Zoom, Pan)
  * - Aktives Werkzeug
  */
@@ -61,6 +61,9 @@ interface PanelStore {
   /** Aktuell ausgewähltes Fiducial (für Bearbeitung im Properties Panel) */
   selectedFiducialId: string | null;
 
+  /** Aktuell ausgewählte Tooling-Bohrung (für Bearbeitung im Properties Panel) */
+  selectedToolingHoleId: string | null;
+
   /** Undo/Redo History (für später) */
   history: {
     past: Panel[];
@@ -85,6 +88,18 @@ interface PanelStore {
 
   /** Ändert den Typ eines Layers */
   setLayerType: (boardId: string, layerId: string, newType: string, newColor: string) => void;
+
+  /** Dreht die Gerber-Layer eines Boards um 90° gegen den Uhrzeigersinn */
+  rotateBoardLayers: (boardId: string) => void;
+
+  /** Dreht das gesamte Panel um 90° gegen den Uhrzeigersinn (alle Positionen, Nutzenrand, etc.) */
+  rotatePanelCCW: () => void;
+
+  /** Spiegelt die Gerber-Layer an der X-Achse (horizontal) */
+  toggleBoardMirrorX: (boardId: string) => void;
+
+  /** Spiegelt die Gerber-Layer an der Y-Achse (vertikal) */
+  toggleBoardMirrorY: (boardId: string) => void;
 
   // --------------------------------------------------------------------------
   // Board-Instanz-Aktionen (Platzieren, Verschieben, Rotieren)
@@ -122,7 +137,7 @@ interface PanelStore {
   // Panel-Konfiguration
   // --------------------------------------------------------------------------
 
-  /** Setzt die Rahmen-Konfiguration */
+  /** Setzt die Nutzenrand-Konfiguration und berechnet Panel-Größe automatisch neu */
   setFrame: (frame: Partial<PanelFrame>) => void;
 
   /** Setzt die Panel-Größe direkt */
@@ -176,6 +191,15 @@ interface PanelStore {
 
   /** Entfernt eine Tooling-Bohrung */
   removeToolingHole: (holeId: string) => void;
+
+  /** Entfernt alle Tooling-Bohrungen */
+  clearAllToolingHoles: () => void;
+
+  /** Aktualisiert die Position einer Tooling-Bohrung */
+  updateToolingHolePosition: (holeId: string, position: Point) => void;
+
+  /** Wählt eine Tooling-Bohrung aus */
+  selectToolingHole: (holeId: string | null) => void;
 
   /** Fügt eine V-Score Linie hinzu */
   addVScoreLine: (line: Omit<VScoreLine, 'id'>) => void;
@@ -268,6 +292,7 @@ function createEmptyPanel(): Panel {
       right: 5,
       top: 5,
       bottom: 5,
+      cornerRadius: 0,
     },
     width: 100,
     height: 100,
@@ -314,6 +339,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   unit: 'mm',
   selectedInstances: [],
   selectedFiducialId: null,
+  selectedToolingHoleId: null,
   history: {
     past: [],
     future: [],
@@ -404,6 +430,135 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
     })),
+
+  rotateBoardLayers: (boardId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        boards: state.panel.boards.map((board) => {
+          if (board.id !== boardId) return board;
+          // 90° gegen den Uhrzeigersinn weiterdrehen: 0 → 90 → 180 → 270 → 0
+          const nextRotation = (((board.layerRotation || 0) + 90) % 360) as 0 | 90 | 180 | 270;
+          return { ...board, layerRotation: nextRotation };
+        }),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  toggleBoardMirrorX: (boardId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        boards: state.panel.boards.map((board) =>
+          board.id === boardId ? { ...board, mirrorX: !board.mirrorX } : board
+        ),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  toggleBoardMirrorY: (boardId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        boards: state.panel.boards.map((board) =>
+          board.id === boardId ? { ...board, mirrorY: !board.mirrorY } : board
+        ),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Dreht das gesamte Panel um 90° gegen den Uhrzeigersinn.
+  // Dabei werden alle Positionen transformiert:
+  // - Board-Instanzen: Position + Instanz-Rotation
+  // - Fiducials, Tooling Holes, V-Score Linien
+  // - Nutzenrand (left/right/top/bottom werden getauscht)
+  // - Panel-Breite und -Höhe werden getauscht
+  rotatePanelCCW: () =>
+    set((state) => {
+      const { panel } = state;
+      const oldWidth = panel.width;
+
+      // --- Board-Instanzen rotieren ---
+      // Für jede Instanz: Position transformieren und Rotation +90°
+      const newInstances = panel.instances.map((inst) => {
+        const board = panel.boards.find((b) => b.id === inst.boardId);
+        if (!board) return inst;
+
+        // Display-Breite berechnen (berücksichtigt Layer-Rotation und Instanz-Rotation)
+        const layerRotation = board.layerRotation || 0;
+        const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+        const effectiveW = isLayerRotated ? board.height : board.width;
+        const effectiveH = isLayerRotated ? board.width : board.height;
+        const isInstanceRotated = inst.rotation === 90 || inst.rotation === 270;
+        const displayW = isInstanceRotated ? effectiveH : effectiveW;
+
+        // 90° CCW Transformation: (x, y) → (y, oldWidth - x - displayWidth)
+        const newX = inst.position.y;
+        const newY = oldWidth - inst.position.x - displayW;
+
+        // Instanz-Rotation um 90° erhöhen
+        const newRotation = ((inst.rotation + 90) % 360) as 0 | 90 | 180 | 270;
+
+        return {
+          ...inst,
+          position: { x: newX, y: newY },
+          rotation: newRotation,
+        };
+      });
+
+      // --- Fiducials rotieren ---
+      // Punkt-Transformation: (x, y) → (y, oldWidth - x)
+      const newFiducials = panel.fiducials.map((f) => ({
+        ...f,
+        position: {
+          x: f.position.y,
+          y: oldWidth - f.position.x,
+        },
+      }));
+
+      // --- Tooling Holes rotieren ---
+      const newToolingHoles = panel.toolingHoles.map((h) => ({
+        ...h,
+        position: {
+          x: h.position.y,
+          y: oldWidth - h.position.x,
+        },
+      }));
+
+      // --- V-Score Linien rotieren ---
+      const newVScoreLines = panel.vscoreLines.map((l) => ({
+        ...l,
+        start: { x: l.start.y, y: oldWidth - l.start.x },
+        end: { x: l.end.y, y: oldWidth - l.end.x },
+      }));
+
+      // --- Nutzenrand rotieren ---
+      // Bei 90° CCW: left→bottom, top→left, right→top, bottom→right
+      const newFrame = {
+        left: panel.frame.top,
+        top: panel.frame.right,
+        right: panel.frame.bottom,
+        bottom: panel.frame.left,
+        cornerRadius: panel.frame.cornerRadius,
+      };
+
+      return {
+        panel: {
+          ...panel,
+          // Breite und Höhe tauschen
+          width: panel.height,
+          height: panel.width,
+          instances: newInstances,
+          fiducials: newFiducials,
+          toolingHoles: newToolingHoles,
+          vscoreLines: newVScoreLines,
+          frame: newFrame,
+          // Tabs müssen nach Rotation neu verteilt werden
+          tabs: [],
+          modifiedAt: new Date(),
+        },
+      };
+    }),
 
   // --------------------------------------------------------------------------
   // Board-Instanz-Aktionen
@@ -559,14 +714,41 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // Panel-Konfiguration
   // --------------------------------------------------------------------------
 
-  setFrame: (frame) =>
+  setFrame: (frame) => {
+    const currentState = get();
+    const oldFrame = currentState.panel.frame;
+    const newFrame = { ...oldFrame, ...frame };
+
+    // Wie viel hat sich links/unten geändert?
+    // Boards müssen verschoben werden, damit sie nicht im Nutzenrand landen
+    const dx = newFrame.left - oldFrame.left;
+    const dy = newFrame.bottom - oldFrame.bottom;
+
+    // Panel-Größe anpassen: Differenz aller Ränder addieren/subtrahieren
+    const widthDiff = (newFrame.left - oldFrame.left) + (newFrame.right - oldFrame.right);
+    const heightDiff = (newFrame.top - oldFrame.top) + (newFrame.bottom - oldFrame.bottom);
+
     set((state) => ({
       panel: {
         ...state.panel,
-        frame: { ...state.panel.frame, ...frame },
+        frame: newFrame,
+        // Panel-Größe direkt anpassen (min. 10mm)
+        width: Math.max(10, state.panel.width + widthDiff),
+        height: Math.max(10, state.panel.height + heightDiff),
+        // Boards verschieben wenn sich links oder unten ändert
+        instances: (dx !== 0 || dy !== 0)
+          ? state.panel.instances.map((inst) => ({
+              ...inst,
+              position: {
+                x: inst.position.x + dx,
+                y: inst.position.y + dy,
+              },
+            }))
+          : state.panel.instances,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   setPanelSize: (width, height) =>
     set((state) => ({
@@ -622,7 +804,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         maxY = Math.max(maxY, top);
       }
 
-      // Rahmen hinzufügen
+      // Nutzenrand hinzufügen
       const totalWidth = maxX + frame.left + frame.right;
       const totalHeight = maxY + frame.top + frame.bottom;
 
@@ -686,7 +868,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         const edges: Array<'top' | 'bottom' | 'left' | 'right'> = ['top', 'bottom', 'left', 'right'];
 
         for (const edge of edges) {
-          // Prüfen ob die Kante am Rahmen liegt (nicht zwischen Boards)
+          // Prüfen ob die Kante am Nutzenrand liegt (nicht zwischen Boards)
           const edgeLength = (edge === 'top' || edge === 'bottom') ? boardWidth : boardHeight;
 
           // Tabs gleichmäßig verteilen
@@ -779,6 +961,36 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         toolingHoles: state.panel.toolingHoles.filter((h) => h.id !== holeId),
         modifiedAt: new Date(),
       },
+      // Falls die gelöschte Bohrung ausgewählt war, Auswahl zurücksetzen
+      selectedToolingHoleId:
+        state.selectedToolingHoleId === holeId ? null : state.selectedToolingHoleId,
+    })),
+
+  clearAllToolingHoles: () =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        toolingHoles: [],
+        modifiedAt: new Date(),
+      },
+      selectedToolingHoleId: null,
+    })),
+
+  updateToolingHolePosition: (holeId, position) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        toolingHoles: state.panel.toolingHoles.map((h) =>
+          h.id === holeId ? { ...h, position } : h
+        ),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Wählt eine Tooling-Bohrung aus (oder null zum Abwählen)
+  selectToolingHole: (holeId) =>
+    set(() => ({
+      selectedToolingHoleId: holeId,
     })),
 
   addVScoreLine: (line) =>
@@ -970,3 +1182,8 @@ export const useGrid = () => usePanelStore((state) => state.grid);
  * Gibt das ausgewählte Fiducial zurück
  */
 export const useSelectedFiducialId = () => usePanelStore((state) => state.selectedFiducialId);
+
+/**
+ * Gibt die ausgewählte Tooling-Bohrung zurück
+ */
+export const useSelectedToolingHoleId = () => usePanelStore((state) => state.selectedToolingHoleId);

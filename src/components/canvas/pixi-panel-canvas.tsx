@@ -18,6 +18,7 @@ import {
   useInstances,
   useActiveTool,
   useSelectedFiducialId,
+  useSelectedToolingHoleId,
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
@@ -53,10 +54,14 @@ export function PixiPanelCanvas() {
   const boards = useBoards();
   const instances = useInstances();
   const selectedFiducialId = useSelectedFiducialId();
+  const selectedToolingHoleId = useSelectedToolingHoleId();
 
   // Store-Aktionen
   const setViewport = usePanelStore((state) => state.setViewport);
   const selectFiducial = usePanelStore((state) => state.selectFiducial);
+  const updateFiducialPosition = usePanelStore((state) => state.updateFiducialPosition);
+  const selectToolingHole = usePanelStore((state) => state.selectToolingHole);
+  const updateToolingHolePosition = usePanelStore((state) => state.updateToolingHolePosition);
 
   // Lokaler State
   const [isReady, setIsReady] = useState(false);
@@ -66,6 +71,18 @@ export function PixiPanelCanvas() {
   const lastMousePosRef = useRef({ x: 0, y: 0 });
   const viewportRef = useRef(viewport);
   const [cursorStyle, setCursorStyle] = useState('grab');
+
+  // Refs für Drag & Drop von Fiducials und Tooling Holes (vermeidet Re-Renders)
+  // Generisch: dragItemType bestimmt ob Fiducial oder Tooling Hole gezogen wird
+  const isDraggingItemRef = useRef(false);
+  const draggedItemIdRef = useRef<string | null>(null);
+  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | null>(null);
+  const dragOffsetRef = useRef({ x: 0, y: 0 });
+  // Grid-Ref damit der Drag-Handler immer den aktuellen Wert hat
+  const gridRef = useRef(grid);
+  useEffect(() => {
+    gridRef.current = grid;
+  }, [grid]);
 
   // Viewport-Ref aktuell halten
   useEffect(() => {
@@ -132,12 +149,25 @@ export function PixiPanelCanvas() {
     // Alles löschen
     container.removeChildren();
 
-    // Panel-Rahmen zeichnen
+    // Nutzenrand zeichnen (mit optionalem Eckenradius)
     const frameGraphics = new Graphics();
-    frameGraphics
-      .rect(0, 0, panel.width * PIXELS_PER_MM, panel.height * PIXELS_PER_MM)
-      .fill({ color: COLORS.panelFrame })
-      .stroke({ color: COLORS.panelBorder, width: 2 });
+    const panelW = panel.width * PIXELS_PER_MM;
+    const panelH = panel.height * PIXELS_PER_MM;
+    const cornerR = panel.frame.cornerRadius * PIXELS_PER_MM;
+
+    if (cornerR > 0) {
+      // Abgerundete Ecken
+      frameGraphics
+        .roundRect(0, 0, panelW, panelH, cornerR)
+        .fill({ color: COLORS.panelFrame })
+        .stroke({ color: COLORS.panelBorder, width: 2 });
+    } else {
+      // Normale eckige Form
+      frameGraphics
+        .rect(0, 0, panelW, panelH)
+        .fill({ color: COLORS.panelFrame })
+        .stroke({ color: COLORS.panelBorder, width: 2 });
+    }
     container.addChild(frameGraphics);
 
     // Grid zeichnen (nur Major-Linien)
@@ -198,22 +228,84 @@ export function PixiPanelCanvas() {
       const isSelected = fiducial.id === selectedFiducialId;
       const fiducialContainer = createFiducialGraphics(fiducial, isSelected);
 
-      // Interaktiv machen für Mausklicks
+      // Interaktiv machen für Mausklicks und Drag & Drop
       fiducialContainer.eventMode = 'static';
       fiducialContainer.cursor = 'pointer';
 
-      // Klick-Handler: Fiducial auswählen
+      // Pointerdown-Handler: Fiducial auswählen UND Drag starten
       fiducialContainer.on('pointerdown', (event) => {
+        // Verhindert, dass das Canvas-Panning startet
         event.stopPropagation();
+        // Fiducial auswählen, Tooling Hole abwählen
         selectFiducial(fiducial.id);
+        selectToolingHole(null);
+
+        // Drag starten: Offset zwischen Mausklick und Fiducial-Mittelpunkt berechnen
+        // So "springt" das Fiducial nicht zum Mauszeiger, sondern wird smooth gezogen
+        const vp = viewportRef.current;
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+
+        // Fiducial-Position in Screen-Koordinaten umrechnen
+        const fiducialScreenX = fiducial.position.x * PIXELS_PER_MM * vp.scale + vp.offsetX;
+        const fiducialScreenY = fiducial.position.y * PIXELS_PER_MM * vp.scale + vp.offsetY;
+
+        // Offset = Differenz zwischen Mausklick und Fiducial-Mittelpunkt
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+        dragOffsetRef.current = {
+          x: mouseX - fiducialScreenX,
+          y: mouseY - fiducialScreenY,
+        };
+
+        // Generischen Drag-State setzen
+        isDraggingItemRef.current = true;
+        draggedItemIdRef.current = fiducial.id;
+        dragItemTypeRef.current = 'fiducial';
+        setCursorStyle('grabbing');
       });
 
       container.addChild(fiducialContainer);
     }
 
-    // Tooling Holes rendern
+    // Tooling Holes rendern (interaktiv - klickbar und ziehbar wie Fiducials)
     for (const hole of panel.toolingHoles) {
-      const holeGraphics = createToolingHoleGraphics(hole);
+      const isHoleSelected = hole.id === selectedToolingHoleId;
+      const holeGraphics = createToolingHoleGraphics(hole, isHoleSelected);
+
+      // Interaktiv machen für Mausklicks und Drag & Drop
+      holeGraphics.eventMode = 'static';
+      holeGraphics.cursor = 'pointer';
+
+      // Pointerdown-Handler: Tooling Hole auswählen UND Drag starten
+      holeGraphics.on('pointerdown', (event) => {
+        event.stopPropagation();
+        // Tooling Hole auswählen, Fiducial abwählen
+        selectToolingHole(hole.id);
+        selectFiducial(null);
+
+        // Drag starten: Offset berechnen
+        const vp = viewportRef.current;
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+
+        const holeScreenX = hole.position.x * PIXELS_PER_MM * vp.scale + vp.offsetX;
+        const holeScreenY = hole.position.y * PIXELS_PER_MM * vp.scale + vp.offsetY;
+
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+        dragOffsetRef.current = {
+          x: mouseX - holeScreenX,
+          y: mouseY - holeScreenY,
+        };
+
+        // Generischen Drag-State setzen
+        isDraggingItemRef.current = true;
+        draggedItemIdRef.current = hole.id;
+        dragItemTypeRef.current = 'toolingHole';
+        setCursorStyle('grabbing');
+      });
+
       container.addChild(holeGraphics);
     }
 
@@ -230,14 +322,15 @@ export function PixiPanelCanvas() {
       container.addChild(tabGraphics);
     }
 
-    // Klick auf leere Fläche: Auswahl aufheben
+    // Klick auf leere Fläche: Auswahl aufheben (Fiducials + Tooling Holes)
     container.eventMode = 'static';
     container.on('pointerdown', () => {
       selectFiducial(null);
+      selectToolingHole(null);
     });
 
     console.log(`Rendered ${instances.length} boards, ${panel.fiducials.length} fiducials, ${panel.tabs.length} tabs with WebGL`);
-  }, [isReady, panel, grid, boards, instances, selectedFiducialId, selectFiducial]);
+  }, [isReady, panel, grid, boards, instances, selectedFiducialId, selectedToolingHoleId, selectFiducial, selectToolingHole]);
 
   // ----------------------------------------------------------------
   // Mausrad-Zoom (natives Event für passive: false)
@@ -286,8 +379,12 @@ export function PixiPanelCanvas() {
   // Maus-Panning (mit Refs für Performance)
   // ----------------------------------------------------------------
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    // Wenn ein Item-Drag gerade gestartet wurde (durch PixiJS pointerdown),
+    // dann KEIN Panning starten - das Item wird stattdessen gezogen
+    if (isDraggingItemRef.current) return;
+
     if (e.button === 1 || e.button === 0) {
-      // Mittlere oder linke Maustaste
+      // Mittlere oder linke Maustaste → Panning starten
       isPanningRef.current = true;
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
       setCursorStyle('grabbing');
@@ -295,6 +392,38 @@ export function PixiPanelCanvas() {
   }, []);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
+    // === Item Drag (Fiducial oder Tooling Hole): Position aktualisieren ===
+    if (isDraggingItemRef.current && draggedItemIdRef.current) {
+      const vp = viewportRef.current;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+
+      // Mausposition relativ zum Container
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+
+      // Screen-Koordinaten → mm-Koordinaten umrechnen
+      // Offset abziehen (damit kein "Sprung" beim Anfassen)
+      let mmX = (mouseX - dragOffsetRef.current.x - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+      let mmY = (mouseY - dragOffsetRef.current.y - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+      // Snap-to-Grid anwenden, wenn aktiviert
+      const currentGrid = gridRef.current;
+      if (currentGrid.snapEnabled) {
+        mmX = snapToGrid(mmX, currentGrid.size);
+        mmY = snapToGrid(mmY, currentGrid.size);
+      }
+
+      // Position im Store aktualisieren - je nach Item-Typ
+      if (dragItemTypeRef.current === 'fiducial') {
+        updateFiducialPosition(draggedItemIdRef.current, { x: mmX, y: mmY });
+      } else if (dragItemTypeRef.current === 'toolingHole') {
+        updateToolingHolePosition(draggedItemIdRef.current, { x: mmX, y: mmY });
+      }
+      return;
+    }
+
+    // === Normales Panning ===
     if (isPanningRef.current) {
       const dx = e.clientX - lastMousePosRef.current.x;
       const dy = e.clientY - lastMousePosRef.current.y;
@@ -307,9 +436,15 @@ export function PixiPanelCanvas() {
 
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
     }
-  }, [setViewport]);
+  }, [setViewport, updateFiducialPosition, updateToolingHolePosition]);
 
   const handleMouseUp = useCallback(() => {
+    // Item-Drag beenden (Fiducial oder Tooling Hole)
+    isDraggingItemRef.current = false;
+    draggedItemIdRef.current = null;
+    dragItemTypeRef.current = null;
+
+    // Panning beenden
     isPanningRef.current = false;
     setCursorStyle('grab');
   }, []);
@@ -337,29 +472,63 @@ export function PixiPanelCanvas() {
 function createBoardGraphics(board: Board, instance: BoardInstance): Container {
   const container = new Container();
 
-  // Position setzen
-  container.position.set(
-    instance.position.x * PIXELS_PER_MM,
-    instance.position.y * PIXELS_PER_MM
-  );
+  // Layer-Rotation: Bei 90°/270° werden Breite und Höhe getauscht
+  // Defaults für Boards die vor dem Update importiert wurden
+  const layerRotation = board.layerRotation || 0;
+  const mirrorX = board.mirrorX || false;
+  const mirrorY = board.mirrorY || false;
+  const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+  const effectiveW = isLayerRotated ? board.height : board.width;
+  const effectiveH = isLayerRotated ? board.width : board.height;
+
+  // WICHTIG: Alle lokalen Zeichnungen (Hintergrund, Umriss, Gerber, Text)
+  // verwenden IMMER effectiveW × effectiveH (OHNE Instance-Rotation-Swap).
+  // Die PixiJS-Container-Rotation dreht den gesamten Inhalt visuell.
+  // So drehen sich Hintergrund, Gerber-Daten und Text alle zusammen.
+  const localW = effectiveW * PIXELS_PER_MM;
+  const localH = effectiveH * PIXELS_PER_MM;
+
+  // Position + Rotation setzen
+  // PixiJS rotiert um den lokalen Nullpunkt (0,0) des Containers.
+  // Dadurch rutscht der Inhalt nach der Rotation in den negativen Bereich.
+  // Wir kompensieren das mit einem Positions-Offset, damit das Board
+  // nach der Drehung an der richtigen Stelle im Panel erscheint.
+  const posX = instance.position.x * PIXELS_PER_MM;
+  const posY = instance.position.y * PIXELS_PER_MM;
+
+  switch (instance.rotation) {
+    case 0:
+      // Keine Drehung → kein Offset nötig
+      container.position.set(posX, posY);
+      break;
+    case 90:
+      // 90° CW in PixiJS: Inhalt geht nach links → Offset um localH nach rechts
+      container.position.set(posX + localH, posY);
+      break;
+    case 180:
+      // 180°: Inhalt geht nach links und oben → Offset um (localW, localH)
+      container.position.set(posX + localW, posY + localH);
+      break;
+    case 270:
+      // 270° CW: Inhalt geht nach oben → Offset um localW nach unten
+      container.position.set(posX, posY + localW);
+      break;
+    default:
+      container.position.set(posX, posY);
+  }
   container.rotation = (instance.rotation * Math.PI) / 180;
 
-  // Board-Größe
-  const isRotated = instance.rotation === 90 || instance.rotation === 270;
-  const width = isRotated ? board.height : board.width;
-  const height = isRotated ? board.width : board.height;
-
-  // Board-Hintergrund (PCB-Substrat Farbe)
+  // Board-Hintergrund (PCB-Substrat Farbe) - mit lokalen Dimensionen
   const background = new Graphics();
   background
-    .rect(0, 0, width * PIXELS_PER_MM, height * PIXELS_PER_MM)
+    .rect(0, 0, localW, localH)
     .fill({ color: 0x1a3d1a }); // Dunkles Grün wie PCB
   container.addChild(background);
 
-  // Board-Umriss
+  // Board-Umriss - mit lokalen Dimensionen
   const outline = new Graphics();
   outline
-    .rect(0, 0, width * PIXELS_PER_MM, height * PIXELS_PER_MM)
+    .rect(0, 0, localW, localH)
     .stroke({
       color: instance.selected ? COLORS.boardSelected : COLORS.boardStroke,
       width: instance.selected ? 3 : 1,
@@ -370,20 +539,67 @@ function createBoardGraphics(board: Board, instance: BoardInstance): Container {
   const visibleLayers = board.layers.filter((l) => l.visible);
 
   if (visibleLayers.length > 0) {
-    // Container für Gerber mit Y-Flip
+    // Container für Gerber mit Y-Flip (Gerber Y-up → Canvas Y-down)
     const gerberContainer = new Container();
-    gerberContainer.position.set(0, height * PIXELS_PER_MM);
+    gerberContainer.position.set(0, localH);
     gerberContainer.scale.set(1, -1);
+
+    // Rotation-Container: Dreht die Layer im Gegenuhrzeigersinn um den Nullpunkt
+    // Nach der Rotation wird ein Offset gesetzt, damit die Daten im Board-Rect bleiben
+    const rotationContainer = new Container();
+    if (layerRotation) {
+      // Negative Rotation = Gegenuhrzeigersinn in PixiJS
+      rotationContainer.rotation = -(layerRotation * Math.PI) / 180;
+
+      // Original-Gerber-Dimensionen in Pixel (vor Rotation)
+      const origW = board.width * PIXELS_PER_MM;
+      const origH = board.height * PIXELS_PER_MM;
+
+      // Offset: Verschiebt die rotierten Daten zurück in den sichtbaren Bereich
+      switch (layerRotation) {
+        case 90:
+          rotationContainer.position.set(0, origW);
+          break;
+        case 180:
+          rotationContainer.position.set(origW, origH);
+          break;
+        case 270:
+          rotationContainer.position.set(origH, 0);
+          break;
+      }
+    }
 
     // Alle sichtbaren Layer rendern
     for (const layer of visibleLayers) {
       if (!layer.parsedData) continue;
 
       const layerGraphics = createLayerGraphics(layer);
-      gerberContainer.addChild(layerGraphics);
+      rotationContainer.addChild(layerGraphics);
     }
 
-    container.addChild(gerberContainer);
+    gerberContainer.addChild(rotationContainer);
+
+    // Spiegel-Container: Spiegelt die Gerber-Layer an X- oder Y-Achse
+    // Liegt zwischen Board-Container und gerberContainer
+    if (mirrorX || mirrorY) {
+      const mirrorContainer = new Container();
+      mirrorContainer.addChild(gerberContainer);
+
+      // Spiegelung + Offset, damit das Bild im Board-Rect bleibt
+      // Verwendet lokale Dimensionen (effectiveW/effectiveH)
+      if (mirrorX) {
+        mirrorContainer.scale.y = -1;
+        mirrorContainer.position.y += localH;
+      }
+      if (mirrorY) {
+        mirrorContainer.scale.x = -1;
+        mirrorContainer.position.x += localW;
+      }
+
+      container.addChild(mirrorContainer);
+    } else {
+      container.addChild(gerberContainer);
+    }
   }
 
   // Board-Name
@@ -396,16 +612,16 @@ function createBoardGraphics(board: Board, instance: BoardInstance): Container {
   nameText.position.set(5, 5);
   container.addChild(nameText);
 
-  // Größenangabe
+  // Größenangabe (zeigt die effektive Größe nach Layer-Rotation)
   const sizeStyle = new TextStyle({
     fontSize: 8,
     fill: 0x9ca3af,
   });
   const sizeText = new Text({
-    text: `${width.toFixed(1)} × ${height.toFixed(1)} mm`,
+    text: `${effectiveW.toFixed(1)} × ${effectiveH.toFixed(1)} mm`,
     style: sizeStyle,
   });
-  sizeText.position.set(5, height * PIXELS_PER_MM - 15);
+  sizeText.position.set(5, localH - 15);
   container.addChild(sizeText);
 
   return container;
@@ -534,22 +750,33 @@ function createFiducialGraphics(fiducial: Fiducial, isSelected: boolean = false)
 // Tooling Hole Graphics erstellen
 // ============================================================================
 
-function createToolingHoleGraphics(hole: ToolingHole): Graphics {
+function createToolingHoleGraphics(hole: ToolingHole, isSelected: boolean = false): Graphics {
   const graphics = new Graphics();
   const x = hole.position.x * PIXELS_PER_MM;
   const y = hole.position.y * PIXELS_PER_MM;
   const radius = (hole.diameter / 2) * PIXELS_PER_MM;
 
-  // Bohrung als dunkler Kreis
-  graphics.circle(x, y, radius).fill({ color: 0x1a1a1a });
+  // Wenn ausgewählt: Leuchtender Rand (Glow-Effekt, wie bei Fiducials)
+  if (isSelected) {
+    const glowRadius = radius + 4;
+    graphics.circle(x, y, glowRadius).stroke({ color: 0xffa500, width: 4, alpha: 0.8 }); // Orange
+    graphics.circle(x, y, glowRadius + 2).stroke({ color: 0xffcc00, width: 2, alpha: 0.5 }); // Gelb
+  }
 
   // Ring um die Bohrung (durchkontaktiert oder nicht)
   if (hole.plated) {
     // PTH - mit Kupferring
-    graphics.circle(x, y, radius + 1).stroke({ color: 0xc0c0c0, width: 2 });
+    graphics.circle(x, y, radius + 1).fill({ color: isSelected ? 0xffd700 : 0xc0c0c0 });
+  }
+
+  // Bohrung als dunkler Kreis
+  graphics.circle(x, y, radius).fill({ color: 0x1a1a1a });
+
+  // Rand
+  if (hole.plated) {
+    graphics.circle(x, y, radius + 1).stroke({ color: isSelected ? 0xffd700 : 0xc0c0c0, width: 2 });
   } else {
-    // NPTH - einfacher Rand
-    graphics.circle(x, y, radius).stroke({ color: 0x404040, width: 1 });
+    graphics.circle(x, y, radius).stroke({ color: isSelected ? 0xffa500 : 0x404040, width: isSelected ? 2 : 1 });
   }
 
   return graphics;

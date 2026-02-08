@@ -201,6 +201,9 @@ export function ImportDialog({ isOpen, onClose }: ImportDialogProps) {
       boundingBox: bbox,
       width: bbox.maxX - bbox.minX,
       height: bbox.maxY - bbox.minY,
+      layerRotation: 0,
+      mirrorX: false,
+      mirrorY: false,
       importedAt: new Date(),
     };
 

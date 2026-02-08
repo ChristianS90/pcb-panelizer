@@ -84,7 +84,7 @@ pcb-panelizer/
 
 1. **Board** - Ein importiertes PCB-Design mit allen Gerber-Layern
 2. **BoardInstance** - Eine platzierte Kopie eines Boards im Panel
-3. **Panel** - Das fertige Nutzen mit Rahmen, Boards, Tabs, Fiducials
+3. **Panel** - Das fertige Nutzen mit Nutzenrand, Boards, Tabs, Fiducials
 4. **Tab** - Verbindungssteg zwischen Board und Rahmen (Solid, Mouse Bites, V-Score)
 5. **Fiducial** - Referenzmarke für Pick & Place Maschinen
 6. **ToolingHole** - Bohrung für Fertigungsaufnahme
@@ -105,6 +105,7 @@ Der `usePanelStore` enthält:
 - `activeTool` - Ausgewähltes Werkzeug
 - `selectedInstances` - Ausgewählte Board-Instanzen
 - `selectedFiducialId` - Ausgewähltes Fiducial (für Bearbeitung)
+- `selectedToolingHoleId` - Ausgewählte Tooling-Bohrung (für Bearbeitung)
 
 ---
 
@@ -135,6 +136,20 @@ Der `usePanelStore` enthält:
 - [x] **PDF-Maßzeichnung** exportieren (A4 quer mit Bemaßungen)
 - [x] Fadenkreuz am Nullpunkt
 
+### Phase 3 - Erledigt
+
+- [x] **Fiducials Drag & Drop** im Canvas (per Maus verschieben, Snap-to-Grid)
+- [x] **Nutzenrand** (umbenannt von "Rahmen") mit automatischer Panel-Größenanpassung
+- [x] **Eckenradius** für Nutzenrand (0-20mm, roundRect-Rendering)
+- [x] **Einheitliche Nutzenrand-Breite** Checkbox (alle 4 Seiten gleich)
+- [x] **Layer-Rotation** pro Board (90° CCW um Nullpunkt, mit Offset-Korrektur)
+- [x] **Layer-Spiegelung** X/Y pro Board (mirrorX, mirrorY)
+- [x] **Unbekannte Layer** als "Unbekannt" markiert mit Warnung und deutschem Label-Dropdown
+- [x] **Panel-Rotation** (ganzes Panel 90° CCW: alle Positionen, Nutzenrand, Fiducials, Tooling Holes)
+- [x] **Tooling Holes Drag & Drop** im Canvas (wie Fiducials, mit Auswahl-Glow)
+- [x] **Tooling Holes Koordinaten** editierbar im Properties Panel (wie Fiducials)
+- [x] **Fiducials auf Stirnseiten** (kurze Seiten, nicht Ecken, damit Klemmungen nicht abdecken)
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
@@ -162,9 +177,31 @@ Der `usePanelStore` enthält:
 ### Fiducials hinzufügen
 1. Rechts **"Fiducials"** aufklappen
 2. Pad-Durchmesser und Masköffnung einstellen
-3. **"3 Eck-Fiducials"** oder **"4 Eck-Fiducials"** klicken
-4. Fiducials im Canvas anklicken um sie auszuwählen
-5. X/Y-Koordinaten rechts anpassen
+3. **"3 Stirnseiten-Fiducials"** oder **"4 Stirnseiten-Fiducials"** klicken
+   - Fiducials werden automatisch auf den **kurzen Seiten** (Stirnseiten) platziert
+   - Position: 5%/95% auf einer Seite, 10% auf der gegenüberliegenden
+   - So werden sie nicht von den Klemmungen in der Maschine abgedeckt
+4. Fiducials im Canvas anklicken um sie auszuwählen (orange Glow)
+5. Fiducials per **Drag & Drop** im Canvas verschieben (mit Snap-to-Grid)
+6. X/Y-Koordinaten rechts im Properties Panel fein anpassen
+
+### Tooling Holes hinzufügen
+1. Rechts **"Tooling"** aufklappen
+2. Durchmesser und PTH/NPTH einstellen
+3. **"4 Eck-Bohrungen hinzufügen"** klicken (platziert in allen 4 Ecken)
+4. Bohrungen im Canvas anklicken um sie auszuwählen (orange Glow)
+5. Bohrungen per **Drag & Drop** im Canvas verschieben
+6. X/Y-Koordinaten rechts im Properties Panel fein anpassen
+7. Einzelne Bohrungen löschen oder alle auf einmal
+
+### Panel drehen
+1. Rechts unter **"Array"** das Array erstellen
+2. **"Panel 90° drehen"** Button klicken
+3. Das gesamte Panel dreht sich 90° gegen den Uhrzeigersinn:
+   - Alle Board-Positionen und -Rotationen werden transformiert
+   - Fiducials, Tooling Holes, V-Score Linien drehen mit
+   - Nutzenrand-Seiten rotieren mit (links→unten, oben→links, etc.)
+   - Panel-Breite und -Höhe werden getauscht
 
 ### Tabs hinzufügen
 1. Rechts **"Tabs"** aufklappen
@@ -217,13 +254,28 @@ npm start
 `src/components/canvas/pixi-panel-canvas.tsx`
 
 ### Gerenderte Elemente
-- **Panel-Rahmen** (dunkelgrau)
+- **Nutzenrand** (dunkelgrau, optional mit Eckenradius)
 - **Grid** (nur Major-Linien bei 10x Grid-Size)
 - **Fadenkreuz** am Nullpunkt (rot)
-- **Boards** mit Gerber-Layern
-- **Fiducials** (grün, ausgewählt: gold mit orange Glow)
-- **Tooling Holes** (mit Kupferring wenn plated)
+- **Boards** mit Gerber-Layern (Rotation + Spiegelung pro Board, Instance-Rotation für Panel-Drehung)
+- **Fiducials** (grün, ausgewählt: gold mit orange Glow, **Drag & Drop**)
+- **Tooling Holes** (mit Kupferring wenn plated, ausgewählt: orange Glow, **Drag & Drop**)
 - **Tabs** (farbcodiert nach Typ)
+
+### Board-Container-Hierarchie (PixiJS)
+```
+boardContainer (position + instance.rotation mit Offset-Korrektur)
+├── background (effectiveW × effectiveH, grünes PCB-Substrat)
+├── outline (blauer Rand, gold wenn selected)
+├── [mirrorContainer] (optional, scale -1 für Spiegelung)
+│   └── gerberContainer (Y-Flip: position.y = localH, scale.y = -1)
+│       └── rotationContainer (layerRotation CCW + Offset)
+│           └── layerGraphics (Gerber-Daten)
+├── nameText
+└── sizeText
+```
+
+**Wichtig:** Alle lokalen Zeichnungen verwenden `effectiveW × effectiveH` (OHNE Instance-Rotation-Swap). Die PixiJS-Container-Rotation dreht alles zusammen. Ein Positions-Offset kompensiert die Rotation um (0,0).
 
 ### Farben
 ```javascript

@@ -24,6 +24,9 @@ import {
   Circle,
   Minus,
   RotateCw,
+  RotateCcw,
+  FlipHorizontal,
+  FlipVertical,
 } from 'lucide-react';
 import { usePanelStore, useBoards, useActiveTool } from '@/stores/panel-store';
 import { cn } from '@/lib/utils';
@@ -190,8 +193,19 @@ function LayerPanel() {
     setLayerType(firstBoard.id, layerId, newType, newColor);
   };
 
+  // Anzahl unbekannter Layer
+  const unknownCount = firstBoard.layers.filter((l) => l.type === 'unknown').length;
+
   return (
     <div className="space-y-2">
+      {/* Warnung bei unbekannten Layern */}
+      {unknownCount > 0 && (
+        <div className="bg-amber-50 border border-amber-300 rounded-lg p-2 text-xs text-amber-700">
+          <span className="font-medium">{unknownCount} Layer nicht zugewiesen.</span>
+          {' '}Bitte über das Dropdown den richtigen Typ wählen.
+        </div>
+      )}
+
       {/* Alle ein/aus Button */}
       <div className="flex items-center justify-between pb-2 border-b border-gray-200">
         <span className="text-xs text-gray-500">
@@ -232,14 +246,14 @@ function LayerPanel() {
                 'flex-1 text-xs px-1 py-0.5 border rounded bg-white',
                 'focus:outline-none focus:ring-1 focus:ring-primary-500',
                 layer.type === 'unknown'
-                  ? 'border-amber-300 bg-amber-50'
+                  ? 'border-amber-300 bg-amber-50 text-amber-700 font-medium'
                   : 'border-gray-200'
               )}
               title="Layer-Typ ändern"
             >
               {layerTypes.map((lt) => (
                 <option key={lt.type} value={lt.type}>
-                  {lt.type.replace(/-/g, ' ')}
+                  {lt.label}
                 </option>
               ))}
             </select>
@@ -280,6 +294,9 @@ function LayerPanel() {
 function BoardsPanel() {
   const boards = useBoards();
   const addBoardInstance = usePanelStore((state) => state.addBoardInstance);
+  const rotateBoardLayers = usePanelStore((state) => state.rotateBoardLayers);
+  const toggleBoardMirrorX = usePanelStore((state) => state.toggleBoardMirrorX);
+  const toggleBoardMirrorY = usePanelStore((state) => state.toggleBoardMirrorY);
 
   // Wenn keine Boards: Hinweis anzeigen
   if (boards.length === 0) {
@@ -328,6 +345,46 @@ function BoardsPanel() {
           {/* Board-Größe */}
           <div className="text-xs text-gray-500 mb-2">
             {board.width.toFixed(2)} × {board.height.toFixed(2)} mm
+          </div>
+
+          {/* Layer-Transformation: Rotation + Spiegelung */}
+          <div className="flex items-center gap-1 mb-2">
+            <button
+              onClick={() => rotateBoardLayers(board.id)}
+              className="flex items-center gap-1 text-xs bg-gray-100 hover:bg-primary-100
+                         text-gray-700 hover:text-primary-700 py-1 px-2
+                         rounded transition-colors"
+              title="90° gegen den Uhrzeigersinn drehen"
+            >
+              <RotateCcw className="w-3 h-3" />
+              {board.layerRotation || 0}°
+            </button>
+            <button
+              onClick={() => toggleBoardMirrorX(board.id)}
+              className={cn(
+                "flex items-center gap-1 text-xs py-1 px-2 rounded transition-colors",
+                board.mirrorX
+                  ? "bg-primary-200 text-primary-700 font-medium"
+                  : "bg-gray-100 text-gray-700 hover:bg-primary-100 hover:text-primary-700"
+              )}
+              title="An X-Achse spiegeln (horizontal)"
+            >
+              <FlipVertical className="w-3 h-3" />
+              X
+            </button>
+            <button
+              onClick={() => toggleBoardMirrorY(board.id)}
+              className={cn(
+                "flex items-center gap-1 text-xs py-1 px-2 rounded transition-colors",
+                board.mirrorY
+                  ? "bg-primary-200 text-primary-700 font-medium"
+                  : "bg-gray-100 text-gray-700 hover:bg-primary-100 hover:text-primary-700"
+              )}
+              title="An Y-Achse spiegeln (vertikal)"
+            >
+              <FlipHorizontal className="w-3 h-3" />
+              Y
+            </button>
           </div>
 
           {/* Aktionen */}

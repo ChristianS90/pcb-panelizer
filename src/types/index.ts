@@ -8,7 +8,7 @@
  * - GerberFile: Eine einzelne Gerber-Datei (z.B. Top-Copper, Drill)
  * - Board: Ein importiertes PCB-Design mit allen Layern
  * - BoardInstance: Eine platzierte Kopie eines Boards im Panel
- * - Panel: Das fertige Nutzen mit Rahmen und allen Boards
+ * - Panel: Das fertige Nutzen mit Nutzenrand und allen Boards
  */
 
 // ============================================================================
@@ -196,6 +196,12 @@ export interface Board {
   /** Größe in mm */
   width: number;
   height: number;
+  /** Rotation der Gerber-Layer um den Nullpunkt in Grad (0, 90, 180, 270) */
+  layerRotation: 0 | 90 | 180 | 270;
+  /** Gerber-Layer an X-Achse spiegeln (horizontal) */
+  mirrorX: boolean;
+  /** Gerber-Layer an Y-Achse spiegeln (vertikal) */
+  mirrorY: boolean;
   /** Importzeitpunkt */
   importedAt: Date;
 }
@@ -224,17 +230,19 @@ export interface BoardInstance {
 // ============================================================================
 
 /**
- * Konfiguration des Panel-Rahmens
+ * Konfiguration des Nutzenrands
  */
 export interface PanelFrame {
-  /** Rahmenbreite links */
+  /** Nutzenrand links */
   left: number;
-  /** Rahmenbreite rechts */
+  /** Nutzenrand rechts */
   right: number;
-  /** Rahmenbreite oben */
+  /** Nutzenrand oben */
   top: number;
-  /** Rahmenbreite unten */
+  /** Nutzenrand unten */
   bottom: number;
+  /** Eckenradius in mm (0 = eckig) */
+  cornerRadius: number;
 }
 
 /**
@@ -346,7 +354,7 @@ export interface Panel {
   boards: Board[];
   /** Alle platzierten Board-Instanzen */
   instances: BoardInstance[];
-  /** Panel-Rahmen Konfiguration */
+  /** Nutzenrand-Konfiguration */
   frame: PanelFrame;
   /** Gesamtgröße des Panels */
   width: number;

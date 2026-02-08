@@ -212,19 +212,19 @@ export function getLayerColor(type: GerberLayerType): string {
  */
 export function getAllLayerTypes(): { type: GerberLayerType; label: string }[] {
   return [
-    { type: 'top-copper', label: 'Top Copper (Oberseite Kupfer)' },
-    { type: 'bottom-copper', label: 'Bottom Copper (Unterseite Kupfer)' },
-    { type: 'inner-copper', label: 'Inner Copper (Innenlage)' },
-    { type: 'top-soldermask', label: 'Top Soldermask (Oberseite Lötstopplack)' },
-    { type: 'bottom-soldermask', label: 'Bottom Soldermask (Unterseite Lötstopplack)' },
-    { type: 'top-silkscreen', label: 'Top Silkscreen (Oberseite Bestückungsdruck)' },
-    { type: 'bottom-silkscreen', label: 'Bottom Silkscreen (Unterseite Bestückungsdruck)' },
-    { type: 'top-paste', label: 'Top Paste (Oberseite Lötpaste)' },
-    { type: 'bottom-paste', label: 'Bottom Paste (Unterseite Lötpaste)' },
-    { type: 'outline', label: 'Outline (Board-Kontur)' },
-    { type: 'drill', label: 'Drill (Bohrungen PTH)' },
-    { type: 'drill-npth', label: 'Drill NPTH (Bohrungen nicht durchkontaktiert)' },
-    { type: 'unknown', label: 'Unknown (Unbekannt)' },
+    { type: 'top-copper', label: 'Top Kupfer' },
+    { type: 'bottom-copper', label: 'Bottom Kupfer' },
+    { type: 'inner-copper', label: 'Innenlage Kupfer' },
+    { type: 'top-soldermask', label: 'Top Lötstopplack' },
+    { type: 'bottom-soldermask', label: 'Bottom Lötstopplack' },
+    { type: 'top-silkscreen', label: 'Top Bestückungsdruck' },
+    { type: 'bottom-silkscreen', label: 'Bottom Bestückungsdruck' },
+    { type: 'top-paste', label: 'Top Lötpaste' },
+    { type: 'bottom-paste', label: 'Bottom Lötpaste' },
+    { type: 'outline', label: 'Kontur / Outline' },
+    { type: 'drill', label: 'Bohrungen (PTH)' },
+    { type: 'drill-npth', label: 'Bohrungen (NPTH)' },
+    { type: 'unknown', label: '⚠ Unbekannt' },
   ];
 }
 
