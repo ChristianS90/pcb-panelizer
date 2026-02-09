@@ -41,9 +41,9 @@ pcb-panelizer/
 │   │   ├── ui/                 # Basis UI-Komponenten
 │   │   ├── layout/             # Layout-Komponenten
 │   │   │   ├── header.tsx      # Obere Toolbar (Import, Export, PDF)
-│   │   │   ├── sidebar.tsx     # Linke Sidebar (Layer, Boards, Tools)
+│   │   │   ├── sidebar.tsx     # Linke Sidebar (Layer, Boards) + Horizontale Toolbar
 │   │   │   ├── properties-panel.tsx  # Rechte Sidebar (Einstellungen)
-│   │   │   ├── statusbar.tsx   # Untere Statusleiste
+│   │   │   ├── statusbar.tsx   # Untere Statusleiste (Cursor-Koordinaten)
 │   │   │   └── main-layout.tsx # Gesamt-Layout
 │   │   ├── canvas/             # Canvas-Komponenten
 │   │   │   ├── pixi-panel-canvas.tsx # WebGL Canvas mit PixiJS
@@ -59,6 +59,8 @@ pcb-panelizer/
 │   │   │   └── gerber-renderer.ts # Gerber → PixiJS Graphics
 │   │   ├── export/             # Export-Funktionen
 │   │   │   └── dimension-drawing.ts # PDF-Maßzeichnung Generator
+│   │   ├── storage/            # Projekt Speichern/Laden
+│   │   │   └── project-file.ts # Serialisierung/Deserialisierung (.panelizer.json)
 │   │   └── utils/              # Allgemeine Utilities
 │   │       └── index.ts        # cn(), formatMM(), snapToGrid()
 │   │
@@ -87,7 +89,10 @@ pcb-panelizer/
 3. **Panel** - Das fertige Nutzen mit Nutzenrand, Boards, Tabs, Fiducials
 4. **Tab** - Verbindungssteg zwischen Board und Rahmen (Solid, Mouse Bites, V-Score)
 5. **Fiducial** - Referenzmarke für Pick & Place Maschinen
-6. **ToolingHole** - Bohrung für Fertigungsaufnahme
+6. **ToolingHole** - Bohrung für Fertigungsaufnahme (konfigurierbarer Durchmesser, PTH/NPTH)
+7. **VScoreLine** - Durchgehende Ritzlinie von Kante zu Kante
+8. **RoutingContour** - Fräskontur um Boards oder Panel (mit Segmenten und Tabs)
+9. **FreeMousebite** - Mousebite an Bogen-Konturen (Board-Rundungen, Panel-Ecken)
 
 ### Koordinatensystem
 
@@ -95,17 +100,23 @@ pcb-panelizer/
 - Ursprung (0,0) ist links oben (PixiJS Standard)
 - Canvas zeigt rotes **Fadenkreuz am Nullpunkt** zur Orientierung
 - `PIXELS_PER_MM = 4` als Skalierungsfaktor für Rendering
+- Grid-Standard: **0.1 mm** (für präzises Messen)
 
 ### State Management (Zustand)
 
 Der `usePanelStore` enthält:
-- `panel` - Alle Panel-Daten (Boards, Instanzen, Tabs, Fiducials, etc.)
+- `panel` - Alle Panel-Daten (Boards, Instanzen, Tabs, Fiducials, V-Scores, Fräskonturen, etc.)
 - `viewport` - Zoom und Pan
-- `grid` - Grid-Einstellungen
+- `grid` - Grid-Einstellungen (Standard: 0.1 mm)
 - `activeTool` - Ausgewähltes Werkzeug
 - `selectedInstances` - Ausgewählte Board-Instanzen
 - `selectedFiducialId` - Ausgewähltes Fiducial (für Bearbeitung)
 - `selectedToolingHoleId` - Ausgewählte Tooling-Bohrung (für Bearbeitung)
+- `selectedVScoreLineId` - Ausgewählte V-Score-Linie
+- `selectedRoutingContourId` - Ausgewählte Fräskontur
+- `cursorPosition` - Live-Cursor-Koordinaten (für Statusbar)
+- `toolingHoleConfig` - Konfiguration für neue Bohrungen (Durchmesser, PTH/NPTH)
+- `mousebiteConfig` - Konfiguration für Mousebite-Platzierung (Bogenlänge)
 
 ---
 
@@ -162,12 +173,63 @@ Der `usePanelStore` enthält:
 - [x] **Erweiterte Legende** in PDF (dynamisch, nur vorhandene Elementtypen)
 - [x] **Erweiterter Titelblock** mit Tab-/V-Score-Anzahl und SMTEC AG
 
+### Phase 5 - Erledigt
+
+- [x] **Mess-Werkzeug** (Taste M zum Umschalten Absolut/Inkremental)
+  - **Inkremental**: Klick A → Klick B → Distanz, ΔX, ΔY anzeigen
+  - **Absolut**: Klick → Koordinaten relativ zu (0,0) anzeigen
+  - Gestrichelte Messlinie (Gold = fixiert, Cyan = Live-Vorschau)
+  - Text mit resolution: 4 für scharfe Darstellung im Zoom
+- [x] **Snap-to-Geometry** mit Taste A im Mess-Werkzeug
+  - Panel-Ecken, Board-Ecken, V-Score-Endpunkte
+  - Fiducial-Mittelpunkte, Tooling-Hole-Mittelpunkte
+  - **Kreisbogen-Mittelpunkte** (echte Gerber-Arcs + aus Linien erkannte Bögen)
+  - Panel-Kanten, Board-Kanten, V-Score-Linien (Lotfußpunkt-Projektion)
+  - Grüner Diamant-Marker als visuelles Feedback
+- [x] **Bogen-Erkennung aus Liniensegmenten** (Least-Squares Circle Fit)
+  - Toleranz: 0.15 mm, min. 5 Punkte, min. Radius 0.3 mm
+  - Wird immer zusätzlich zu echten Arcs geprüft (nicht nur Fallback)
+  - Duplikat-Check verhindert Doppeleinträge
+- [x] **Live-Cursor-Koordinaten** in der Statusbar (X/Y in mm, 3 Dezimalstellen)
+- [x] **Tooling Holes konfigurierbarer Durchmesser**
+  - Durchmesser und PTH/NPTH im Store (`toolingHoleConfig`)
+  - Beim Platzieren per Klick wird Store-Konfiguration verwendet
+  - Bestehende Bohrungen: Durchmesser und PTH/NPTH editierbar im Properties Panel
+- [x] **Horizontale Toolbar** über dem Canvas (statt Tools in Sidebar)
+  - Werkzeuge: Auswählen, Messen, Fiducial, Bohrung, V-Score
+  - Tab/Mousebite als Dropdown-Button kombiniert
+- [x] **Properties Panel Auto-Aufklappen**
+  - Werkzeug wählen → passende Sektion klappt automatisch auf
+  - place-hole → Tooling, place-fiducial → Fiducials, place-vscore → V-Score, etc.
+- [x] **Alle Properties-Sektionen** standardmäßig eingeklappt beim Start
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
-- [ ] Projekt speichern/laden (.panelizer.json)
+- [x] Projekt speichern/laden (.panelizer.json)
 - [ ] Undo/Redo
-- [ ] Tastenkürzel
+- [ ] Tastenkürzel-Übersicht
+
+---
+
+## Werkzeuge (Toolbar)
+
+| Werkzeug | Taste | Beschreibung |
+|----------|-------|-------------|
+| Auswählen | - | Boards auswählen und verschieben (normaler Cursor) |
+| Messen | M (Modus) | Abstände und Koordinaten messen |
+| Fiducial | - | Fiducial-Marker per Klick platzieren |
+| Bohrung | - | Tooling-Bohrung per Klick platzieren |
+| V-Score | - | V-Score Linie zeichnen |
+| Tab/Mousebite | - | Dropdown: Tab oder Mousebite platzieren |
+
+### Mess-Werkzeug Tasten
+
+| Taste | Funktion |
+|-------|----------|
+| M | Umschalten Absolut ↔ Inkremental |
+| A | Snap: Nächste Ecke/Kante/Kreismitte einfangen |
+| ESC | Messung zurücksetzen (Tool bleibt aktiv) |
 
 ---
 
@@ -197,13 +259,36 @@ Der `usePanelStore` enthält:
 6. X/Y-Koordinaten rechts im Properties Panel fein anpassen
 
 ### Tooling Holes hinzufügen
-1. Rechts **"Tooling"** aufklappen
-2. Durchmesser und PTH/NPTH einstellen
-3. **"4 Eck-Bohrungen hinzufügen"** klicken (platziert in allen 4 Ecken)
-4. Bohrungen im Canvas anklicken um sie auszuwählen (orange Glow)
-5. Bohrungen per **Drag & Drop** im Canvas verschieben
-6. X/Y-Koordinaten rechts im Properties Panel fein anpassen
-7. Einzelne Bohrungen löschen oder alle auf einmal
+1. **Bohrung-Werkzeug** in der Toolbar wählen (rechtes Panel "Tooling" klappt automatisch auf)
+2. Durchmesser und PTH/NPTH im Panel einstellen
+3. **Per Klick** im Canvas platzieren (Multi-Platzierung)
+4. Oder: Rechts **"4 Eck-Bohrungen hinzufügen"** klicken
+5. Bohrungen im Canvas anklicken um sie auszuwählen (orange Glow)
+6. Bohrungen per **Drag & Drop** im Canvas verschieben
+7. X/Y, Durchmesser und PTH/NPTH rechts im Properties Panel anpassen
+8. Einzelne Bohrungen löschen oder alle auf einmal
+
+### V-Score Linien
+1. Rechts **"V-Score"** aufklappen (oder V-Score-Werkzeug wählen)
+2. Tiefe (%) und Winkel (°) einstellen
+3. **"V-Score automatisch generieren"** für alle Board-Kanten
+4. Oder manuell: **"+ Horizontal"** / **"+ Vertikal"** hinzufügen
+5. V-Score Linien auswählen und Position editieren
+
+### Fräskonturen
+1. Rechts **"Fräskonturen"** aufklappen
+2. Fräser-Durchmesser und Sicherheitsabstand einstellen
+3. Board-Konturen und/oder Panel-Außenkontur aktivieren
+4. **"Fräskonturen generieren"** klicken
+5. Warnung erscheint wenn Gap < Fräser-Ø
+
+### Messen
+1. **Mess-Werkzeug** in der Toolbar wählen
+2. **Inkremental** (Standard): Klick A → Klick B → Distanz angezeigt
+3. **Absolut** (Taste M): Klick → Koordinaten relativ zu (0,0)
+4. **Snap** (Taste A): Springt zur nächsten Ecke, Kante oder Kreismitte
+5. ESC: Messung zurücksetzen, Tool bleibt aktiv
+6. Dritter Klick: Neue Messung beginnt
 
 ### Panel drehen
 1. Rechts unter **"Array"** das Array erstellen
@@ -216,12 +301,9 @@ Der `usePanelStore` enthält:
 
 ### Tabs hinzufügen
 1. Rechts **"Tabs"** aufklappen
-2. Tab-Typ wählen:
-   - **Solid** (orange): Durchgehender Steg
-   - **Mouse Bites** (blau): Perforiert mit Bohrungen
-   - **V-Score** (pink): V-förmiger Einschnitt
-3. Tab-Breite und Anzahl pro Kante einstellen
-4. **"Tabs automatisch verteilen"** klicken
+2. Tab-Breite und Anzahl pro Kante einstellen
+3. **"Tabs automatisch verteilen"** klicken
+4. Mousebites an Rundungen: Klick auf Bogen-Konturen oder automatisch generieren
 
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
@@ -238,6 +320,23 @@ Der `usePanelStore` enthält:
    - **Detail-Tabelle** rechts: Board-Info, Fiducials, Tooling Holes, V-Score, Tabs
    - **Legende** (dynamisch, nur vorhandene Elementtypen)
    - **Titelblock** mit Projekt, Autor, Datum, Panel-Größe, alle Zähler
+
+---
+
+## Properties Panel (rechte Sidebar)
+
+8 Sektionen, alle standardmäßig eingeklappt. Klappen automatisch auf wenn passendes Werkzeug gewählt wird.
+
+| Sektion | Inhalt |
+|---------|--------|
+| **Nutzenrand** | Rahmenbreite (4 Seiten), Eckenradius, einheitliche Breite |
+| **Array** | Spalten, Reihen, Gap X/Y, Panel-Rotation |
+| **Tabs** | Tab-Breite, Bohr-Ø, Abstand, Auto-Verteilung, Mousebites an Rundungen |
+| **V-Score** | Tiefe %, Winkel °, Auto-Generierung, manuelle H/V-Linien, editierbare Positionen |
+| **Fräskonturen** | Fräser-Ø, Sicherheitsabstand, Board-/Panel-Konturen, Gap-Warnung |
+| **Fiducials** | Pad-Ø, Mask-Ø, 3/4 Stirnseiten-Platzierung, Drag&Drop, Koordinaten |
+| **Tooling** | Durchmesser, PTH/NPTH, 4 Eck-Bohrungen, Durchmesser nachträglich editierbar |
+| **Dimensionen** | Panel-Größe, Grid, Einheit, Statistiken |
 
 ---
 
@@ -276,12 +375,22 @@ npm start
 
 ### Gerenderte Elemente
 - **Nutzenrand** (dunkelgrau, optional mit Eckenradius)
-- **Grid** (nur Major-Linien bei 10x Grid-Size)
+- **Grid** (nur Major-Linien bei 10x Grid-Size, Standard: 0.1 mm)
 - **Fadenkreuz** am Nullpunkt (rot)
 - **Boards** mit Gerber-Layern (Rotation + Spiegelung pro Board, Instance-Rotation für Panel-Drehung)
 - **Fiducials** (grün, ausgewählt: gold mit orange Glow, **Drag & Drop**)
 - **Tooling Holes** (mit Kupferring wenn plated, ausgewählt: orange Glow, **Drag & Drop**)
 - **Tabs** (farbcodiert nach Typ)
+- **V-Score Linien** (gestrichelt pink)
+- **Fräskonturen** (Segmente mit Tabs)
+- **Mess-Overlay** (gestrichelte Linie, Marker, Koordinaten, Distanz)
+
+### Mess-Overlay
+- `snapPreviewRef` Container auf `app.stage` (gemeinsam mit Mousebite-Vorschau)
+- `drawMeasureOverlay()` - Inkrementale Messung (A→B, Distanz, ΔX/ΔY)
+- `drawMeasureAbsolute()` - Absolute Messung (Fadenkreuz, Hilfslinien zu Achsen)
+- `findNearestSnapPoint()` - Snap auf Ecken, Kanten, Kreismittelpunkte
+- Text-Resolution: 4 für scharfe Darstellung im Zoom
 
 ### Board-Container-Hierarchie (PixiJS)
 ```
@@ -309,7 +418,26 @@ const COLORS = {
   grid: 0x2a2a2a,          // Grid-Linien
   gridMajor: 0x3a3a3a,     // Major Grid
 };
+// Mess-Werkzeug: Gold (fixiert), Cyan (live), Grün (snap)
 ```
+
+---
+
+## Wichtige Architektur-Details
+
+### snapPreviewRef (Canvas)
+Gemeinsamer PixiJS-Container auf `app.stage` für:
+- Mousebite-Vorschau
+- Mess-Overlay (Linien, Marker, Text)
+
+**Wichtig:** Im `handleMouseMove` darf der Container nur gelöscht werden wenn das aktive Tool WEDER `place-mousebite` NOCH `measure` ist. Sonst verschwindet das Overlay.
+
+### Bogen-Erkennung (`panel-store.ts`)
+Zwei Wege, die IMMER BEIDE geprüft werden:
+1. **Echte Gerber-Arcs** (`nativeArcs`) - direkt aus Gerber-Dateien
+2. **Linien-Bögen** (`detectArcsFromPoints`) - Kreise aus kleinen Liniensegmenten erkannt via Circumcenter + Least-Squares Circle Fit
+
+Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat wie ein nativer Arc (< 0.5 mm Differenz), wird er übersprungen.
 
 ---
 

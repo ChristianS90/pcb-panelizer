@@ -9,7 +9,7 @@
 
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload,
   Save,
@@ -24,6 +24,7 @@ import { usePanelStore, usePanel, useBoards, useInstances } from '@/stores/panel
 import { ImportDialog } from '@/components/dialogs';
 import { generateDimensionDrawing } from '@/lib/export/dimension-drawing';
 import { saveAs } from 'file-saver';
+import { serializeProject, deserializeProject } from '@/lib/storage/project-file';
 
 export function Header() {
   // Panel-Name aus dem Store
@@ -42,8 +43,35 @@ export function Header() {
   // Import-Dialog State
   const [isImportOpen, setIsImportOpen] = useState(false);
 
+  // Projekt laden/speichern
+  const loadPanel = usePanelStore((state) => state.loadPanel);
+  const grid = usePanelStore((state) => state.grid);
+  const unit = usePanelStore((state) => state.unit);
+  const setGrid = usePanelStore((state) => state.setGrid);
+  const setUnit = usePanelStore((state) => state.setUnit);
+  const [isLoadingProject, setIsLoadingProject] = useState(false);
+
+  // Verstecktes File-Input Element für "Projekt öffnen"
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   // PDF-Export State
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+  // Logo-Bytes für PDF-Export (wird einmalig beim Start geladen)
+  const logoBytes = useRef<Uint8Array | null>(null);
+
+  // Logo beim ersten Rendern laden (einmalig)
+  useEffect(() => {
+    fetch('/logo-smtec.png')
+      .then(res => res.arrayBuffer())
+      .then(buf => {
+        logoBytes.current = new Uint8Array(buf);
+        console.log('SMTEC Logo geladen für PDF-Export');
+      })
+      .catch(err => {
+        console.warn('Logo konnte nicht geladen werden:', err);
+      });
+  }, []);
 
   /**
    * Speichert den neuen Panel-Namen
@@ -64,6 +92,77 @@ export function Header() {
   };
 
   /**
+   * Speichert das aktuelle Projekt als .panelizer.json Datei
+   * Der Browser öffnet den Download-Dialog
+   */
+  const handleSaveProject = useCallback(() => {
+    try {
+      // Panel-Daten serialisieren (parsedData wird entfernt, rawContent bleibt)
+      const jsonString = serializeProject(panel, { unit, grid });
+
+      // Als Datei herunterladen
+      const blob = new Blob([jsonString], { type: 'application/json' });
+      const filename = `${panel.name.replace(/[^a-zA-Z0-9äöüÄÖÜß_\-]/g, '_')}.panelizer.json`;
+      saveAs(blob, filename);
+
+      console.log('Projekt gespeichert:', filename);
+    } catch (error) {
+      console.error('Fehler beim Speichern:', error);
+      alert('Fehler beim Speichern des Projekts. Siehe Konsole für Details.');
+    }
+  }, [panel, unit, grid]);
+
+  /**
+   * Öffnet den Datei-Dialog zum Laden eines gespeicherten Projekts
+   */
+  const handleOpenProject = useCallback(() => {
+    // Klick auf das versteckte File-Input auslösen
+    fileInputRef.current?.click();
+  }, []);
+
+  /**
+   * Wird aufgerufen wenn eine Datei im Datei-Dialog ausgewählt wurde.
+   * Liest die Datei, parst den Inhalt und lädt das Panel in den Store.
+   */
+  const handleFileSelected = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (!file) return;
+
+      setIsLoadingProject(true);
+
+      try {
+        // Datei als Text einlesen
+        const jsonString = await file.text();
+
+        // Projekt deserialisieren (inkl. Gerber-Neuparsen)
+        const { panel: loadedPanel, settings } = await deserializeProject(jsonString);
+
+        // Panel in den Store laden
+        loadPanel(loadedPanel);
+
+        // Einstellungen übernehmen
+        setGrid(settings.grid);
+        setUnit(settings.unit);
+
+        console.log('Projekt geladen:', loadedPanel.name);
+      } catch (error) {
+        console.error('Fehler beim Laden:', error);
+        const message =
+          error instanceof Error ? error.message : 'Unbekannter Fehler';
+        alert(`Fehler beim Laden des Projekts:\n${message}`);
+      } finally {
+        setIsLoadingProject(false);
+        // File-Input zurücksetzen, damit dieselbe Datei erneut geladen werden kann
+        if (fileInputRef.current) {
+          fileInputRef.current.value = '';
+        }
+      }
+    },
+    [loadPanel, setGrid, setUnit]
+  );
+
+  /**
    * Exportiert die Maßzeichnung als PDF
    * Enthält: Panel-Layout, Bemaßungen, Positionen aller Elemente
    */
@@ -71,22 +170,35 @@ export function Header() {
     setIsExportingPdf(true);
 
     try {
-      // PDF generieren
+      // PDF generieren (A3 Querformat, IFTEST-Stil mit SMTEC Branding)
       const pdfBytes = await generateDimensionDrawing(
         panel,
         boards,
         instances,
         {
-          title: 'Panel Maßzeichnung',
+          // Basis-Felder
+          title: panel.name,
           projectName: panel.name,
           author: 'SMTEC',
           date: new Date().toLocaleDateString('de-CH'),
           revision: '1.0',
+          // ISO-Titelblock Felder
+          drawnBy: 'PCB',
+          issueNumber: '01',
+          drawingNumber: 'XXXXX.0120-NZ',
+          // Logo als PNG-Bytes (beim Start geladen)
+          logoImageBytes: logoBytes.current || undefined,
+          // PCB-Spezifikationen (Standardwerte)
+          pcbThickness: '1.6',
+          copperWeight: '0.3 ±0.1',
+          viaType: '30-45°',
+          // Eckenradius aus Panel-Rahmendaten übernehmen
+          cornerRadius: panel.frame.cornerRadius || 0,
         }
       );
 
       // Als Datei speichern
-      const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+      const blob = new Blob([pdfBytes as unknown as BlobPart], { type: 'application/pdf' });
       const filename = `${panel.name.replace(/[^a-zA-Z0-9]/g, '_')}_Zeichnung.pdf`;
       saveAs(blob, filename);
 
@@ -157,12 +269,34 @@ export function Header() {
         </button>
 
         {/* Projekt öffnen */}
-        <button className="btn-icon" title="Projekt öffnen">
-          <FolderOpen className="w-5 h-5" />
+        <button
+          onClick={handleOpenProject}
+          disabled={isLoadingProject}
+          className="btn-icon"
+          title="Projekt öffnen (.panelizer.json)"
+        >
+          {isLoadingProject ? (
+            <Loader2 className="w-5 h-5 animate-spin" />
+          ) : (
+            <FolderOpen className="w-5 h-5" />
+          )}
         </button>
 
+        {/* Verstecktes File-Input für Datei-Dialog */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".panelizer.json,.json"
+          onChange={handleFileSelected}
+          className="hidden"
+        />
+
         {/* Projekt speichern */}
-        <button className="btn-icon" title="Projekt speichern">
+        <button
+          onClick={handleSaveProject}
+          className="btn-icon"
+          title="Projekt speichern (.panelizer.json)"
+        >
           <Save className="w-5 h-5" />
         </button>
 
