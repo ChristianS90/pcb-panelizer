@@ -396,11 +396,13 @@ Der `usePanelStore` enthält:
    - **Board-Positionsbemaßungen** (X/Y-Offset, Board-Größe, Gaps)
    - **V-Score Linien** (gestrichelt pink, mit Y/X-Position, Tiefe %, Winkel°)
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
-   - **Fiducials** mit Koordinaten `FID (X.X / Y.Y)` und Hilfslinien zum Panel-Rand
-   - **Tooling Holes** mit Koordinaten `Ø3.0 NPTH (X.X / Y.Y)` und Hilfslinien
+   - **Fiducials** mit kombiniertem Label `FID (X.X/Y.Y) Ø1.0/3.0` und Hilfslinien
+   - **Tooling Holes** mit kombiniertem Label `Ø3.0 NPTH (X.X/Y.Y)` und Hilfslinien
    - **Detail-Tabelle** rechts: Board-Info, Fiducials, Tooling Holes, V-Score, Tabs
    - **Legende** (dynamisch, nur vorhandene Elementtypen)
    - **Titelblock** mit Projekt, Autor, Datum, Panel-Größe, alle Zähler
+   - **Gitterreferenz** 6×3 (Spalten 1-6, Reihen A-C)
+   - Bemaßungen gestaffelt auf 4 Ebenen (keine Überlappungen)
 
 ---
 
