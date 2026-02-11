@@ -23,8 +23,12 @@ import type {
   Fiducial,
   ToolingHole,
   VScoreLine,
+  FreeMousebite,
+  GerberCommand,
   RoutingContour,
+  RoutingSegment,
   RoutingConfig,
+  OutlinePathSegment,
   Viewport,
   Tool,
   GridConfig,
@@ -74,6 +78,34 @@ interface PanelStore {
 
   /** Aktuell ausgewählte Fräskontur (für Hervorhebung im Canvas und Properties Panel) */
   selectedRoutingContourId: string | null;
+
+  /** Board-Hintergrund (PCB-Substrat grüne Fläche) anzeigen oder ausblenden */
+  showBoardBackground: boolean;
+
+  /** Board-Beschriftung (blauer Rahmen, Name, Größe) anzeigen oder ausblenden */
+  showBoardLabels: boolean;
+
+  /** Aktuell ausgewählte freie Mousebite (für Bearbeitung und Canvas-Glow) */
+  selectedFreeMousebiteId: string | null;
+
+  /** Aktuelle Cursor-Position in mm (wird vom Canvas bei Mausbewegung aktualisiert) */
+  cursorPosition: { x: number; y: number };
+
+  /** Konfiguration für Tooling-Bohrung-Platzierung (Durchmesser, PTH/NPTH) */
+  toolingHoleConfig: { diameter: number; plated: boolean };
+
+  /** Konfiguration für manuelle Mousebite-Platzierung (Bogenlänge, Bohrungsparameter) */
+  mousebiteConfig: { arcLength: number; holeDiameter: number; holeSpacing: number };
+
+  /** State für Free-Draw Fräskontur (Punkte die der Benutzer nacheinander klickt) */
+  routeFreeDrawState: { points: Point[] };
+
+  /** State für Segment-Auswahl bei Follow-Outline Fräskontur (Klick-basiert) */
+  routeSegmentSelectState: {
+    boardInstanceId: string | null;
+    selectedSegmentIndices: number[];       // Frei wählbare Segment-Indizes
+    outlineSegments: OutlinePathSegment[];  // Gecachte Outline-Segmente
+  };
 
   /** Undo/Redo History (für später) */
   history: {
@@ -215,6 +247,12 @@ interface PanelStore {
   /** Aktualisiert die Position einer Tooling-Bohrung */
   updateToolingHolePosition: (holeId: string, position: Point) => void;
 
+  /** Aktualisiert Durchmesser und/oder PTH einer Tooling-Bohrung */
+  updateToolingHole: (holeId: string, data: { diameter?: number; plated?: boolean }) => void;
+
+  /** Setzt die Tooling-Bohrung-Konfiguration (für Platzierungs-Tool) */
+  setToolingHoleConfig: (config: Partial<{ diameter: number; plated: boolean }>) => void;
+
   /** Wählt eine Tooling-Bohrung aus */
   selectToolingHole: (holeId: string | null) => void;
 
@@ -241,6 +279,31 @@ interface PanelStore {
   }) => void;
 
   // --------------------------------------------------------------------------
+  // Mousebites an Rundungen (Board-Bögen + Ecken des Nutzenrands)
+  // --------------------------------------------------------------------------
+
+  /** Entfernt alle Rundungs-Mousebites */
+  clearAllFreeMousebites: () => void;
+
+  /** Wählt eine Rundungs-Mousebite aus (oder null zum Abwählen) */
+  selectFreeMousebite: (mousebiteId: string | null) => void;
+
+  /** Entfernt ein einzelnes FreeMousebite anhand seiner ID */
+  removeFreeMousebite: (mousebiteId: string) => void;
+
+  /** Generiert Mousebites an Bogen-Segmenten der Board-Outlines + Panel-Ecken */
+  autoGenerateArcMousebites: (config: {
+    holeDiameter: number;
+    holeSpacing: number;
+  }) => void;
+
+  /** Fügt ein einzelnes FreeMousebite hinzu (für manuelle Klick-Platzierung) */
+  addFreeMousebite: (mousebite: Omit<FreeMousebite, 'id'>) => void;
+
+  /** Setzt die Mousebite-Konfiguration (Bogenlänge, Bohrungsparameter) */
+  setMousebiteConfig: (config: Partial<{ arcLength: number; holeDiameter: number; holeSpacing: number }>) => void;
+
+  // --------------------------------------------------------------------------
   // Fräskonturen (Routing Contours)
   // --------------------------------------------------------------------------
 
@@ -261,6 +324,33 @@ interface PanelStore {
 
   /** Generiert Fräskonturen automatisch aus Board-Positionen und Tabs */
   autoGenerateRoutingContours: () => void;
+
+  /** Fügt eine neue Fräskontur hinzu (für manuelle Methoden: free-draw, follow-outline) */
+  addRoutingContour: (contour: Omit<RoutingContour, 'id'>) => void;
+
+  /** Fügt einen Punkt zur Free-Draw-Polyline hinzu */
+  addFreeDrawPoint: (point: Point) => void;
+
+  /** Setzt den Free-Draw-State zurück (Abbrechen) */
+  clearFreeDrawState: () => void;
+
+  /** Finalisiert die Free-Draw-Kontur (Punkte → Segmente → RoutingContour) */
+  finalizeFreeDrawContour: () => void;
+
+  /** Aktualisiert Start-/Endpunkt einer manuellen Fräskontur (für Drag & Drop Handles) */
+  updateRoutingContourEndpoints: (contourId: string, startPoint?: Point, endPoint?: Point) => void;
+
+  /** Ersetzt alle Segmente einer Fräskontur (für Neuberechnung bei follow-outline) */
+  replaceRoutingContourSegments: (contourId: string, segments: RoutingSegment[], outlineDirection?: 'forward' | 'reverse') => void;
+
+  /** Setzt den Segment-Auswahl-State (Board + Outline-Segmente) */
+  setRouteSegmentSelectState: (state: { boardInstanceId: string | null; selectedSegmentIndices: number[]; outlineSegments: OutlinePathSegment[] }) => void;
+
+  /** Toggle: Segment an-/abwählen */
+  toggleSegmentSelection: (index: number) => void;
+
+  /** Setzt den Segment-Auswahl-State zurück (Abbrechen) */
+  clearSegmentSelectState: () => void;
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
@@ -287,6 +377,15 @@ interface PanelStore {
 
   /** Setzt das aktive Werkzeug */
   setActiveTool: (tool: Tool) => void;
+
+  /** Aktualisiert die Cursor-Position (vom Canvas bei Mausbewegung) */
+  setCursorPosition: (pos: { x: number; y: number }) => void;
+
+  /** Schaltet den Board-Hintergrund (grüne PCB-Fläche) ein/aus */
+  toggleBoardBackground: () => void;
+
+  /** Schaltet die Board-Beschriftung (blauer Rahmen, Name, Größe) ein/aus */
+  toggleBoardLabels: () => void;
 
   // --------------------------------------------------------------------------
   // Grid-Einstellungen
@@ -355,6 +454,7 @@ function createEmptyPanel(): Panel {
     fiducials: [],
     toolingHoles: [],
     vscoreLines: [],
+    freeMousebites: [],
     routingContours: [],
     routingConfig: {
       toolDiameter: 2.0,
@@ -381,7 +481,7 @@ const initialViewport: Viewport = {
  */
 const initialGrid: GridConfig = {
   visible: true,
-  size: 1, // 1mm Grid
+  size: 0.1, // 0.1mm Grid für präzises Messen
   snapEnabled: true,
 };
 
@@ -458,6 +558,927 @@ function approximateCorner(
 }
 
 // ============================================================================
+// Hilfsfunktionen für Master-Board Fräskonturen-Synchronisation
+// ============================================================================
+
+/**
+ * Findet die Master-Instanz unter allen Board-Instanzen.
+ * Der Master ist die Instanz mit dem kleinsten Abstand zum Nullpunkt (0,0).
+ * Das ist typischerweise das Board unten links im Array.
+ *
+ * @param instances - Alle Board-Instanzen im Panel
+ * @returns Die Master-Instanz (nächste zu 0,0), oder undefined wenn keine vorhanden
+ */
+function getMasterInstance(instances: BoardInstance[]): BoardInstance | undefined {
+  if (instances.length === 0) return undefined;
+
+  let master = instances[0];
+  // Abstand = Euklidische Distanz der Position zum Nullpunkt
+  let minDist = Math.sqrt(master.position.x ** 2 + master.position.y ** 2);
+
+  for (let i = 1; i < instances.length; i++) {
+    const inst = instances[i];
+    const dist = Math.sqrt(inst.position.x ** 2 + inst.position.y ** 2);
+    if (dist < minDist) {
+      minDist = dist;
+      master = inst;
+    }
+  }
+
+  return master;
+}
+
+/**
+ * Synchronisiert manuelle Fräskonturen vom Master-Board auf alle anderen Board-Instanzen
+ * gleichen Typs (gleiche boardId).
+ *
+ * Ablauf:
+ * 1. Master-Instanz ermitteln (nächste zu 0,0)
+ * 2. Manuelle Konturen auf dem Master finden (nicht auto, nicht isSyncCopy)
+ * 3. Für jede Nicht-Master-Instanz gleicher boardId:
+ *    - Segmente um Delta (target.position - master.position) verschieben
+ *    - Bestehende Kopien aktualisieren (stabile IDs für Rendering)
+ *    - Verwaiste Kopien (deren Master-Kontur gelöscht wurde) entfernen
+ *
+ * @param panel - Der aktuelle Panel-Zustand
+ * @returns Neues routingContours-Array mit synchronisierten Kopien
+ */
+function syncMasterContours(panel: Panel): RoutingContour[] {
+  const { instances, routingContours } = panel;
+  if (instances.length <= 1) {
+    // Nur 1 oder 0 Instanzen → keine Synchronisation nötig, aber verwaiste Kopien entfernen
+    return routingContours.filter(c => !c.isSyncCopy);
+  }
+
+  const master = getMasterInstance(instances);
+  if (!master) return routingContours;
+
+  // Manuelle Konturen auf dem Master-Board finden
+  // (nicht auto-generiert, nicht selbst eine Sync-Kopie, gehört zum Master)
+  const masterContours = routingContours.filter(c =>
+    c.boardInstanceId === master.id &&
+    !c.isSyncCopy &&
+    c.creationMethod !== 'auto'
+  );
+
+  // Auch Konturen ohne boardInstanceId auf dem Master prüfen (z.B. Free-Draw nahe Master)
+  // → Diese haben keine boardInstanceId, also ignorieren wir sie beim Sync
+
+  // Alle Nicht-Master-Instanzen mit gleicher boardId wie der Master sammeln
+  const targetInstances = instances.filter(inst =>
+    inst.id !== master.id && inst.boardId === master.boardId
+  );
+
+  // Bestehende Sync-Kopien für schnelles Lookup (masterContourId + targetInstanceId → Kopie)
+  const existingCopies = new Map<string, RoutingContour>();
+  for (const c of routingContours) {
+    if (c.isSyncCopy && c.masterContourId) {
+      // Schlüssel: masterContourId + boardInstanceId
+      existingCopies.set(`${c.masterContourId}:${c.boardInstanceId}`, c);
+    }
+  }
+
+  // Alle Konturen behalten, die KEINE Sync-Kopien sind
+  const nonCopyContours = routingContours.filter(c => !c.isSyncCopy);
+
+  // Neue Sync-Kopien erstellen/aktualisieren
+  const newCopies: RoutingContour[] = [];
+
+  for (const masterContour of masterContours) {
+    for (const target of targetInstances) {
+      // Delta = Positionsverschiebung von Master zu Target
+      const dx = target.position.x - master.position.x;
+      const dy = target.position.y - master.position.y;
+
+      // Segmente translieren (verschieben)
+      const translatedSegments: RoutingSegment[] = masterContour.segments.map(seg => {
+        const newSeg: RoutingSegment = {
+          start: { x: seg.start.x + dx, y: seg.start.y + dy },
+          end: { x: seg.end.x + dx, y: seg.end.y + dy },
+        };
+        // Falls Bogen vorhanden, auch dessen Mittelpunkt verschieben
+        if (seg.arc) {
+          newSeg.arc = {
+            ...seg.arc,
+            center: {
+              x: seg.arc.center.x + dx,
+              y: seg.arc.center.y + dy,
+            },
+          };
+        }
+        return newSeg;
+      });
+
+      // Bestehende Kopie wiederverwenden (stabile ID für PixiJS Rendering)
+      const copyKey = `${masterContour.id}:${target.id}`;
+      const existing = existingCopies.get(copyKey);
+
+      newCopies.push({
+        id: existing?.id ?? uuidv4(), // Bestehende ID wiederverwenden
+        contourType: masterContour.contourType,
+        boardInstanceId: target.id,
+        segments: translatedSegments,
+        toolDiameter: masterContour.toolDiameter,
+        visible: masterContour.visible,
+        creationMethod: masterContour.creationMethod,
+        outlineDirection: masterContour.outlineDirection,
+        masterContourId: masterContour.id,
+        isSyncCopy: true,
+      });
+    }
+  }
+
+  return [...nonCopyContours, ...newCopies];
+}
+
+// ============================================================================
+// Hilfsfunktionen für Arc-basierte Mousebites
+// ============================================================================
+
+/**
+ * Ein erkannter Kreisbogen, bestehend aus Mittelpunkt, Radius,
+ * Start- und Endwinkel (in Radians, Gerber-Koordinaten Y-up).
+ */
+interface DetectedArc {
+  center: Point;
+  radius: number;
+  startAngle: number; // Radians
+  endAngle: number;   // Radians
+  startPoint: Point;
+  endPoint: Point;
+}
+
+/**
+ * Berechnet den Mittelpunkt eines Kreises durch 3 Punkte.
+ * Gibt null zurück wenn die Punkte kollinear sind (auf einer Geraden liegen).
+ */
+function circumcenter(p1: Point, p2: Point, p3: Point): { center: Point; radius: number } | null {
+  const ax = p1.x, ay = p1.y;
+  const bx = p2.x, by = p2.y;
+  const cx = p3.x, cy = p3.y;
+
+  // Determinante - wenn ~0, sind die Punkte kollinear (= gerade Linie)
+  const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+  if (Math.abs(D) < 1e-10) return null;
+
+  const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / D;
+  const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / D;
+
+  const radius = Math.sqrt((ax - ux) * (ax - ux) + (ay - uy) * (ay - uy));
+  return { center: { x: ux, y: uy }, radius };
+}
+
+/**
+ * Least-Squares Circle Fit (Kasa-Methode)
+ * Berechnet den bestmöglichen Kreis durch eine beliebige Anzahl von Punkten.
+ * Deutlich genauer als circumcenter mit nur 3 Punkten, besonders bei
+ * linearisierten Bögen (viele kleine Geraden die einen Kreis approximieren).
+ *
+ * Algorithmus: Minimiert die Summe der quadrierten Abweichungen aller
+ * Punkte vom Kreisrand. Löst ein lineares Gleichungssystem (2×2).
+ */
+function leastSquaresCircleFit(pts: Point[]): { center: Point; radius: number } | null {
+  const n = pts.length;
+  if (n < 3) return null;
+
+  // Schwerpunkt (Mittelwert) berechnen
+  let mx = 0, my = 0;
+  for (const p of pts) { mx += p.x; my += p.y; }
+  mx /= n;
+  my /= n;
+
+  // Summen für das Gleichungssystem (zentriert um den Schwerpunkt)
+  let suu = 0, suv = 0, svv = 0;
+  let suuu = 0, suvv = 0, svvv = 0, suuv = 0;
+
+  for (const p of pts) {
+    const u = p.x - mx;
+    const v = p.y - my;
+    suu += u * u;
+    suv += u * v;
+    svv += v * v;
+    suuu += u * u * u;
+    suvv += u * v * v;
+    svvv += v * v * v;
+    suuv += u * u * v;
+  }
+
+  // 2×2 Gleichungssystem lösen: [suu suv; suv svv] * [a; b] = [rhs1; rhs2]
+  const det = suu * svv - suv * suv;
+  if (Math.abs(det) < 1e-10) return null; // Punkte auf einer Geraden
+
+  const rhs1 = 0.5 * (suuu + suvv);
+  const rhs2 = 0.5 * (svvv + suuv);
+
+  const a = (svv * rhs1 - suv * rhs2) / det;
+  const b = (suu * rhs2 - suv * rhs1) / det;
+
+  // Center = Schwerpunkt + Verschiebung
+  const centerX = a + mx;
+  const centerY = b + my;
+  const radius = Math.sqrt(a * a + b * b + (suu + svv) / n);
+
+  return { center: { x: centerX, y: centerY }, radius };
+}
+
+/**
+ * Erkennt Kreisbögen in einer Sequenz von Outline-Punkten.
+ *
+ * Viele CAD-Programme exportieren Kreise als viele kleine Liniensegmente.
+ * Dieser Algorithmus erkennt solche Sequenzen und rekonstruiert den
+ * ursprünglichen Kreisbogen (Mittelpunkt, Radius, Winkelbereich).
+ *
+ * Funktionsweise:
+ * 1. Nimm 3 aufeinanderfolgende Punkte und berechne den Umkreis
+ * 2. Prüfe ob weitere Punkte auf dem gleichen Kreis liegen (Toleranz)
+ * 3. Wenn ja → Bogen gefunden. Wenn nein → nächste Sequenz probieren.
+ *
+ * @param points - Die Outline-Punkte des Boards (Gerber-Koordinaten)
+ * @param tolerance - Max. Abweichung vom Kreisradius in mm (Standard: 0.05mm)
+ * @param minPoints - Mindestanzahl Punkte für einen gültigen Bogen (Standard: 6)
+ * @param minRadius - Mindestradius in mm (kleinere werden ignoriert)
+ */
+function detectArcsFromPoints(
+  points: Point[],
+  tolerance = 0.15,
+  minPoints = 5,
+  minRadius = 0.3
+): DetectedArc[] {
+  if (points.length < minPoints) return [];
+
+  const arcs: DetectedArc[] = [];
+  let i = 0;
+
+  while (i < points.length - minPoints + 1) {
+    // Nimm 3 Punkte: Anfang, Mitte der Test-Sequenz, etwas weiter
+    const p1 = points[i];
+    const midIdx = Math.min(i + Math.floor(minPoints / 2), points.length - 1);
+    const p2 = points[midIdx];
+    const endIdx = Math.min(i + minPoints - 1, points.length - 1);
+    const p3 = points[endIdx];
+
+    const circle = circumcenter(p1, p2, p3);
+
+    // Kein gültiger Kreis (Punkte auf einer Geraden) → weiter
+    if (!circle || circle.radius < minRadius || circle.radius > 500) {
+      i++;
+      continue;
+    }
+
+    // Prüfe wie viele aufeinanderfolgende Punkte auf diesem Kreis liegen
+    let arcEnd = i;
+    for (let j = i; j < points.length; j++) {
+      const dist = Math.sqrt(
+        (points[j].x - circle.center.x) ** 2 +
+        (points[j].y - circle.center.y) ** 2
+      );
+      if (Math.abs(dist - circle.radius) <= tolerance) {
+        arcEnd = j;
+      } else {
+        break;
+      }
+    }
+
+    const arcPointCount = arcEnd - i + 1;
+
+    // Genug Punkte für einen echten Bogen?
+    if (arcPointCount >= minPoints) {
+      // Kreismittelpunkt mit Least-Squares Fit über ALLE Bogenpunkte berechnen.
+      // Das ist deutlich genauer als circumcenter mit nur 3 Punkten,
+      // besonders bei linearisierten Bögen mit vielen Stützpunkten.
+      const arcPoints = points.slice(i, arcEnd + 1);
+      const refined = leastSquaresCircleFit(arcPoints);
+      const finalCircle = refined || circle;
+
+      // Start- und End-Winkel berechnen
+      const startAngle = Math.atan2(
+        points[i].y - finalCircle.center.y,
+        points[i].x - finalCircle.center.x
+      );
+      const endAngle = Math.atan2(
+        points[arcEnd].y - finalCircle.center.y,
+        points[arcEnd].x - finalCircle.center.x
+      );
+
+      // Vollkreis-Erkennung: erster und letzter Punkt fast identisch
+      const distStartEnd = Math.sqrt(
+        (points[i].x - points[arcEnd].x) ** 2 +
+        (points[i].y - points[arcEnd].y) ** 2
+      );
+      const isFullCircle = distStartEnd < 0.1 && arcPointCount > 12;
+
+      arcs.push({
+        center: finalCircle.center,
+        radius: finalCircle.radius,
+        startAngle: isFullCircle ? 0 : startAngle,
+        endAngle: isFullCircle ? Math.PI * 2 : endAngle,
+        startPoint: points[i],
+        endPoint: points[arcEnd],
+      });
+
+      // Springe hinter den erkannten Bogen
+      i = arcEnd + 1;
+    } else {
+      // Kein Bogen hier → nächsten Punkt probieren
+      i++;
+    }
+  }
+
+  return arcs;
+}
+
+/**
+ * Extrahiert die Outline-Punkte und echte Arc-Commands aus dem Outline-Layer.
+ * Gibt sowohl die linearisierten Punkte als auch echte Arcs zurück.
+ */
+function extractOutlineData(board: Board): { points: Point[]; nativeArcs: GerberCommand[] } {
+  const outlineLayer = board.layers.find((l) => l.type === 'outline');
+  const layersToSearch = outlineLayer ? [outlineLayer] : board.layers;
+
+  const points: Point[] = [];
+  const nativeArcs: GerberCommand[] = [];
+
+  for (const layer of layersToSearch) {
+    if (!layer.parsedData) continue;
+    for (const cmd of layer.parsedData.commands) {
+      if (cmd.type === 'line' && cmd.endPoint) {
+        points.push(cmd.endPoint);
+      } else if (cmd.type === 'arc') {
+        if (cmd.startPoint && cmd.endPoint && cmd.centerPoint) {
+          nativeArcs.push(cmd);
+        }
+        if (cmd.endPoint) {
+          points.push(cmd.endPoint);
+        }
+      }
+    }
+    if (outlineLayer) break;
+  }
+
+  return { points, nativeArcs };
+}
+
+/**
+ * Zählt die erkennbaren Bogen-Segmente eines Boards.
+ * Berücksichtigt sowohl echte Gerber-Arcs als auch linearisierte Bögen.
+ */
+export function countArcsInBoard(board: Board): number {
+  const { points, nativeArcs } = extractOutlineData(board);
+
+  // Wenn echte Arc-Commands vorhanden, diese zählen
+  if (nativeArcs.length > 0) return nativeArcs.length;
+
+  // Sonst: Bögen aus Liniensegmenten erkennen
+  const detected = detectArcsFromPoints(points);
+  return detected.length;
+}
+
+/**
+ * Ergebnis-Typ für findNearestArcAtPoint.
+ * Enthält alle Infos, die der Canvas-Handler braucht, um ein FreeMousebite zu erzeugen.
+ */
+interface NearestArcResult {
+  /** Mittelpunkt des Bogens in Panel-Koordinaten (mm) */
+  panelCenter: Point;
+  /** Radius des Bogens in mm */
+  radius: number;
+  /** Winkel des Klickpunktes auf dem Bogen (Radians) */
+  clickAngle: number;
+  /** ID der Board-Instanz, zu der der Bogen gehört */
+  instanceId: string;
+  /** Distanz vom Klickpunkt zum Bogen (mm) */
+  distance: number;
+}
+
+/**
+ * Findet den nächsten erkannten Bogen (Board-Outline oder Panel-Ecke) zur Klickposition.
+ *
+ * Ablauf:
+ * 1. Für jede Board-Instanz: Outline-Daten holen, Bögen erkennen, transformieren
+ * 2. Auch Panel-Ecken berücksichtigen (wenn cornerRadius > 0)
+ * 3. Distanz vom Klickpunkt zum nächsten Bogen berechnen
+ * 4. Nur akzeptieren wenn Distanz < maxDistance mm
+ *
+ * @param panel - Das aktuelle Panel
+ * @param mmX - Klickposition X in mm (Panel-Koordinaten)
+ * @param mmY - Klickposition Y in mm (Panel-Koordinaten)
+ * @param maxDistance - Maximale Distanz in mm (Standard: 20mm, großzügig für leichtes Treffen)
+ * @returns NearestArcResult oder null wenn kein Bogen nahe genug
+ */
+export function findNearestArcAtPoint(
+  panel: Panel,
+  mmX: number,
+  mmY: number,
+  maxDistance = 20
+): NearestArcResult | null {
+  let best: NearestArcResult | null = null;
+
+  // --- Teil 1: Board-Outline-Bögen ---
+  for (const instance of panel.instances) {
+    const board = panel.boards.find((b) => b.id === instance.boardId);
+    if (!board) continue;
+
+    const { points, nativeArcs } = extractOutlineData(board);
+
+    // Bögen sammeln (transformiert in Panel-Koordinaten)
+    const panelArcs: Array<{ center: Point; radius: number; startAngle: number; endAngle: number; instanceId: string }> = [];
+
+    // --- Weg 1: Echte Gerber-Arcs verwenden (wenn vorhanden) ---
+    if (nativeArcs.length > 0) {
+      for (const arc of nativeArcs) {
+        if (!arc.startPoint || !arc.endPoint || !arc.centerPoint) continue;
+        const tCenter = transformPointToPanel(arc.centerPoint, board, instance);
+        const tStart = transformPointToPanel(arc.startPoint, board, instance);
+        const tEnd = transformPointToPanel(arc.endPoint, board, instance);
+        const dx = tStart.x - tCenter.x;
+        const dy = tStart.y - tCenter.y;
+        const radius = Math.sqrt(dx * dx + dy * dy);
+        if (radius < 0.1) continue;
+
+        const startAngle = Math.atan2(tStart.y - tCenter.y, tStart.x - tCenter.x);
+        const endAngle = Math.atan2(tEnd.y - tCenter.y, tEnd.x - tCenter.x);
+
+        // Vollkreis prüfen
+        const distSE = Math.sqrt((arc.startPoint.x - arc.endPoint.x) ** 2 + (arc.startPoint.y - arc.endPoint.y) ** 2);
+        const isFullCircle = distSE < 0.1;
+
+        panelArcs.push({
+          center: tCenter,
+          radius,
+          startAngle: isFullCircle ? 0 : startAngle,
+          endAngle: isFullCircle ? Math.PI * 2 : endAngle,
+          instanceId: instance.id,
+        });
+      }
+    }
+
+    // --- Weg 2: IMMER auch Linien-Segmente auf Bögen prüfen ---
+    // Viele Gerber-Dateien erzeugen Kreise/Bögen aus vielen kleinen Linien.
+    // Diese werden hier per Least-Squares Circle Fit erkannt.
+    // Wird zusätzlich zu den echten Arcs geprüft (nicht nur als Fallback).
+    if (points.length >= 6) {
+      const detected = detectArcsFromPoints(points);
+      for (const arc of detected) {
+        const tCenter = transformPointToPanel(arc.center, board, instance);
+        const tStart = transformPointToPanel(arc.startPoint, board, instance);
+        const tEnd = transformPointToPanel(arc.endPoint, board, instance);
+        const radius = arc.radius;
+        if (radius < 0.1) continue;
+
+        // Duplikat-Check: Wenn es bereits einen nativen Arc mit ähnlichem
+        // Mittelpunkt und Radius gibt, überspringen (um Doppeleinträge zu vermeiden)
+        const isDuplicate = panelArcs.some((existing) => {
+          const centerDist = Math.sqrt((existing.center.x - tCenter.x) ** 2 + (existing.center.y - tCenter.y) ** 2);
+          return centerDist < 0.5 && Math.abs(existing.radius - radius) < 0.5;
+        });
+        if (isDuplicate) continue;
+
+        const startAngle = Math.atan2(tStart.y - tCenter.y, tStart.x - tCenter.x);
+        const endAngle = Math.atan2(tEnd.y - tCenter.y, tEnd.x - tCenter.x);
+
+        // Vollkreis prüfen
+        const distSE = Math.sqrt((arc.startPoint.x - arc.endPoint.x) ** 2 + (arc.startPoint.y - arc.endPoint.y) ** 2);
+        const isFullCircle = distSE < 0.1;
+
+        panelArcs.push({
+          center: tCenter,
+          radius,
+          startAngle: isFullCircle ? 0 : startAngle,
+          endAngle: isFullCircle ? Math.PI * 2 : endAngle,
+          instanceId: instance.id,
+        });
+      }
+    }
+
+    // Für jeden Bogen: Distanz und Winkel prüfen
+    for (const arc of panelArcs) {
+      const dxClick = mmX - arc.center.x;
+      const dyClick = mmY - arc.center.y;
+      const distToCenter = Math.sqrt(dxClick * dxClick + dyClick * dyClick);
+      const distToArc = Math.abs(distToCenter - arc.radius);
+
+      // Prüfen ob der Klickwinkel im Bogenbereich liegt
+      const clickAngle = Math.atan2(dyClick, dxClick);
+
+      // Winkelbereich prüfen (Vollkreis = immer OK)
+      const isFullCircle = Math.abs(arc.endAngle - arc.startAngle) >= Math.PI * 1.99;
+      if (!isFullCircle) {
+        // Normalisiere Winkel in den Bereich [0, 2π]
+        const normalize = (a: number) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+        const nClick = normalize(clickAngle);
+        const nStart = normalize(arc.startAngle);
+        const nEnd = normalize(arc.endAngle);
+
+        // Sweep berechnen (im Uhrzeigersinn oder gegen)
+        let sweep = nEnd - nStart;
+        if (sweep < 0) sweep += Math.PI * 2;
+
+        let fromStart = nClick - nStart;
+        if (fromStart < 0) fromStart += Math.PI * 2;
+
+        // Klickwinkel muss innerhalb des Sweeps liegen
+        if (fromStart > sweep) continue;
+      }
+
+      if (distToArc < maxDistance && (!best || distToArc < best.distance)) {
+        best = {
+          panelCenter: arc.center,
+          radius: arc.radius,
+          clickAngle,
+          instanceId: arc.instanceId,
+          distance: distToArc,
+        };
+      }
+    }
+  }
+
+  // --- Teil 2: Panel-Ecken (wenn cornerRadius > 0) ---
+  const r = panel.frame.cornerRadius;
+  if (r > 0) {
+    const w = panel.width;
+    const h = panel.height;
+
+    // 4 Ecken mit ihren Winkelbereichen (in Panel-Koordinaten, Y nach unten)
+    const corners = [
+      { center: { x: r, y: r }, startAngle: Math.PI, endAngle: Math.PI * 1.5 },       // oben-links
+      { center: { x: w - r, y: r }, startAngle: Math.PI * 1.5, endAngle: Math.PI * 2 }, // oben-rechts
+      { center: { x: w - r, y: h - r }, startAngle: 0, endAngle: Math.PI * 0.5 },      // unten-rechts
+      { center: { x: r, y: h - r }, startAngle: Math.PI * 0.5, endAngle: Math.PI },     // unten-links
+    ];
+
+    for (const corner of corners) {
+      const dxClick = mmX - corner.center.x;
+      const dyClick = mmY - corner.center.y;
+      const distToCenter = Math.sqrt(dxClick * dxClick + dyClick * dyClick);
+      const distToArc = Math.abs(distToCenter - r);
+
+      const clickAngle = Math.atan2(dyClick, dxClick);
+
+      // Winkelbereich prüfen
+      const normalize = (a: number) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+      const nClick = normalize(clickAngle);
+      const nStart = normalize(corner.startAngle);
+      const nEnd = normalize(corner.endAngle);
+
+      let sweep = nEnd - nStart;
+      if (sweep < 0) sweep += Math.PI * 2;
+
+      let fromStart = nClick - nStart;
+      if (fromStart < 0) fromStart += Math.PI * 2;
+
+      if (fromStart > sweep) continue;
+
+      if (distToArc < maxDistance && (!best || distToArc < best.distance)) {
+        best = {
+          panelCenter: corner.center,
+          radius: r,
+          clickAngle,
+          instanceId: '', // Panel-Ecke, keine Board-Instanz
+          distance: distToArc,
+        };
+      }
+    }
+  }
+
+  return best;
+}
+
+/**
+ * Baut die echten Outline-Segmente eines Boards in Panel-Koordinaten auf.
+ *
+ * Liest die Gerber-Outline-Daten (Linien + Bögen) und transformiert sie
+ * von Gerber-Koordinaten in Panel-Koordinaten. Jedes Segment bekommt
+ * eine kumulierte Distanz, damit man Punkte auf dem Pfad lokalisieren kann.
+ *
+ * Fallback: Wenn kein Outline-Layer vorhanden ist, werden 4 Rechteck-Kanten
+ * basierend auf der Board-Größe generiert (wie bisher).
+ *
+ * @param board - Das Board mit den Gerber-Daten
+ * @param instance - Die Board-Instanz (Position + Rotation im Panel)
+ * @returns Array von OutlinePathSegment in Panel-Koordinaten
+ */
+export function buildOutlineSegments(
+  board: Board,
+  instance: BoardInstance
+): OutlinePathSegment[] {
+  const outlineLayer = board.layers.find((l) => l.type === 'outline');
+
+  // --- Fallback: Kein Outline-Layer → Rechteck-Segmente wie bisher ---
+  if (!outlineLayer || !outlineLayer.parsedData || outlineLayer.parsedData.commands.length === 0) {
+    const layerRotation = board.layerRotation || 0;
+    const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+    const effectiveW = isLayerRotated ? board.height : board.width;
+    const effectiveH = isLayerRotated ? board.width : board.height;
+    const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
+    const displayW = isInstanceRotated ? effectiveH : effectiveW;
+    const displayH = isInstanceRotated ? effectiveW : effectiveH;
+
+    const bx = instance.position.x;
+    const by = instance.position.y;
+
+    // 4 Ecken im Uhrzeigersinn (wie bisher)
+    const corners = [
+      { x: bx, y: by },
+      { x: bx + displayW, y: by },
+      { x: bx + displayW, y: by + displayH },
+      { x: bx, y: by + displayH },
+    ];
+
+    const segments: OutlinePathSegment[] = [];
+    let cumDist = 0;
+    for (let i = 0; i < corners.length; i++) {
+      const s = corners[i];
+      const e = corners[(i + 1) % corners.length];
+      const len = Math.sqrt((e.x - s.x) ** 2 + (e.y - s.y) ** 2);
+      segments.push({ start: s, end: e, cumulativeDistance: cumDist, length: len });
+      cumDist += len;
+    }
+    return segments;
+  }
+
+  // --- Echte Outline-Segmente aus Gerber-Daten ---
+  const segments: OutlinePathSegment[] = [];
+  let cumDist = 0;
+
+  for (const cmd of outlineLayer.parsedData.commands) {
+    if (cmd.type === 'line' && cmd.startPoint && cmd.endPoint) {
+      // Gerade Linie: Start und End transformieren
+      const tStart = transformPointToPanel(cmd.startPoint, board, instance);
+      const tEnd = transformPointToPanel(cmd.endPoint, board, instance);
+      const len = Math.sqrt((tEnd.x - tStart.x) ** 2 + (tEnd.y - tStart.y) ** 2);
+
+      if (len > 0.001) {
+        segments.push({ start: tStart, end: tEnd, cumulativeDistance: cumDist, length: len });
+        cumDist += len;
+      }
+    } else if (cmd.type === 'arc' && cmd.startPoint && cmd.endPoint && cmd.centerPoint) {
+      // Bogen: Start, End und Center transformieren
+      const tStart = transformPointToPanel(cmd.startPoint, board, instance);
+      const tEnd = transformPointToPanel(cmd.endPoint, board, instance);
+      const tCenter = transformPointToPanel(cmd.centerPoint, board, instance);
+
+      // Radius aus transformierten Koordinaten berechnen
+      const dx = tStart.x - tCenter.x;
+      const dy = tStart.y - tCenter.y;
+      const radius = Math.sqrt(dx * dx + dy * dy);
+      if (radius < 0.01) continue;
+
+      // Winkel in Panel-Koordinaten berechnen
+      const startAngle = Math.atan2(tStart.y - tCenter.y, tStart.x - tCenter.x);
+      const endAngle = Math.atan2(tEnd.y - tCenter.y, tEnd.x - tCenter.x);
+
+      // Clockwise-Richtung: Y-Flip invertiert die Richtung
+      // Gerber CW → Panel CCW und umgekehrt
+      const clockwise = !cmd.clockwise;
+
+      // Sweep berechnen (immer positiver Wert für die Bogenlänge)
+      let sweep: number;
+      if (clockwise) {
+        // Im Uhrzeigersinn: startAngle → endAngle (absteigend)
+        sweep = startAngle - endAngle;
+        if (sweep <= 0) sweep += Math.PI * 2;
+      } else {
+        // Gegen den Uhrzeigersinn: startAngle → endAngle (aufsteigend)
+        sweep = endAngle - startAngle;
+        if (sweep <= 0) sweep += Math.PI * 2;
+      }
+
+      // Vollkreis prüfen (Start ≈ End)
+      const distSE = Math.sqrt((cmd.startPoint.x - cmd.endPoint.x) ** 2 + (cmd.startPoint.y - cmd.endPoint.y) ** 2);
+      if (distSE < 0.01) {
+        sweep = Math.PI * 2;
+      }
+
+      const arcLength = radius * sweep;
+      if (arcLength < 0.001) continue;
+
+      segments.push({
+        start: tStart,
+        end: tEnd,
+        cumulativeDistance: cumDist,
+        length: arcLength,
+        arc: {
+          center: tCenter,
+          radius,
+          startAngle,
+          endAngle,
+          clockwise,
+        },
+      });
+      cumDist += arcLength;
+    }
+    // 'move' und 'flash' Commands werden ignoriert (kein Pfad-Segment)
+  }
+
+  // Wenn keine Segmente gefunden: Fallback auf Rechteck
+  if (segments.length === 0) {
+    return buildOutlineSegments({ ...board, layers: [] }, instance);
+  }
+
+  return segments;
+}
+
+/**
+ * Transformiert einen Punkt von Gerber-Koordinaten (normalisiert, Y-nach-oben)
+ * in Panel-Koordinaten (Y-nach-unten, mit Instance-Position und -Rotation).
+ *
+ * Transformationsschritte:
+ * 1. Layer-Rotation (board.layerRotation) um den Nullpunkt
+ * 2. Y-Flip (Gerber Y-up → Canvas Y-down)
+ * 3. Instance-Rotation + Position
+ */
+function transformPointToPanel(
+  p: Point,
+  board: Board,
+  instance: BoardInstance
+): Point {
+  let x = p.x;
+  let y = p.y;
+
+  // Schritt 1: Layer-Rotation anwenden (CCW um Nullpunkt, mit Offset-Korrektur)
+  const layerRot = board.layerRotation || 0;
+  if (layerRot === 90) {
+    const tmp = x;
+    x = -y + board.height;
+    y = tmp;
+  } else if (layerRot === 180) {
+    x = board.width - x;
+    y = board.height - y;
+  } else if (layerRot === 270) {
+    const tmp = x;
+    x = y;
+    y = -tmp + board.width;
+  }
+
+  // Effektive Dimensionen nach Layer-Rotation
+  const isLayerRotated = layerRot === 90 || layerRot === 270;
+  const effectiveW = isLayerRotated ? board.height : board.width;
+  const effectiveH = isLayerRotated ? board.width : board.height;
+
+  // Schritt 2: Y-Flip (Gerber Y geht nach oben, Canvas Y geht nach unten)
+  y = effectiveH - y;
+
+  // Schritt 3: Instance-Rotation + Position
+  const instRot = instance.rotation || 0;
+  let finalX: number;
+  let finalY: number;
+
+  if (instRot === 0) {
+    finalX = instance.position.x + x;
+    finalY = instance.position.y + y;
+  } else if (instRot === 90) {
+    finalX = instance.position.x + effectiveH - y;
+    finalY = instance.position.y + x;
+  } else if (instRot === 180) {
+    finalX = instance.position.x + effectiveW - x;
+    finalY = instance.position.y + effectiveH - y;
+  } else {
+    // 270°
+    finalX = instance.position.x + y;
+    finalY = instance.position.y + effectiveW - x;
+  }
+
+  return { x: finalX, y: finalY };
+}
+
+/**
+ * Konvertiert einen erkannten Bogen (DetectedArc) in einen FreeMousebite.
+ * Arbeitet mit Gerber-Koordinaten und transformiert sie in Panel-Koordinaten.
+ */
+function detectedArcToFreeMousebite(
+  arc: DetectedArc,
+  board: Board,
+  instance: BoardInstance,
+  config: { holeDiameter: number; holeSpacing: number }
+): FreeMousebite | null {
+  // Center, Start und End in Panel-Koordinaten transformieren
+  const tCenter = transformPointToPanel(arc.center, board, instance);
+  const tStart = transformPointToPanel(arc.startPoint, board, instance);
+  const tEnd = transformPointToPanel(arc.endPoint, board, instance);
+
+  // Radius direkt vom Least-Squares-Fit verwenden (transformPointToPanel ist isometrisch)
+  const radius = arc.radius;
+
+  if (radius < 0.1) return null;
+
+  // Winkel in Panel-Koordinaten (nach Y-Flip und Rotation)
+  const tStartAngle = Math.atan2(tStart.y - tCenter.y, tStart.x - tCenter.x);
+  const tEndAngle = Math.atan2(tEnd.y - tCenter.y, tEnd.x - tCenter.x);
+
+  // Vollkreis?
+  const distStartEnd = Math.sqrt(
+    (arc.startPoint.x - arc.endPoint.x) ** 2 +
+    (arc.startPoint.y - arc.endPoint.y) ** 2
+  );
+  const isFullCircle = distStartEnd < 0.1 &&
+    Math.abs(arc.endAngle - arc.startAngle) > Math.PI * 1.5;
+
+  // Sweep bestimmen: Wir gehen davon aus, dass die Punkte CCW im Gerber waren
+  // Nach Y-Flip wird die Richtung umgekehrt
+  let sweep: number;
+  if (isFullCircle) {
+    sweep = Math.PI * 2;
+  } else {
+    // Sweep im Gerber-Raum (CCW positiv)
+    sweep = arc.endAngle - arc.startAngle;
+    if (sweep <= 0) sweep += Math.PI * 2;
+    if (sweep > Math.PI * 2) sweep -= Math.PI * 2;
+  }
+
+  // Nach Y-Flip: Start und End tauschen (Richtungsumkehr)
+  // Wir verwenden tEndAngle als Start, weil Y-Flip die Richtung umkehrt
+  const pixiStartAngle = tEndAngle;
+  const pixiEndAngle = pixiStartAngle + sweep;
+
+  const toDeg = (rad: number) => (rad * 180) / Math.PI;
+
+  return {
+    id: uuidv4(),
+    arcCenter: tCenter,
+    arcRadius: radius,
+    arcStartAngle: toDeg(pixiStartAngle),
+    arcEndAngle: toDeg(pixiEndAngle),
+    holeDiameter: config.holeDiameter,
+    holeSpacing: config.holeSpacing,
+    boardInstanceId: instance.id,
+  };
+}
+
+/**
+ * Konvertiert einen echten Gerber-Arc-Befehl in einen FreeMousebite.
+ */
+function nativeArcToFreeMousebite(
+  arc: GerberCommand,
+  board: Board,
+  instance: BoardInstance,
+  config: { holeDiameter: number; holeSpacing: number }
+): FreeMousebite | null {
+  if (!arc.startPoint || !arc.endPoint || !arc.centerPoint) return null;
+
+  const tCenter = transformPointToPanel(arc.centerPoint, board, instance);
+  const tStart = transformPointToPanel(arc.startPoint, board, instance);
+  const tEnd = transformPointToPanel(arc.endPoint, board, instance);
+
+  const dx = tStart.x - tCenter.x;
+  const dy = tStart.y - tCenter.y;
+  const radius = Math.sqrt(dx * dx + dy * dy);
+
+  if (radius < 0.1) return null;
+
+  const startAngleRad = Math.atan2(tStart.y - tCenter.y, tStart.x - tCenter.x);
+  const endAngleRad = Math.atan2(tEnd.y - tCenter.y, tEnd.x - tCenter.x);
+
+  // Sweep im Gerber-Raum berechnen
+  const gStartAngle = Math.atan2(
+    arc.startPoint.y - arc.centerPoint.y,
+    arc.startPoint.x - arc.centerPoint.x
+  );
+  const gEndAngle = Math.atan2(
+    arc.endPoint.y - arc.centerPoint.y,
+    arc.endPoint.x - arc.centerPoint.x
+  );
+
+  const distStartEnd = Math.sqrt(
+    (arc.startPoint.x - arc.endPoint.x) ** 2 +
+    (arc.startPoint.y - arc.endPoint.y) ** 2
+  );
+  const isFullCircle = distStartEnd < 0.01;
+
+  let sweep: number;
+  if (isFullCircle) {
+    sweep = Math.PI * 2;
+  } else if (arc.clockwise) {
+    sweep = gStartAngle - gEndAngle;
+    if (sweep <= 0) sweep += Math.PI * 2;
+  } else {
+    sweep = gEndAngle - gStartAngle;
+    if (sweep <= 0) sweep += Math.PI * 2;
+  }
+
+  // Y-Flip kehrt Bogenrichtung um
+  let pixiStartAngle: number;
+  if (arc.clockwise) {
+    pixiStartAngle = startAngleRad;
+  } else {
+    pixiStartAngle = endAngleRad;
+  }
+  const pixiEndAngle = pixiStartAngle + sweep;
+
+  const toDeg = (rad: number) => (rad * 180) / Math.PI;
+
+  return {
+    id: uuidv4(),
+    arcCenter: tCenter,
+    arcRadius: radius,
+    arcStartAngle: toDeg(pixiStartAngle),
+    arcEndAngle: toDeg(pixiEndAngle),
+    holeDiameter: config.holeDiameter,
+    holeSpacing: config.holeSpacing,
+    boardInstanceId: instance.id,
+  };
+}
+
+// ============================================================================
 // Store Implementierung
 // ============================================================================
 
@@ -477,6 +1498,14 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   selectedTabId: null,
   selectedVScoreLineId: null,
   selectedRoutingContourId: null,
+  showBoardBackground: true,
+  showBoardLabels: true,
+  cursorPosition: { x: 0, y: 0 },
+  toolingHoleConfig: { diameter: 3.0, plated: false },
+  selectedFreeMousebiteId: null,
+  mousebiteConfig: { arcLength: 5, holeDiameter: 0.5, holeSpacing: 0.8 },
+  routeFreeDrawState: { points: [] },
+  routeSegmentSelectState: { boardInstanceId: null, selectedSegmentIndices: [], outlineSegments: [] },
   history: {
     past: [],
     future: [],
@@ -669,6 +1698,18 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         end: { x: l.end.y, y: oldWidth - l.end.x },
       }));
 
+      // --- Rundungs-Mousebites rotieren ---
+      // arcCenter: (x, y) → (y, oldWidth - x), Winkel: +90°
+      const newFreeMousebites = panel.freeMousebites.map((m) => ({
+        ...m,
+        arcCenter: {
+          x: m.arcCenter.y,
+          y: oldWidth - m.arcCenter.x,
+        },
+        arcStartAngle: (m.arcStartAngle + 90) % 360,
+        arcEndAngle: (m.arcEndAngle + 90) % 360,
+      }));
+
       // --- Nutzenrand rotieren ---
       // Bei 90° CCW: left→bottom, top→left, right→top, bottom→right
       const newFrame = {
@@ -699,6 +1740,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           fiducials: newFiducials,
           toolingHoles: newToolingHoles,
           vscoreLines: newVScoreLines,
+          freeMousebites: newFreeMousebites,
           routingContours: newRoutingContours,
           frame: newFrame,
           // Tabs müssen nach Rotation neu verteilt werden
@@ -1212,6 +2254,24 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       },
     })),
 
+  // Aktualisiert Durchmesser und/oder PTH einer Tooling-Bohrung
+  updateToolingHole: (holeId, data) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        toolingHoles: state.panel.toolingHoles.map((h) =>
+          h.id === holeId ? { ...h, ...data } : h
+        ),
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Setzt die Tooling-Bohrung-Konfiguration (für Platzierungs-Tool)
+  setToolingHoleConfig: (config) =>
+    set((state) => ({
+      toolingHoleConfig: { ...state.toolingHoleConfig, ...config },
+    })),
+
   // Wählt eine Tooling-Bohrung aus (oder null zum Abwählen)
   selectToolingHole: (holeId) =>
     set(() => ({
@@ -1378,6 +2438,151 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     }),
 
   // --------------------------------------------------------------------------
+  // Mousebites an Rundungen (Ecken des Nutzenrands)
+  // --------------------------------------------------------------------------
+
+  // Entfernt alle Rundungs-Mousebites
+  clearAllFreeMousebites: () =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        freeMousebites: [],
+        modifiedAt: new Date(),
+      },
+      selectedFreeMousebiteId: null,
+    })),
+
+  // Wählt eine Rundungs-Mousebite aus (oder null zum Abwählen)
+  selectFreeMousebite: (mousebiteId) =>
+    set(() => ({
+      selectedFreeMousebiteId: mousebiteId,
+    })),
+
+  // Generiert Mousebites an allen Bogen-Segmenten der Board-Outlines
+  // UND an den Ecken-Rundungen des Nutzenrands (wenn cornerRadius > 0).
+  // Erkennt sowohl echte Gerber-Arcs (G02/G03) als auch
+  // linearisierte Bögen (viele kleine Geraden, die einen Kreis bilden).
+  autoGenerateArcMousebites: (config) =>
+    set((state) => {
+      const { panel } = state;
+      const newMousebites: FreeMousebite[] = [];
+
+      // --- Teil 1: Board-Outline-Bögen ---
+      for (const instance of panel.instances) {
+        const board = panel.boards.find((b) => b.id === instance.boardId);
+        if (!board) continue;
+
+        const { points, nativeArcs } = extractOutlineData(board);
+
+        if (nativeArcs.length > 0) {
+          // Methode A: Echte Arc-Commands im Gerber gefunden
+          for (const arc of nativeArcs) {
+            const mousebite = nativeArcToFreeMousebite(arc, board, instance, config);
+            if (mousebite) newMousebites.push(mousebite);
+          }
+        } else {
+          // Methode B: Bögen aus Liniensegmenten erkennen
+          const detected = detectArcsFromPoints(points);
+          for (const arc of detected) {
+            const mousebite = detectedArcToFreeMousebite(arc, board, instance, config);
+            if (mousebite) newMousebites.push(mousebite);
+          }
+        }
+      }
+
+      // --- Teil 2: Panel-Ecken (bestehende Logik, wenn Eckenradius > 0) ---
+      const r = panel.frame.cornerRadius;
+      if (r > 0) {
+        const w = panel.width;
+        const h = panel.height;
+
+        // 4 Ecken des Panels: Mittelpunkt des Viertelkreises und Winkelbereich
+        // PixiJS: Y wächst nach unten, Winkel im Uhrzeigersinn
+        // Ecke oben-links: Bogen von 180° bis 270° (links → oben)
+        newMousebites.push({
+          id: uuidv4(),
+          arcCenter: { x: r, y: r },
+          arcRadius: r,
+          arcStartAngle: 180,
+          arcEndAngle: 270,
+          holeDiameter: config.holeDiameter,
+          holeSpacing: config.holeSpacing,
+        });
+
+        // Ecke oben-rechts: Bogen von 270° bis 360° (oben → rechts)
+        newMousebites.push({
+          id: uuidv4(),
+          arcCenter: { x: w - r, y: r },
+          arcRadius: r,
+          arcStartAngle: 270,
+          arcEndAngle: 360,
+          holeDiameter: config.holeDiameter,
+          holeSpacing: config.holeSpacing,
+        });
+
+        // Ecke unten-rechts: Bogen von 0° bis 90° (rechts → unten)
+        newMousebites.push({
+          id: uuidv4(),
+          arcCenter: { x: w - r, y: h - r },
+          arcRadius: r,
+          arcStartAngle: 0,
+          arcEndAngle: 90,
+          holeDiameter: config.holeDiameter,
+          holeSpacing: config.holeSpacing,
+        });
+
+        // Ecke unten-links: Bogen von 90° bis 180° (unten → links)
+        newMousebites.push({
+          id: uuidv4(),
+          arcCenter: { x: r, y: h - r },
+          arcRadius: r,
+          arcStartAngle: 90,
+          arcEndAngle: 180,
+          holeDiameter: config.holeDiameter,
+          holeSpacing: config.holeSpacing,
+        });
+      }
+
+      return {
+        panel: {
+          ...panel,
+          freeMousebites: newMousebites,
+          modifiedAt: new Date(),
+        },
+        selectedFreeMousebiteId: null,
+      };
+    }),
+
+  // Fügt ein einzelnes FreeMousebite hinzu (für manuelle Klick-Platzierung)
+  addFreeMousebite: (mousebite) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        freeMousebites: [...state.panel.freeMousebites, { ...mousebite, id: uuidv4() }],
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Entfernt ein einzelnes FreeMousebite anhand seiner ID
+  removeFreeMousebite: (mousebiteId) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        freeMousebites: state.panel.freeMousebites.filter((m) => m.id !== mousebiteId),
+        modifiedAt: new Date(),
+      },
+      // Auswahl zurücksetzen falls das gelöschte Element ausgewählt war
+      selectedFreeMousebiteId:
+        state.selectedFreeMousebiteId === mousebiteId ? null : state.selectedFreeMousebiteId,
+    })),
+
+  // Setzt die Mousebite-Konfiguration (Bogenlänge, Bohrungsparameter)
+  setMousebiteConfig: (config) =>
+    set((state) => ({
+      mousebiteConfig: { ...state.mousebiteConfig, ...config },
+    })),
+
+  // --------------------------------------------------------------------------
   // Fräskonturen (Routing Contours)
   // --------------------------------------------------------------------------
 
@@ -1387,17 +2592,35 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       selectedRoutingContourId: contourId,
     })),
 
-  // Entfernt eine einzelne Fräskontur
+  // Entfernt eine einzelne Fräskontur.
+  // Sync-Kopien können nicht einzeln gelöscht werden (werden automatisch verwaltet).
+  // Wenn eine Master-Kontur gelöscht wird, werden auch alle zugehörigen Kopien entfernt.
   removeRoutingContour: (contourId) =>
-    set((state) => ({
-      panel: {
+    set((state) => {
+      const contourToRemove = state.panel.routingContours.find(c => c.id === contourId);
+      // Sync-Kopien können nicht manuell gelöscht werden
+      if (contourToRemove?.isSyncCopy) return {};
+
+      // Kontur selbst UND alle Sync-Kopien die auf diese Kontur verweisen entfernen
+      const filtered = state.panel.routingContours.filter(
+        (c) => c.id !== contourId && c.masterContourId !== contourId
+      );
+
+      const updatedPanel = {
         ...state.panel,
-        routingContours: state.panel.routingContours.filter((c) => c.id !== contourId),
+        routingContours: filtered,
         modifiedAt: new Date(),
-      },
-      selectedRoutingContourId:
-        state.selectedRoutingContourId === contourId ? null : state.selectedRoutingContourId,
-    })),
+      };
+
+      // Sync nochmal ausführen um verwaiste Kopien zu bereinigen
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+
+      return {
+        panel: updatedPanel,
+        selectedRoutingContourId:
+          state.selectedRoutingContourId === contourId ? null : state.selectedRoutingContourId,
+      };
+    }),
 
   // Entfernt alle Fräskonturen
   clearAllRoutingContours: () =>
@@ -1552,6 +2775,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
             segments,
             toolDiameter: routingConfig.toolDiameter,
             visible: true,
+            creationMethod: 'auto',
           });
         }
       }
@@ -1602,18 +2826,228 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           segments: panelSegments,
           toolDiameter: routingConfig.toolDiameter,
           visible: true,
+          creationMethod: 'auto',
         });
       }
+
+      // Manuelle Konturen behalten, nur Auto-Konturen ersetzen
+      const manualContours = panel.routingContours.filter(
+        (c) => c.creationMethod !== 'auto' && c.creationMethod !== undefined
+      );
 
       return {
         panel: {
           ...panel,
-          routingContours: newContours,
+          routingContours: [...manualContours, ...newContours],
           modifiedAt: new Date(),
         },
         selectedRoutingContourId: null,
       };
     }),
+
+  // Fügt eine neue Fräskontur hinzu (für manuelle Methoden: free-draw, follow-outline)
+  // Nach dem Hinzufügen wird die Master-Board-Synchronisation ausgeführt,
+  // damit Konturen auf dem Master automatisch auf alle anderen Boards kopiert werden.
+  addRoutingContour: (contour) =>
+    set((state) => {
+      const updatedContours = [
+        ...state.panel.routingContours,
+        { ...contour, id: uuidv4() },
+      ];
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: updatedContours,
+        modifiedAt: new Date(),
+      };
+      // Sync nur bei manuellen Konturen (nicht bei auto-generierten)
+      if (contour.creationMethod !== 'auto') {
+        updatedPanel.routingContours = syncMasterContours(updatedPanel);
+      }
+      return { panel: updatedPanel };
+    }),
+
+  // Fügt einen Punkt zur Free-Draw-Polyline hinzu
+  addFreeDrawPoint: (point) =>
+    set((state) => ({
+      routeFreeDrawState: {
+        points: [...state.routeFreeDrawState.points, point],
+      },
+    })),
+
+  // Setzt den Free-Draw-State zurück (Abbrechen)
+  clearFreeDrawState: () =>
+    set(() => ({
+      routeFreeDrawState: { points: [] },
+    })),
+
+  // Finalisiert die Free-Draw-Kontur (Punkte → Segmente → RoutingContour)
+  // Mindestens 2 Punkte nötig, damit ein Segment entsteht.
+  // Die boardInstanceId wird automatisch anhand der Nähe zum Board-Zentrum gesetzt,
+  // damit die Master-Board-Synchronisation korrekt funktioniert.
+  finalizeFreeDrawContour: () =>
+    set((state) => {
+      const { points } = state.routeFreeDrawState;
+      if (points.length < 2) {
+        // Zu wenig Punkte → nichts tun, State zurücksetzen
+        return { routeFreeDrawState: { points: [] } };
+      }
+
+      // Punkte in Liniensegmente umwandeln (Punkt 1→2, 2→3, etc.)
+      const segments: RoutingSegment[] = [];
+      for (let i = 0; i < points.length - 1; i++) {
+        segments.push({
+          start: { x: points[i].x, y: points[i].y },
+          end: { x: points[i + 1].x, y: points[i + 1].y },
+        });
+      }
+
+      // boardInstanceId automatisch ermitteln: Mittelpunkt der Kontur berechnen
+      // und die nächste Board-Instanz finden (anhand Zentrum des Boards)
+      let nearestInstanceId: string | undefined;
+      if (state.panel.instances.length > 0) {
+        // Mittelpunkt aller gezeichneten Punkte berechnen
+        const avgX = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+        const avgY = points.reduce((sum, p) => sum + p.y, 0) / points.length;
+
+        let minDist = Infinity;
+        for (const inst of state.panel.instances) {
+          const board = state.panel.boards.find(b => b.id === inst.boardId);
+          if (!board) continue;
+          // Board-Zentrum berechnen (berücksichtigt Rotation)
+          const layerRotation = board.layerRotation || 0;
+          const isLayerRot = layerRotation === 90 || layerRotation === 270;
+          const effW = isLayerRot ? board.height : board.width;
+          const effH = isLayerRot ? board.width : board.height;
+          const isInstRot = inst.rotation === 90 || inst.rotation === 270;
+          const dispW = isInstRot ? effH : effW;
+          const dispH = isInstRot ? effW : effH;
+          const cx = inst.position.x + dispW / 2;
+          const cy = inst.position.y + dispH / 2;
+          const dist = Math.sqrt((avgX - cx) ** 2 + (avgY - cy) ** 2);
+          if (dist < minDist) {
+            minDist = dist;
+            nearestInstanceId = inst.id;
+          }
+        }
+      }
+
+      const newContour: RoutingContour = {
+        id: uuidv4(),
+        contourType: 'boardOutline', // Standard-Typ für manuelle Konturen
+        boardInstanceId: nearestInstanceId,
+        segments,
+        toolDiameter: state.panel.routingConfig.toolDiameter,
+        visible: true,
+        creationMethod: 'free-draw',
+      };
+
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: [...state.panel.routingContours, newContour],
+        modifiedAt: new Date(),
+      };
+
+      // Master-Board-Synchronisation ausführen
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+
+      return {
+        panel: updatedPanel,
+        routeFreeDrawState: { points: [] }, // State zurücksetzen
+      };
+    }),
+
+  // Aktualisiert Start-/Endpunkt einer manuellen Fräskontur (für Drag & Drop Handles)
+  // Sync-Kopien sind schreibgeschützt und werden ignoriert.
+  // Nach Änderung wird die Master-Board-Synchronisation ausgeführt.
+  updateRoutingContourEndpoints: (contourId, startPoint, endPoint) =>
+    set((state) => {
+      // Prüfe ob es eine Sync-Kopie ist → nicht bearbeiten
+      const targetContour = state.panel.routingContours.find(c => c.id === contourId);
+      if (targetContour?.isSyncCopy) return {};
+
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: state.panel.routingContours.map((c) => {
+          if (c.id !== contourId) return c;
+          // Nur manuelle Konturen dürfen bearbeitet werden
+          if (c.creationMethod === 'auto') return c;
+
+          const newSegments = [...c.segments];
+          if (startPoint && newSegments.length > 0) {
+            // Startpunkt des ersten Segments ändern
+            newSegments[0] = { ...newSegments[0], start: startPoint };
+          }
+          if (endPoint && newSegments.length > 0) {
+            // Endpunkt des letzten Segments ändern
+            newSegments[newSegments.length - 1] = {
+              ...newSegments[newSegments.length - 1],
+              end: endPoint,
+            };
+          }
+          return { ...c, segments: newSegments };
+        }),
+        modifiedAt: new Date(),
+      };
+
+      // Master-Board-Synchronisation ausführen
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+
+      return { panel: updatedPanel };
+    }),
+
+  // Ersetzt alle Segmente einer Fräskontur komplett (für follow-outline Neuberechnung)
+  // Sync-Kopien sind schreibgeschützt und werden ignoriert.
+  // Nach Änderung wird die Master-Board-Synchronisation ausgeführt.
+  replaceRoutingContourSegments: (contourId, segments, outlineDirection?) =>
+    set((state) => {
+      // Prüfe ob es eine Sync-Kopie ist → nicht bearbeiten
+      const targetContour = state.panel.routingContours.find(c => c.id === contourId);
+      if (targetContour?.isSyncCopy) return {};
+
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: state.panel.routingContours.map((c) => {
+          if (c.id !== contourId) return c;
+          // Richtung nur aktualisieren wenn explizit angegeben
+          return outlineDirection
+            ? { ...c, segments, outlineDirection }
+            : { ...c, segments };
+        }),
+        modifiedAt: new Date(),
+      };
+
+      // Master-Board-Synchronisation ausführen
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+
+      return { panel: updatedPanel };
+    }),
+
+  // Setzt den Segment-Auswahl-State (Board + Outline-Segmente)
+  setRouteSegmentSelectState: (segState) =>
+    set(() => ({
+      routeSegmentSelectState: segState,
+    })),
+
+  // Toggle: Segment an-/abwählen (Shift+Klick)
+  toggleSegmentSelection: (index) =>
+    set((state) => {
+      const current = state.routeSegmentSelectState.selectedSegmentIndices;
+      const newIndices = current.includes(index)
+        ? current.filter((i) => i !== index)  // Abwählen
+        : [...current, index];                 // Hinzufügen
+      return {
+        routeSegmentSelectState: {
+          ...state.routeSegmentSelectState,
+          selectedSegmentIndices: newIndices,
+        },
+      };
+    }),
+
+  // Setzt den Segment-Auswahl-State zurück (Abbrechen)
+  clearSegmentSelectState: () =>
+    set(() => ({
+      routeSegmentSelectState: { boardInstanceId: null, selectedSegmentIndices: [], outlineSegments: [] },
+    })),
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen
@@ -1665,6 +3099,19 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // --------------------------------------------------------------------------
 
   setActiveTool: (tool) => set({ activeTool: tool }),
+  setCursorPosition: (pos) => set({ cursorPosition: pos }),
+
+  // Board-Hintergrund (grüne PCB-Substrat-Fläche) ein-/ausschalten
+  toggleBoardBackground: () =>
+    set((state) => ({
+      showBoardBackground: !state.showBoardBackground,
+    })),
+
+  // Board-Beschriftung (blauer Rahmen, Name, Größe) ein-/ausschalten
+  toggleBoardLabels: () =>
+    set((state) => ({
+      showBoardLabels: !state.showBoardLabels,
+    })),
 
   // --------------------------------------------------------------------------
   // Grid-Einstellungen
@@ -1806,3 +3253,25 @@ export const useSelectedVScoreLineId = () => usePanelStore((state) => state.sele
  * Gibt die ausgewählte Fräskontur zurück
  */
 export const useSelectedRoutingContourId = () => usePanelStore((state) => state.selectedRoutingContourId);
+
+/**
+ * Gibt die ausgewählte freie Mousebite zurück
+ */
+export const useSelectedFreeMousebiteId = () => usePanelStore((state) => state.selectedFreeMousebiteId);
+
+/**
+ * Gibt zurück ob der Board-Hintergrund (grüne PCB-Fläche) angezeigt wird
+ */
+export const useShowBoardBackground = () => usePanelStore((state) => state.showBoardBackground);
+
+/**
+ * Gibt zurück ob die Board-Beschriftung (Rahmen, Name, Größe) angezeigt wird
+ */
+export const useShowBoardLabels = () => usePanelStore((state) => state.showBoardLabels);
+export const useCursorPosition = () => usePanelStore((state) => state.cursorPosition);
+
+/** Hook: Free-Draw-State für Canvas-Vorschau */
+export const useRouteFreeDrawState = () => usePanelStore((state) => state.routeFreeDrawState);
+
+/** Hook: Segment-Auswahl-State für Canvas-Vorschau */
+export const useRouteSegmentSelectState = () => usePanelStore((state) => state.routeSegmentSelectState);

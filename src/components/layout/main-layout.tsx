@@ -1,12 +1,14 @@
 /**
  * Main Layout - Das Haupt-Layout der Anwendung
  *
- * Kombiniert Header, Sidebar, Canvas-Bereich und Properties-Panel
+ * Kombiniert Header, Toolbar, Sidebar, Canvas-Bereich und Properties-Panel
  * zu einem vollständigen Desktop-Layout.
  *
  * Layout-Struktur:
  * ┌─────────────────────────────────────────────────────────────┐
  * │                         Header                              │
+ * ├─────────────────────────────────────────────────────────────┤
+ * │  [Auswählen] [Tab] [Fiducial] [Bohrung] [V-Score] ...     │
  * ├─────────┬───────────────────────────────────┬───────────────┤
  * │         │                                   │               │
  * │ Sidebar │          Canvas-Bereich           │  Properties   │
@@ -20,7 +22,7 @@
 'use client';
 
 import { Header } from './header';
-import { Sidebar } from './sidebar';
+import { Sidebar, Toolbar } from './sidebar';
 import { PropertiesPanel } from './properties-panel';
 import { Statusbar } from './statusbar';
 
@@ -36,6 +38,11 @@ export function MainLayout({ children }: MainLayoutProps) {
           Header (fixiert oben)
           ================================================================ */}
       <Header />
+
+      {/* ================================================================
+          Werkzeugleiste (horizontal, über dem Canvas)
+          ================================================================ */}
+      <Toolbar />
 
       {/* ================================================================
           Hauptbereich mit drei Spalten

@@ -110,7 +110,7 @@ export async function parseGerberFile(
 
     if (root && root.children && root.children.length > 0) {
       parsedData = convertTraceRoot(root);
-      console.log(`Parsed ${filename}: ${parsedData.commands.length} commands, ${parsedData.apertures.size} apertures`);
+      // Parsed OK
     }
   } catch (error) {
     console.warn(`Fehler beim Parsen von ${filename}:`, error);
@@ -122,7 +122,8 @@ export async function parseGerberFile(
     type: layerType,
     rawContent: content,
     parsedData,
-    visible: true,
+    // Unbekannte Layer standardmässig ausblenden (können in der Sidebar wieder eingeblendet werden)
+    visible: layerType !== 'unknown',
     color: getLayerColor(layerType),
   };
 }
@@ -179,19 +180,6 @@ function convertTraceRoot(root: TraceRoot): ParsedGerber {
   // aber manchmal in der falschen Einheit. Wir müssen nur inch→mm konvertieren.
   const unitScale = units === 'in' ? 25.4 : 1;
 
-  console.log(`Gerber Format: units=${units}, coordinateFormat=${coordinateFormat.join('.')}, unitScale=${unitScale}`);
-
-  // Debug: Erste Koordinate ausgeben um zu sehen was der Parser liefert
-  for (const node of root.children) {
-    if (node.type === 'graphic') {
-      const gn = node as TraceGraphic;
-      if (gn.coordinates && (gn.coordinates.x !== undefined || gn.coordinates.y !== undefined)) {
-        console.log(`First coordinate from parser: x=${gn.coordinates.x}, y=${gn.coordinates.y}`);
-        break;
-      }
-    }
-  }
-
   // Zweite Pass: Daten konvertieren
   for (const node of root.children) {
     switch (node.type) {
@@ -246,8 +234,6 @@ function convertTraceRoot(root: TraceRoot): ParsedGerber {
     const decimalPlaces = coordinateFormat[1] || 6;
     const coordScale = Math.pow(10, decimalPlaces);
 
-    console.log(`Board zu groß (${boardWidth.toFixed(0)} x ${boardHeight.toFixed(0)}mm), wende Koordinatenskalierung an: 1/${coordScale}`);
-
     // Alle Commands neu skalieren
     for (const cmd of commands) {
       if (cmd.startPoint) {
@@ -275,20 +261,10 @@ function convertTraceRoot(root: TraceRoot): ParsedGerber {
     // während die Koordinaten als rohe Integer-Werte kommen.
     // Wenn wir die Apertures auch skalieren würden, wären sie viel zu klein (z.B. 1.5mm / 10000 = 0.00015mm)
 
-    // Debug: Aperture-Größen ausgeben
-    console.log(`Aperture-Größen (nicht skaliert):`);
-    for (const [id, apt] of Array.from(apertures.entries())) {
-      if (apt.diameter) {
-        console.log(`  ${id}: Kreis d=${apt.diameter.toFixed(4)}mm`);
-      } else if (apt.width && apt.height) {
-        console.log(`  ${id}: Rechteck ${apt.width.toFixed(4)} x ${apt.height.toFixed(4)}mm`);
-      }
-    }
-
     // Bounding Box neu berechnen
     boundingBox = calculateBoundingBoxFromCommands(commands);
 
-    console.log(`Neue Board-Größe: ${(boundingBox.maxX - boundingBox.minX).toFixed(2)} x ${(boundingBox.maxY - boundingBox.minY).toFixed(2)}mm`);
+    // Skalierung angewendet
   }
 
   // WICHTIG: Keine individuelle Normalisierung pro Layer!
@@ -439,7 +415,75 @@ function convertGraphic(
 }
 
 /**
+ * Berechnet die Extrempunkte eines Bogens (Arc) für die Bounding Box.
+ *
+ * Ein Bogen kann über die Start-/Endpunkte hinausreichen.
+ * Wir prüfen, ob der Bogen durch die Kardinalwinkel (0°, 90°, 180°, 270°)
+ * verläuft, und fügen diese Extrempunkte hinzu.
+ */
+function getArcExtremePoints(command: GerberCommand): Point[] {
+  const points: Point[] = [];
+  if (!command.centerPoint || !command.startPoint || !command.endPoint) return points;
+
+  const cx = command.centerPoint.x;
+  const cy = command.centerPoint.y;
+  const sx = command.startPoint.x;
+  const sy = command.startPoint.y;
+  const ex = command.endPoint.x;
+  const ey = command.endPoint.y;
+
+  const radius = Math.sqrt((sx - cx) ** 2 + (sy - cy) ** 2);
+  if (radius < 0.001) return points;
+
+  const startAngle = Math.atan2(sy - cy, sx - cx);
+  const endAngle = Math.atan2(ey - cy, ex - cx);
+
+  // Sweep-Winkel bestimmen
+  let sweep = endAngle - startAngle;
+  if (command.clockwise) {
+    if (sweep >= 0) sweep -= 2 * Math.PI;
+  } else {
+    if (sweep <= 0) sweep += 2 * Math.PI;
+  }
+
+  // Kardinalwinkel prüfen (0°=rechts, 90°=oben, 180°=links, 270°=unten)
+  const cardinalAngles = [0, Math.PI / 2, Math.PI, -Math.PI / 2];
+
+  for (const angle of cardinalAngles) {
+    // Winkel relativ zum Startwinkel berechnen
+    let relAngle = angle - startAngle;
+
+    if (command.clockwise) {
+      // CW: Sweep ist negativ
+      while (relAngle > 0) relAngle -= 2 * Math.PI;
+      while (relAngle < -2 * Math.PI) relAngle += 2 * Math.PI;
+      if (relAngle >= sweep) {
+        points.push({
+          x: cx + radius * Math.cos(angle),
+          y: cy + radius * Math.sin(angle),
+        });
+      }
+    } else {
+      // CCW: Sweep ist positiv
+      while (relAngle < 0) relAngle += 2 * Math.PI;
+      while (relAngle > 2 * Math.PI) relAngle -= 2 * Math.PI;
+      if (relAngle <= sweep) {
+        points.push({
+          x: cx + radius * Math.cos(angle),
+          y: cy + radius * Math.sin(angle),
+        });
+      }
+    }
+  }
+
+  return points;
+}
+
+/**
  * Berechnet die Bounding Box aus den Commands
+ *
+ * Berücksichtigt auch die Extrempunkte von Bögen (Arcs),
+ * die über Start-/Endpunkte hinausreichen können.
  */
 function calculateBoundingBoxFromCommands(commands: GerberCommand[]): BoundingBox {
   let minX = Infinity;
@@ -452,8 +496,14 @@ function calculateBoundingBoxFromCommands(commands: GerberCommand[]): BoundingBo
 
     if (command.startPoint) points.push(command.startPoint);
     if (command.endPoint) points.push(command.endPoint);
-    if (command.centerPoint) points.push(command.centerPoint);
     if (command.points) points.push(...command.points);
+
+    // Für Bögen: Extrempunkte der Kurve hinzufügen (nicht nur Mittelpunkt)
+    if (command.type === 'arc') {
+      points.push(...getArcExtremePoints(command));
+    } else if (command.centerPoint) {
+      points.push(command.centerPoint);
+    }
 
     for (const point of points) {
       minX = Math.min(minX, point.x);
@@ -495,11 +545,11 @@ export function normalizeGerberLayers(layers: GerberFile[]): GerberFile[] {
 
   // Wenn bereits bei (0,0), nichts zu tun
   if (offsetX === 0 && offsetY === 0) {
-    console.log('Layer bereits bei (0,0), keine Normalisierung nötig');
+    // Layer bereits bei (0,0), keine Normalisierung nötig
     return layers;
   }
 
-  console.log(`Normalisiere ALLE Layer gemeinsam: verschiebe um (${-offsetX.toFixed(2)}, ${-offsetY.toFixed(2)})`);
+  // Normalisiere ALLE Layer gemeinsam
 
   // Jeden Layer mit dem GLEICHEN Offset verschieben
   return layers.map(layer => {

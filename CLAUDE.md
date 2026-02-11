@@ -92,6 +92,8 @@ pcb-panelizer/
 6. **ToolingHole** - Bohrung für Fertigungsaufnahme (konfigurierbarer Durchmesser, PTH/NPTH)
 7. **VScoreLine** - Durchgehende Ritzlinie von Kante zu Kante
 8. **RoutingContour** - Fräskontur um Boards oder Panel (mit Segmenten und Tabs)
+   - `masterContourId` - Bei Sync-Kopien: ID der Original-Kontur auf dem Master-Board
+   - `isSyncCopy` - true bei automatisch synchronisierten Kopien (schreibgeschützt)
 9. **FreeMousebite** - Mousebite an Bogen-Konturen (Board-Rundungen, Panel-Ecken)
 
 ### Koordinatensystem
@@ -203,6 +205,54 @@ Der `usePanelStore` enthält:
   - place-hole → Tooling, place-fiducial → Fiducials, place-vscore → V-Score, etc.
 - [x] **Alle Properties-Sektionen** standardmäßig eingeklappt beim Start
 
+### Phase 6 - Erledigt
+
+- [x] **Erweiterte Fräskonturen** (3 Erstellungsmethoden)
+  - **Auto-Generierung** (wie bisher, jetzt mit `creationMethod: 'auto'`)
+  - **Frei zeichnen** (`route-free-draw`): Polyline per Klick, Doppelklick zum Abschliessen
+  - **Kontur folgen** (`route-follow-outline`): Fräspfad entlang Board-Outline zwischen Start/Endpunkt
+- [x] **Fräskontur-Dropdown** in der Toolbar (cyan, analog Tab/Mousebite)
+- [x] **Start-/Endpunkt-Bearbeitung** für manuelle Konturen
+  - Grüner Handle am Start, roter Handle am Ende (nur bei Auswahl)
+  - Drag & Drop der Handles im Canvas
+  - X/Y-Koordinaten editierbar im Properties Panel
+- [x] **Badges in Konturen-Liste**: Auto / Outline / Frei (farbkodiert)
+- [x] **Manuelle Konturen bleiben** bei Auto-Neu-Generierung erhalten
+- [x] **Projekt-Migration**: `creationMethod` wird beim Laden älterer Projekte automatisch auf 'auto' gesetzt
+- [x] **Bogen-Rendering** für follow-outline Segmente mit arc-Daten
+- [x] **Echte Bogen-Unterstützung für "Kontur folgen"** (nicht nur Rechteck-Kanten)
+  - `buildOutlineSegments()` liest echte Gerber-Outline (Linien + Bögen) in Panel-Koordinaten
+  - `nearestPointOnArc()` berechnet nächsten Punkt auf Kreisbogen
+  - `findNearestOutlinePoint()` sucht auf echten Outline-Segmenten (Linien + Bögen)
+  - `getOutlineSubpath()` berechnet bidirektional den kürzesten Pfad entlang der Outline
+  - Bogen-Offset: Radius wird vergrößert/verkleinert (Center bleibt gleich)
+  - Grüne Vorschau-Linie zeigt Bögen korrekt an (approximiert als Liniensegmente)
+  - Fallback auf 4 Rechteck-Kanten wenn kein Outline-Layer vorhanden
+- [x] **Drag & Drop für follow-outline Konturen** mit Bogenunterstützung
+  - Endpunkte können entlang der Outline verschoben werden (Bogen ↔ Gerade nahtlos)
+  - **Lokale Suche** (±5 Nachbar-Segmente) verhindert Sprünge zu entfernten Segmenten
+  - **Segment-Hints** an `getOutlineSubpath` für konsistente Segment-Zuordnung
+  - **Einmalige Initialisierung** (`dragOutlineInfoRef`): Outline + fester Endpunkt gecacht
+  - `computeSegmentT()` berechnet t-Parameter auf Outline-Segmenten (Linien + Bögen)
+  - `replaceRoutingContourSegments` Store-Action für vollständigen Segment-Ersatz beim Drag
+- [x] **RoutingContour erweitert** um `outlineDirection` Feld (forward/reverse)
+
+### Phase 7 - Erledigt
+
+- [x] **Master-Board Fräskonturen-Synchronisation**
+  - Manuelle Konturen (Follow-Outline / Free-Draw) auf dem **Master-Board** werden automatisch auf alle anderen Board-Instanzen gleicher boardId kopiert
+  - **Master-Board** = Instanz mit kleinstem Abstand zum Nullpunkt (0,0), typisch unten links
+  - `getMasterInstance(instances)` → findet Master-Instanz (kürzeste Distanz zu 0,0)
+  - `syncMasterContours(panel)` → reine Funktion, erstellt/aktualisiert Kopien per Translation (dx/dy)
+  - Sync wird automatisch aufgerufen nach: `addRoutingContour`, `finalizeFreeDrawContour`, `updateRoutingContourEndpoints`, `replaceRoutingContourSegments`, `removeRoutingContour`
+  - **Stabile IDs**: Bestehende Kopie-IDs werden wiederverwendet (kein Flackern im Canvas)
+  - **Schreibschutz**: Sync-Kopien können nicht bearbeitet werden (kein Drag, kein Endpunkt-Edit, kein Löschen)
+  - **Visuelle Unterscheidung**: Kopien halbtransparent (alpha 0.5), blaues "Kopie"-Badge in der Liste
+  - Konturen auf Nicht-Master-Boards bleiben lokal (kein Sync)
+  - `finalizeFreeDrawContour` setzt automatisch `boardInstanceId` per Nähe zum Board-Zentrum
+  - Löschen einer Master-Kontur entfernt automatisch alle zugehörigen Kopien
+  - `RoutingContour` erweitert um `masterContourId` und `isSyncCopy` Felder
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
@@ -222,6 +272,7 @@ Der `usePanelStore` enthält:
 | Bohrung | - | Tooling-Bohrung per Klick platzieren |
 | V-Score | - | V-Score Linie zeichnen |
 | Tab/Mousebite | - | Dropdown: Tab oder Mousebite platzieren |
+| Fräskontur | - | Dropdown: Kontur folgen oder Frei zeichnen |
 
 ### Mess-Werkzeug Tasten
 
@@ -276,11 +327,41 @@ Der `usePanelStore` enthält:
 5. V-Score Linien auswählen und Position editieren
 
 ### Fräskonturen
+**Automatisch:**
 1. Rechts **"Fräskonturen"** aufklappen
 2. Fräser-Durchmesser und Sicherheitsabstand einstellen
 3. Board-Konturen und/oder Panel-Außenkontur aktivieren
-4. **"Fräskonturen generieren"** klicken
+4. **"Fräskonturen generieren"** klicken (manuelle Konturen bleiben erhalten)
 5. Warnung erscheint wenn Gap < Fräser-Ø
+
+**Frei zeichnen:**
+1. **Fräskontur-Dropdown** in der Toolbar → **"Frei zeichnen"** wählen
+2. Per Klick Punkte im Canvas setzen (Cyan-Linie als Vorschau)
+3. **Doppelklick** zum Abschliessen → Fräskontur wird erstellt
+4. ESC: Abbrechen (Tool bleibt aktiv)
+
+**Kontur folgen:**
+1. **Fräskontur-Dropdown** in der Toolbar → **"Kontur folgen"** wählen
+2. Klick auf Board-Outline = Startpunkt (grüner Marker)
+3. Maus bewegen: Grüne Vorschau zeigt den Pfad entlang der Outline (inkl. echte Bögen)
+4. Zweiter Klick = Endpunkt → Fräskontur wird entlang der Outline erstellt
+5. **Bögen werden automatisch erkannt** und als echte Kreisbögen in die Kontur übernommen
+6. Endpunkte per Drag & Drop entlang der Outline verschiebbar (Bogen ↔ Gerade nahtlos)
+
+**Endpunkte bearbeiten (nur manuelle Konturen, nicht bei Kopien):**
+1. Kontur im Canvas auswählen (Klick auf die Linie)
+2. Grüner Handle (Start) / Roter Handle (Ende) erscheinen
+3. Handles per Drag & Drop verschieben
+4. X/Y-Koordinaten im Properties Panel fein anpassen
+
+**Master-Board Synchronisation (automatisch):**
+- Bei Board-Arrays: Das Board nächst am Nullpunkt (0,0) ist das **Master-Board**
+- Manuelle Konturen auf dem Master werden automatisch auf alle anderen Boards kopiert
+- Kopien erscheinen halbtransparent mit blauem "Kopie"-Badge
+- Kopien sind schreibgeschützt (keine Handles, kein Löschen)
+- Master-Kontur editieren → Kopien aktualisieren sich automatisch
+- Master-Kontur löschen → Kopien verschwinden automatisch
+- Konturen auf Nicht-Master-Boards bleiben lokal (kein Sync)
 
 ### Messen
 1. **Mess-Werkzeug** in der Toolbar wählen
@@ -382,7 +463,7 @@ npm start
 - **Tooling Holes** (mit Kupferring wenn plated, ausgewählt: orange Glow, **Drag & Drop**)
 - **Tabs** (farbcodiert nach Typ)
 - **V-Score Linien** (gestrichelt pink)
-- **Fräskonturen** (Segmente mit Tabs)
+- **Fräskonturen** (Segmente mit Tabs, Sync-Kopien halbtransparent alpha 0.5)
 - **Mess-Overlay** (gestrichelte Linie, Marker, Koordinaten, Distanz)
 
 ### Mess-Overlay
@@ -438,6 +519,86 @@ Zwei Wege, die IMMER BEIDE geprüft werden:
 2. **Linien-Bögen** (`detectArcsFromPoints`) - Kreise aus kleinen Liniensegmenten erkannt via Circumcenter + Least-Squares Circle Fit
 
 Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat wie ein nativer Arc (< 0.5 mm Differenz), wird er übersprungen.
+
+### Follow-Outline Architektur (`pixi-panel-canvas.tsx`)
+
+**Kernfunktionen:**
+- `buildOutlineSegments(board, instance)` → `OutlinePathSegment[]` in Panel-Koordinaten (aus `panel-store.ts`)
+- `findNearestOutlinePoint(panel, x, y, maxDist)` → Nächster Punkt auf Outline (Linien + Bögen)
+- `nearestPointOnArc(px, py, arc, start, end)` → Projektion auf Kreisbogen mit Winkel-Check
+- `nearestPointOnSegment(px, py, a, b)` → Projektion auf Liniensegment
+- `computeSegmentT(point, seg)` → Berechnet t-Parameter (0..1) eines Punktes auf einem Outline-Segment
+- `getOutlineSubpath(panel, instanceId, from, to, toolRadius, forceDirection?, fromSegHint?, toSegHint?)` → `{ segments, direction }`
+
+**Pfadberechnung (bidirektional):**
+- Berechnet BEIDE Richtungen (vorwärts + rückwärts entlang der Outline-Segment-Indizes)
+- Wählt den **kürzeren** Pfad (weniger Segmente)
+- `calcArcSweep()`: Korrekte Bogenlänge mit Winkel-Normalisierung (0..2π)
+- `reverseSegment()`: Bogen umkehren (Start↔Ende, clockwise invertieren)
+- `makeSegment()`: Outline-Segment → Offset-RoutingSegment (Linien: Normalenvektor, Bögen: Radius ±toolRadius)
+
+**Segment-Hints (wichtig für Drag!):**
+- `getOutlineSubpath` hat optionale `fromSegHint` / `toSegHint` Parameter
+- Wenn angegeben, wird die interne `findOnOutline`-Suche übersprungen
+- Der Aufrufer (Drag-Handler) gibt EXAKT vor, auf welchem Segment die Punkte liegen
+- Das verhindert, dass `findOnOutline` bei Ecken einen Punkt einem FALSCHEN Segment zuordnet
+  und dadurch forward/reverse vertauscht werden (= Sprünge!)
+
+**Drag-Logik für Endpunkte (3 Kernprinzipien wie professionelle PCB-Software):**
+
+1. **Einmalige Initialisierung** (`dragOutlineInfoRef`):
+   - Beim ersten Drag-Frame: Outline-Segmente cachen (`buildOutlineSegments`)
+   - Festen Endpunkt EINMALIG auf Outline projizieren (Segment-Index + t-Parameter)
+   - Gecachte Daten: `outlineSegs`, `currentSegIdx`, `fixedPoint`, `fixedSegIdx`, `fixedT`
+   - Wird bei mouseup zurückgesetzt
+
+2. **Lokale Suche** (±5 Nachbar-Segmente):
+   - Mausposition wird NUR in Nachbarschaft des aktuellen Segment-Index gesucht
+   - Verhindert, dass der Punkt zu einem entfernten Teil der Outline springt
+   - Segment-Index wird nach jedem Frame aktualisiert (inkrementelle Verfolgung)
+
+3. **Segment-Hints an getOutlineSubpath:**
+   - Drag-Handler berechnet `segIndex` + `t` für beide Endpunkte selbst
+   - Diese werden als `fromSegHint` / `toSegHint` an `getOutlineSubpath` übergeben
+   - `getOutlineSubpath` verwendet die Hints statt eigener `findOnOutline`-Suche
+   - Ergebnis: Konsistente Segment-Zuordnung, kein Springen
+
+**Wichtig:** Beim Drag werden drei Mechanismen kombiniert:
+- Lokale Suche (Input-Stabilität) + Segment-Hints (Konsistenz) + Kürzester Pfad (Richtung)
+- Die Outline-Daten und der feste Endpunkt werden beim Drag-Start gecacht und NICHT
+  bei jedem Frame neu berechnet (verhindert Oszillation an Ecken)
+
+### Master-Board Fräskonturen-Synchronisation (`panel-store.ts`)
+
+**Konzept:** Manuelle Konturen auf dem Master-Board (nächstes zu 0,0) werden automatisch per Translation auf alle anderen Board-Instanzen gleicher boardId kopiert.
+
+**Kernfunktionen:**
+- `getMasterInstance(instances)` → Instanz mit kleinstem Abstand zu (0,0)
+- `syncMasterContours(panel)` → Reine Funktion, gibt neues `routingContours`-Array zurück
+
+**Sync-Ablauf in `syncMasterContours()`:**
+1. Master-Instanz ermitteln (kürzeste Distanz zu 0,0)
+2. Master-Konturen finden: `boardInstanceId === master.id`, `!isSyncCopy`, `creationMethod !== 'auto'`
+3. Für jede Nicht-Master-Instanz gleicher boardId:
+   - Delta berechnen: `dx = target.position.x - master.position.x`, analog dy
+   - Alle Segmente translieren (start, end, arc.center um dx/dy verschieben)
+   - Bestehende Kopie-IDs wiederverwenden (Lookup via `masterContourId:boardInstanceId`)
+4. Nicht-Kopie-Konturen bleiben unverändert, verwaiste Kopien werden entfernt
+
+**Store-Integration:**
+- Sync wird am Ende von 5 Actions aufgerufen: `addRoutingContour`, `finalizeFreeDrawContour`, `updateRoutingContourEndpoints`, `replaceRoutingContourSegments`, `removeRoutingContour`
+- Guards: Sync-Kopien (`isSyncCopy`) werden in diesen Actions ignoriert (schreibgeschützt)
+- `removeRoutingContour` entfernt auch alle Kopien mit `masterContourId === contourId`
+
+**Canvas-Integration (`pixi-panel-canvas.tsx`):**
+- `createRoutingContourGraphics`: Kopien mit `container.alpha = 0.5`
+- Drag-Handles (grün/rot) bei `isSyncCopy` ausgeblendet
+- Handle-Drag bei `isSyncCopy` blockiert im pointerdown-Handler
+
+**Properties-Panel-Integration (`properties-panel.tsx`):**
+- Blaues "Kopie"-Badge in der Konturen-Liste bei `isSyncCopy`
+- Löschen-Button bei Kopien ausgeblendet
+- Endpunkt-Editor bei Kopien ausgeblendet
 
 ---
 

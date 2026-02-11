@@ -335,6 +335,19 @@ export interface RoutingSegment {
   start: Point;
   /** Endpunkt des Segments in mm */
   end: Point;
+  /** Optional: Bogen-Informationen (wenn das Segment ein Kreisbogen ist) */
+  arc?: {
+    /** Mittelpunkt des Bogens in mm */
+    center: Point;
+    /** Radius des Bogens in mm */
+    radius: number;
+    /** Startwinkel in Radians */
+    startAngle: number;
+    /** Endwinkel in Radians */
+    endAngle: number;
+    /** Drehrichtung: true = im Uhrzeigersinn */
+    clockwise: boolean;
+  };
 }
 
 /**
@@ -356,6 +369,39 @@ export interface RoutingContour {
   toolDiameter: number;
   /** Sichtbarkeit im Canvas */
   visible: boolean;
+  /** Erstellungsmethode: auto = generiert, follow-outline = entlang Outline, free-draw = frei gezeichnet */
+  creationMethod: 'auto' | 'follow-outline' | 'free-draw';
+  /** Richtung entlang der Outline (nur bei follow-outline): forward = steigende Indizes, reverse = fallende */
+  outlineDirection?: 'forward' | 'reverse';
+  /** ID der Master-Kontur (nur bei synchronisierten Kopien gesetzt) */
+  masterContourId?: string;
+  /** true = diese Kontur ist eine synchronisierte Kopie vom Master-Board (schreibgeschützt) */
+  isSyncCopy?: boolean;
+}
+
+/**
+ * Geordnetes Outline-Segment mit kumulierter Distanz
+ *
+ * Wird für das Follow-Outline-Feature verwendet, um Punkte
+ * auf der Board-Kontur zu finden und Teilpfade zu extrahieren.
+ */
+export interface OutlinePathSegment {
+  /** Startpunkt des Segments in Panel-Koordinaten */
+  start: Point;
+  /** Endpunkt des Segments in Panel-Koordinaten */
+  end: Point;
+  /** Kumulierte Distanz vom Pfad-Anfang bis zum Startpunkt dieses Segments */
+  cumulativeDistance: number;
+  /** Länge dieses Segments */
+  length: number;
+  /** Optional: Bogen-Informationen (für gekrümmte Outline-Abschnitte) */
+  arc?: {
+    center: Point;
+    radius: number;
+    startAngle: number;
+    endAngle: number;
+    clockwise: boolean;
+  };
 }
 
 /**
@@ -389,6 +435,32 @@ export interface VScoreLine {
 }
 
 /**
+ * Mousebite an einer Rundung (Kreisbogen)
+ *
+ * Wird für die abgerundeten Ecken des Nutzenrands verwendet.
+ * Die Bohrungen folgen dem Kreisbogen statt einer Geraden.
+ * Hat die gleichen Bohr-Parameter wie normale Mousebite-Tabs.
+ */
+export interface FreeMousebite {
+  /** Eindeutige ID */
+  id: string;
+  /** Mittelpunkt des Kreisbogens */
+  arcCenter: Point;
+  /** Radius des Kreisbogens in mm */
+  arcRadius: number;
+  /** Startwinkel des Bogens in Grad (0 = rechts, 90 = unten in Canvas-Koordinaten) */
+  arcStartAngle: number;
+  /** Endwinkel des Bogens in Grad */
+  arcEndAngle: number;
+  /** Bohrungsdurchmesser in mm (typisch 0.5mm) */
+  holeDiameter: number;
+  /** Abstand zwischen den Bohrungen in mm (typisch 0.8-1.0mm) */
+  holeSpacing: number;
+  /** Optionale Referenz zur Board-Instanz (für Board-basierte Rundungs-Mousebites) */
+  boardInstanceId?: string;
+}
+
+/**
  * Das komplette Panel
  */
 export interface Panel {
@@ -413,6 +485,8 @@ export interface Panel {
   toolingHoles: ToolingHole[];
   /** V-Score Linien */
   vscoreLines: VScoreLine[];
+  /** Frei platzierbare Mousebites (z.B. an Rundungen) */
+  freeMousebites: FreeMousebite[];
   /** Fräskonturen (um Boards und Panel) */
   routingContours: RoutingContour[];
   /** Konfiguration für Fräskonturen-Generierung */
@@ -448,7 +522,11 @@ export type Tool =
   | 'place-tab' // Tab platzieren
   | 'place-fiducial' // Fiducial platzieren
   | 'place-hole' // Tooling-Bohrung platzieren
-  | 'place-vscore'; // V-Score Linie zeichnen
+  | 'place-vscore' // V-Score Linie zeichnen
+  | 'place-mousebite' // Mousebite an Bogen-Kontur platzieren
+  | 'route-follow-outline' // Fräskontur entlang Board-Outline zeichnen
+  | 'route-free-draw' // Freie Fräskontur zeichnen (Polyline)
+  | 'measure'; // Abstände und Koordinaten messen
 
 /**
  * Grid-Konfiguration

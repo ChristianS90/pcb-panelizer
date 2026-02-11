@@ -148,7 +148,18 @@ export async function deserializeProject(
     board.outline = outline;
   }
 
-  // 6. Date-Strings zurück zu Date-Objekten konvertieren
+  // 6. Migration: creationMethod für ältere Projekte setzen
+  // Ältere Projektdateien haben kein creationMethod-Feld in RoutingContour.
+  // Wir setzen es auf 'auto', da alle bisherigen Konturen automatisch generiert waren.
+  if (panel.routingContours) {
+    for (const contour of panel.routingContours) {
+      if (!(contour as any).creationMethod) {
+        (contour as any).creationMethod = 'auto';
+      }
+    }
+  }
+
+  // 7. Date-Strings zurück zu Date-Objekten konvertieren
   // JSON.stringify wandelt Date in ISO-String um, wir müssen das rückgängig machen
   panel.createdAt = new Date(panel.createdAt);
   panel.modifiedAt = new Date(panel.modifiedAt);

@@ -11,8 +11,8 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
-import { usePanelStore, useViewport, useGrid, usePanel } from '@/stores/panel-store';
+import { useState } from 'react';
+import { usePanelStore, useViewport, useGrid, usePanel, useCursorPosition } from '@/stores/panel-store';
 import { formatNumber } from '@/lib/utils';
 import {
   ZoomIn,
@@ -35,8 +35,8 @@ export function Statusbar() {
   const toggleGrid = usePanelStore((state) => state.toggleGrid);
   const toggleSnap = usePanelStore((state) => state.toggleSnap);
 
-  // Mausposition (wird vom Canvas aktualisiert)
-  const [mousePosition, setMousePosition] = useState({ x: 0, y: 0 });
+  // Mausposition aus dem Store (wird vom Canvas bei Mausbewegung aktualisiert)
+  const cursorPosition = useCursorPosition();
 
   // Zoom in Prozent
   const zoomPercent = Math.round(viewport.scale * 100);
@@ -119,14 +119,14 @@ export function Statusbar() {
       {/* ----------------------------------------------------------------
           Mittlerer Bereich: Mausposition
           ---------------------------------------------------------------- */}
-      <div className="flex items-center gap-2 text-gray-500">
+      <div className="flex items-center gap-2 text-gray-500 font-mono">
         <MousePointer className="w-3 h-3" />
         <span>
-          X: {formatNumber(mousePosition.x, 2)} {unit}
+          X: {formatNumber(cursorPosition.x, 3)} {unit}
         </span>
         <span>|</span>
         <span>
-          Y: {formatNumber(mousePosition.y, 2)} {unit}
+          Y: {formatNumber(cursorPosition.y, 3)} {unit}
         </span>
       </div>
 

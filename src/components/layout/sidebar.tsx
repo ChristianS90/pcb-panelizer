@@ -1,19 +1,17 @@
 /**
  * Sidebar Komponente - Die linke Seitenleiste
  *
- * Enthält drei Hauptbereiche:
+ * Enthält zwei Hauptbereiche:
  * 1. Layer-Panel: Zeigt alle Gerber-Layer und deren Sichtbarkeit
  * 2. Boards-Panel: Zeigt importierte Boards (Library)
- * 3. Tools-Panel: Werkzeuge für Tabs, Fiducials, etc.
  */
 
 'use client';
 
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import {
   Layers,
   LayoutGrid,
-  Wrench,
   Eye,
   EyeOff,
   Trash2,
@@ -21,10 +19,16 @@ import {
   ChevronRight,
   CircleDot,
   Circle,
+  MousePointer,
   Minus,
   RotateCcw,
   FlipHorizontal,
   FlipVertical,
+  CircleDashed,
+  Ruler,
+  Scissors,
+  Spline,
+  Pencil,
 } from 'lucide-react';
 import { usePanelStore, useBoards, useActiveTool } from '@/stores/panel-store';
 import { cn } from '@/lib/utils';
@@ -40,13 +44,12 @@ export function Sidebar() {
   const [expandedSections, setExpandedSections] = useState({
     layers: true,
     boards: true,
-    tools: true,
   });
 
   /**
    * Klappt einen Bereich auf/zu
    */
-  const toggleSection = (section: 'layers' | 'boards' | 'tools') => {
+  const toggleSection = (section: 'layers' | 'boards') => {
     setExpandedSections((prev) => ({
       ...prev,
       [section]: !prev[section],
@@ -77,18 +80,6 @@ export function Sidebar() {
         onToggle={() => toggleSection('boards')}
       >
         <BoardsPanel />
-      </SidebarSection>
-
-      {/* ----------------------------------------------------------------
-          Tools-Panel
-          ---------------------------------------------------------------- */}
-      <SidebarSection
-        title="Werkzeuge"
-        icon={<Wrench className="w-4 h-4" />}
-        expanded={expandedSections.tools}
-        onToggle={() => toggleSection('tools')}
-      >
-        <ToolsPanel />
       </SidebarSection>
     </aside>
   );
@@ -294,6 +285,10 @@ function BoardsPanel() {
   const rotateBoardLayers = usePanelStore((state) => state.rotateBoardLayers);
   const toggleBoardMirrorX = usePanelStore((state) => state.toggleBoardMirrorX);
   const toggleBoardMirrorY = usePanelStore((state) => state.toggleBoardMirrorY);
+  const showBoardBackground = usePanelStore((state) => state.showBoardBackground);
+  const toggleBoardBackground = usePanelStore((state) => state.toggleBoardBackground);
+  const showBoardLabels = usePanelStore((state) => state.showBoardLabels);
+  const toggleBoardLabels = usePanelStore((state) => state.toggleBoardLabels);
 
   // Wenn keine Boards: Hinweis anzeigen
   if (boards.length === 0) {
@@ -378,6 +373,40 @@ function BoardsPanel() {
           {/* Hinweis: Board wird beim Import automatisch platziert */}
         </div>
       ))}
+
+      {/* Board-Hintergrund ein-/ausblenden */}
+      {boards.length > 0 && (
+        <label
+          className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-50
+                     cursor-pointer transition-colors border border-gray-200"
+          title="Grüne PCB-Substrat-Fläche ein-/ausblenden"
+        >
+          <input
+            type="checkbox"
+            checked={showBoardBackground}
+            onChange={toggleBoardBackground}
+            className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+          <span className="text-sm text-gray-700">Board-Hintergrund</span>
+        </label>
+      )}
+
+      {/* Board-Beschriftung (blauer Rahmen, Name, Größe) ein-/ausblenden */}
+      {boards.length > 0 && (
+        <label
+          className="flex items-center gap-2 px-2 py-2 rounded-lg hover:bg-gray-50
+                     cursor-pointer transition-colors border border-gray-200"
+          title="Blauen Rahmen, Board-Name und Größenangabe ein-/ausblenden"
+        >
+          <input
+            type="checkbox"
+            checked={showBoardLabels}
+            onChange={toggleBoardLabels}
+            className="rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+          />
+          <span className="text-sm text-gray-700">Board-Beschriftung</span>
+        </label>
+      )}
     </div>
   );
 }
@@ -387,20 +416,20 @@ function BoardsPanel() {
 // ============================================================================
 
 /**
- * Verfügbare Werkzeuge
+ * Einfache Werkzeuge (ohne Dropdown)
  */
-const tools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
+const simpleTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
   {
     id: 'select',
     label: 'Auswählen',
-    icon: <Circle className="w-4 h-4" />,
+    icon: <MousePointer className="w-4 h-4" />,
     description: 'Boards auswählen und verschieben',
   },
   {
-    id: 'place-tab',
-    label: 'Tab',
-    icon: <Minus className="w-4 h-4" />,
-    description: 'Breakaway Tab platzieren',
+    id: 'measure',
+    label: 'Messen',
+    icon: <Ruler className="w-4 h-4" />,
+    description: 'Abstände und Koordinaten messen',
   },
   {
     id: 'place-fiducial',
@@ -422,67 +451,294 @@ const tools: { id: Tool; label: string; icon: React.ReactNode; description: stri
   },
 ];
 
-function ToolsPanel() {
+/**
+ * Untereinträge im Tab/Mousebite-Dropdown
+ */
+const tabSubTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
+  {
+    id: 'place-tab',
+    label: 'Tab (Steg)',
+    icon: <Minus className="w-4 h-4" />,
+    description: 'Breakaway Tab platzieren',
+  },
+  {
+    id: 'place-mousebite',
+    label: 'Mousebite (Bogen)',
+    icon: <CircleDashed className="w-4 h-4" />,
+    description: 'Mousebite an Bogen-Kontur platzieren',
+  },
+];
+
+/**
+ * Untereinträge im Fräskontur-Dropdown
+ * - Kontur folgen: Fräspfad entlang der Board-Outline
+ * - Frei zeichnen: Polyline frei im Canvas zeichnen
+ */
+const routeSubTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
+  {
+    id: 'route-follow-outline',
+    label: 'Kontur folgen',
+    icon: <Spline className="w-4 h-4" />,
+    description: 'Outline-Segmente per Klick auswählen',
+  },
+  {
+    id: 'route-free-draw',
+    label: 'Frei zeichnen',
+    icon: <Pencil className="w-4 h-4" />,
+    description: 'Freien Fräspfad zeichnen',
+  },
+];
+
+// ============================================================================
+// Horizontale Toolbar (über dem Canvas)
+// ============================================================================
+
+/**
+ * Toolbar-Komponente - Horizontale Werkzeugleiste über dem Canvas.
+ * Zeigt alle Werkzeuge nebeneinander in einer Reihe.
+ * Tab und Mousebite sind in einem Dropdown-Button kombiniert.
+ */
+export function Toolbar() {
   const activeTool = useActiveTool();
   const setActiveTool = usePanelStore((state) => state.setActiveTool);
 
+  // Dropdown-Status für Tab/Mousebite
+  const [tabDropdownOpen, setTabDropdownOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  // Dropdown-Status für Fräskontur
+  const [routeDropdownOpen, setRouteDropdownOpen] = useState(false);
+  const routeDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Aktuell gewähltes Sub-Tool merken (Tab oder Mousebite)
+  const [selectedTabSubTool, setSelectedTabSubTool] = useState<Tool>('place-tab');
+
+  // Aktuell gewähltes Route-Sub-Tool merken
+  const [selectedRouteSubTool, setSelectedRouteSubTool] = useState<Tool>('route-free-draw');
+
+  // Das aktive Sub-Tool-Objekt finden (für Icon + Label im Button)
+  const activeSubTool = tabSubTools.find((t) => t.id === selectedTabSubTool) || tabSubTools[0];
+  const activeRouteSubTool = routeSubTools.find((t) => t.id === selectedRouteSubTool) || routeSubTools[0];
+
+  // Ist eines der Sub-Tools gerade aktiv?
+  const isTabGroupActive = activeTool === 'place-tab' || activeTool === 'place-mousebite';
+  const isRouteGroupActive = activeTool === 'route-follow-outline' || activeTool === 'route-free-draw';
+
+  // Dropdown schliessen wenn man ausserhalb klickt
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setTabDropdownOpen(false);
+      }
+      if (routeDropdownRef.current && !routeDropdownRef.current.contains(e.target as Node)) {
+        setRouteDropdownOpen(false);
+      }
+    };
+    if (tabDropdownOpen || routeDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [tabDropdownOpen, routeDropdownOpen]);
+
   return (
-    <div className="space-y-1">
-      {tools.map((tool) => (
+    <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-1">
+      {/* Einfache Werkzeuge (Auswählen, Fiducial, Bohrung, V-Score) */}
+      {simpleTools.map((tool) => (
         <button
           key={tool.id}
           onClick={() => setActiveTool(tool.id)}
           className={cn(
-            'w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left',
+            'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium',
             activeTool === tool.id
               ? 'bg-primary-100 text-primary-700'
-              : 'hover:bg-gray-100 text-gray-700'
+              : 'hover:bg-gray-100 text-gray-600'
           )}
           title={tool.description}
         >
           <div
             className={cn(
-              'p-1.5 rounded',
+              'p-1 rounded',
               activeTool === tool.id ? 'bg-primary-200' : 'bg-gray-100'
             )}
           >
             {tool.icon}
           </div>
-          <span className="text-sm font-medium">{tool.label}</span>
+          {tool.label}
         </button>
       ))}
 
-      {/* Schnelltasten-Hinweis */}
-      <div className="mt-4 p-3 bg-gray-50 rounded-lg text-xs text-gray-500">
-        <p className="font-medium mb-1">Tastenkürzel:</p>
-        <ul className="space-y-0.5">
-          <li>
-            <kbd className="px-1 bg-white rounded border">V</kbd> Auswählen
-          </li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">T</kbd> Tab
-          </li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">F</kbd> Fiducial
-          </li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">R</kbd> Rotieren
-          </li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">Del</kbd> Löschen
-          </li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">ESC</kbd> Werkzeug abbrechen
-          </li>
-        </ul>
-        <p className="mt-2 font-medium mb-1">Werkzeug-Tipps:</p>
-        <ul className="space-y-0.5">
-          <li>Klick ins Canvas = Element platzieren</li>
-          <li>Mehrfach klicken = mehrere platzieren</li>
-          <li>
-            <kbd className="px-1 bg-white rounded border">Shift</kbd>+Klick = V-Score vertikal
-          </li>
-        </ul>
+      {/* Tab / Mousebite - Dropdown-Button */}
+      <div className="relative" ref={dropdownRef}>
+        <div className="flex items-center">
+          {/* Hauptbutton: Aktiviert das zuletzt gewählte Sub-Tool */}
+          <button
+            onClick={() => {
+              setActiveTool(selectedTabSubTool);
+              setTabDropdownOpen(false);
+            }}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-l-lg transition-colors text-sm font-medium',
+              isTabGroupActive
+                ? 'bg-primary-100 text-primary-700'
+                : 'hover:bg-gray-100 text-gray-600'
+            )}
+            title={activeSubTool.description}
+          >
+            <div
+              className={cn(
+                'p-1 rounded',
+                isTabGroupActive ? 'bg-primary-200' : 'bg-gray-100'
+              )}
+            >
+              {activeSubTool.icon}
+            </div>
+            {activeSubTool.label}
+          </button>
+
+          {/* Dropdown-Pfeil */}
+          <button
+            onClick={() => setTabDropdownOpen(!tabDropdownOpen)}
+            className={cn(
+              'px-1.5 py-1.5 rounded-r-lg border-l transition-colors',
+              isTabGroupActive
+                ? 'bg-primary-100 text-primary-700 border-primary-200'
+                : 'hover:bg-gray-100 text-gray-600 border-gray-200'
+            )}
+            title="Verbindungstyp wählen"
+          >
+            <ChevronDown className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* Dropdown-Menü */}
+        {tabDropdownOpen && (
+          <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 min-w-[200px]">
+            {tabSubTools.map((sub) => (
+              <button
+                key={sub.id}
+                onClick={() => {
+                  setSelectedTabSubTool(sub.id);
+                  setActiveTool(sub.id);
+                  setTabDropdownOpen(false);
+                }}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3 py-2 text-sm transition-colors text-left',
+                  activeTool === sub.id
+                    ? 'bg-primary-50 text-primary-700'
+                    : 'hover:bg-gray-50 text-gray-700'
+                )}
+              >
+                <div
+                  className={cn(
+                    'p-1 rounded',
+                    activeTool === sub.id ? 'bg-primary-200' : 'bg-gray-100'
+                  )}
+                >
+                  {sub.icon}
+                </div>
+                <div>
+                  <div className="font-medium">{sub.label}</div>
+                  <div className="text-xs text-gray-400">{sub.description}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Fräskontur - Dropdown-Button */}
+      <div className="relative" ref={routeDropdownRef}>
+        <div className="flex items-center">
+          {/* Hauptbutton: Aktiviert das zuletzt gewählte Route-Sub-Tool */}
+          <button
+            onClick={() => {
+              setActiveTool(selectedRouteSubTool);
+              setRouteDropdownOpen(false);
+            }}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-l-lg transition-colors text-sm font-medium',
+              isRouteGroupActive
+                ? 'bg-cyan-100 text-cyan-700'
+                : 'hover:bg-gray-100 text-gray-600'
+            )}
+            title={activeRouteSubTool.description}
+          >
+            <div
+              className={cn(
+                'p-1 rounded',
+                isRouteGroupActive ? 'bg-cyan-200' : 'bg-gray-100'
+              )}
+            >
+              {activeRouteSubTool.icon}
+            </div>
+            {activeRouteSubTool.label}
+          </button>
+
+          {/* Dropdown-Pfeil */}
+          <button
+            onClick={() => setRouteDropdownOpen(!routeDropdownOpen)}
+            className={cn(
+              'px-1.5 py-1.5 rounded-r-lg border-l transition-colors',
+              isRouteGroupActive
+                ? 'bg-cyan-100 text-cyan-700 border-cyan-200'
+                : 'hover:bg-gray-100 text-gray-600 border-gray-200'
+            )}
+            title="Fräskontur-Werkzeug wählen"
+          >
+            <ChevronDown className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* Dropdown-Menü */}
+        {routeDropdownOpen && (
+          <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 min-w-[220px]">
+            {routeSubTools.map((sub) => (
+              <button
+                key={sub.id}
+                onClick={() => {
+                  setSelectedRouteSubTool(sub.id);
+                  setActiveTool(sub.id);
+                  setRouteDropdownOpen(false);
+                }}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3 py-2 text-sm transition-colors text-left',
+                  activeTool === sub.id
+                    ? 'bg-cyan-50 text-cyan-700'
+                    : 'hover:bg-gray-50 text-gray-700'
+                )}
+              >
+                <div
+                  className={cn(
+                    'p-1 rounded',
+                    activeTool === sub.id ? 'bg-cyan-200' : 'bg-gray-100'
+                  )}
+                >
+                  {sub.icon}
+                </div>
+                <div>
+                  <div className="font-medium">{sub.label}</div>
+                  <div className="text-xs text-gray-400">{sub.description}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Trennlinie + Tastenkürzel-Hinweis */}
+      <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
+        <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">ESC</kbd> Abbrechen</span>
+        <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">Del</kbd> Löschen</span>
+        <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">A</kbd> Anker</span>
+        {activeTool === 'measure' && (
+          <>
+            <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">A</kbd> Fangen</span>
+            <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">M</kbd> Abs/Inkr</span>
+          </>
+        )}
+        {activeTool === 'route-free-draw' && (
+          <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">Doppelklick</kbd> Abschliessen</span>
+        )}
       </div>
     </div>
   );

@@ -288,8 +288,9 @@ function renderLine(
 /**
  * Rendert einen Arc-Befehl (Bogen)
  *
- * Bögen werden für gerundete Leiterbahnen verwendet.
- * Wir approximieren sie als Linien (für bessere Performance).
+ * Bögen werden als Linienzug aus vielen kleinen Segmenten gerendert,
+ * um eine glatte Kurve darzustellen.
+ * Bei fehlerhaften Daten wird auf eine Linie zurückgefallen.
  */
 function renderArc(
   command: GerberCommand,
@@ -300,9 +301,71 @@ function renderArc(
 ): RenderShape | null {
   if (!command.startPoint || !command.endPoint) return null;
 
-  // Für Bögen: Als Linie approximieren (vereinfacht)
-  // In einer erweiterten Version würden wir echte Bögen zeichnen
-  return renderLine(command, aperture, offsetX, offsetY, scale);
+  // Ohne Mittelpunkt oder bei ungültigen Daten: als Linie zeichnen
+  if (!command.centerPoint) {
+    return renderLine(command, aperture, offsetX, offsetY, scale);
+  }
+
+  // Strichstärke aus Aperture
+  let strokeWidth = 0.2 * scale;
+  if (aperture) {
+    if (aperture.type === 'circle' && aperture.diameter) {
+      strokeWidth = aperture.diameter * scale;
+    } else if (aperture.width) {
+      strokeWidth = aperture.width * scale;
+    }
+  }
+
+  // Mittelpunkt, Start, Ende berechnen
+  const cx = (command.centerPoint.x + offsetX) * scale;
+  const cy = (command.centerPoint.y + offsetY) * scale;
+  const sx = (command.startPoint.x + offsetX) * scale;
+  const sy = (command.startPoint.y + offsetY) * scale;
+
+  const radius = Math.sqrt((sx - cx) ** 2 + (sy - cy) ** 2);
+
+  // Bei sehr kleinem Radius oder NaN: als Linie zeichnen
+  if (radius < 0.01 || !isFinite(radius)) {
+    return renderLine(command, aperture, offsetX, offsetY, scale);
+  }
+
+  // Winkel berechnen
+  const startAngle = Math.atan2(sy - cy, sx - cx);
+  const endAngle = Math.atan2(
+    (command.endPoint.y + offsetY) * scale - cy,
+    (command.endPoint.x + offsetX) * scale - cx
+  );
+
+  // NaN-Schutz
+  if (!isFinite(startAngle) || !isFinite(endAngle)) {
+    return renderLine(command, aperture, offsetX, offsetY, scale);
+  }
+
+  // Sweep-Winkel bestimmen
+  let sweep = endAngle - startAngle;
+  if (command.clockwise) {
+    if (sweep > 0) sweep -= 2 * Math.PI;
+    if (sweep === 0) sweep = -2 * Math.PI;
+  } else {
+    if (sweep < 0) sweep += 2 * Math.PI;
+    if (sweep === 0) sweep = 2 * Math.PI;
+  }
+
+  // Bogen als Punkte approximieren
+  const segments = Math.max(16, Math.ceil(Math.abs(sweep) * 32 / Math.PI));
+  const points: number[] = [];
+  for (let i = 0; i <= segments; i++) {
+    const angle = startAngle + (sweep * i) / segments;
+    points.push(cx + radius * Math.cos(angle));
+    points.push(cy + radius * Math.sin(angle));
+  }
+
+  return {
+    type: 'line',
+    points,
+    strokeWidth,
+    fill: false,
+  };
 }
 
 // ============================================================================

@@ -23,11 +23,12 @@ import {
   Circle,
   Info,
   RotateCcw,
+  MousePointerClick,
   Scissors,
   Eye,
   EyeOff,
 } from 'lucide-react';
-import { usePanelStore, usePanel, useGrid, useSelectedTabId, useSelectedVScoreLineId, useSelectedRoutingContourId } from '@/stores/panel-store';
+import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, countArcsInBoard } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
 import type { Tab, VScoreLine, RoutingContour } from '@/types';
 
@@ -38,15 +39,40 @@ import type { Tab, VScoreLine, RoutingContour } from '@/types';
 export function PropertiesPanel() {
   // Welche Bereiche sind aufgeklappt?
   const [expandedSections, setExpandedSections] = useState({
-    frame: true,
+    frame: false,
     array: false,
     tabs: false,
     vscore: false,
     routing: false,
     fiducials: false,
     tooling: false,
-    dimensions: true,
+    dimensions: false,
   });
+
+  // Aktives Werkzeug abfragen, um die passende Sektion automatisch aufzuklappen
+  const activeTool = useActiveTool();
+
+  // Automatisch die passende Sektion öffnen wenn ein Werkzeug gewählt wird
+  useEffect(() => {
+    // Zuordnung: Werkzeug → Sektion die aufgeklappt werden soll
+    const toolToSection: Record<string, keyof typeof expandedSections> = {
+      'place-hole': 'tooling',
+      'place-fiducial': 'fiducials',
+      'place-tab': 'tabs',
+      'place-vscore': 'vscore',
+      'place-mousebite': 'tabs',
+      'route-free-draw': 'routing',
+      'route-follow-outline': 'routing',
+    };
+
+    const section = toolToSection[activeTool];
+    if (section) {
+      setExpandedSections((prev) => ({
+        ...prev,
+        [section]: true,   // Passende Sektion aufklappen
+      }));
+    }
+  }, [activeTool]);
 
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections((prev) => ({
@@ -194,6 +220,8 @@ interface NumberInputProps {
   min?: number;
   max?: number;
   step?: number;
+  decimals?: number; // Anzahl Nachkommastellen für die Anzeige (optional)
+  compact?: boolean; // Kompakte Darstellung: Label inline, kleinere Abstände
 }
 
 function NumberInput({
@@ -204,13 +232,19 @@ function NumberInput({
   min = 0,
   max = 1000,
   step = 0.1,
+  decimals,
+  compact = false,
 }: NumberInputProps) {
+  // Hilfsfunktion: Wert auf gewünschte Nachkommastellen formatieren
+  const formatValue = (v: number) =>
+    decimals !== undefined ? v.toFixed(decimals) : v.toString();
+
   // Lokaler State für das Eingabefeld - erlaubt freies Tippen
-  const [localValue, setLocalValue] = useState(value.toString());
+  const [localValue, setLocalValue] = useState(formatValue(value));
 
   // Aktualisiere lokalen Wert wenn sich der externe Wert ändert
   useEffect(() => {
-    setLocalValue(value.toString());
+    setLocalValue(formatValue(value));
   }, [value]);
 
   // Wert beim Verlassen des Feldes übernehmen
@@ -219,9 +253,9 @@ function NumberInput({
     if (!isNaN(parsed)) {
       const clamped = Math.max(min, Math.min(max, parsed));
       onChange(clamped);
-      setLocalValue(clamped.toString());
+      setLocalValue(formatValue(clamped));
     } else {
-      setLocalValue(value.toString());
+      setLocalValue(formatValue(value));
     }
   };
 
@@ -231,6 +265,31 @@ function NumberInput({
       handleBlur();
     }
   };
+
+  // Kompakte Variante: Label links inline, kleinere Abstände, gleiche Breite
+  if (compact) {
+    return (
+      <div className="flex items-center gap-1 flex-1 min-w-0">
+        <label className="text-[10px] text-gray-500 shrink-0">{label}</label>
+        <div className="flex flex-1 min-w-0 border border-gray-300 rounded overflow-hidden focus-within:ring-1 focus-within:ring-primary-500 focus-within:border-primary-500">
+          <input
+            type="text"
+            inputMode="decimal"
+            value={localValue}
+            onChange={(e) => setLocalValue(e.target.value)}
+            onBlur={handleBlur}
+            onKeyDown={handleKeyDown}
+            className="w-0 flex-1 px-1 py-0.5 text-xs focus:outline-none"
+          />
+          {unit && (
+            <span className="px-1 py-0.5 text-[10px] text-gray-500 bg-gray-100 border-l border-gray-300 flex items-center shrink-0">
+              {unit}
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-1">
@@ -478,13 +537,15 @@ function ArrayConfig() {
 // ============================================================================
 
 function TabsConfig() {
-  const [tabType, setTabType] = useState<'solid' | 'mousebites' | 'vscore'>('mousebites');
+  const [tabType] = useState<'solid' | 'mousebites' | 'vscore'>('mousebites');
   const [tabWidth, setTabWidth] = useState(3);
   const [holeDiameter, setHoleDiameter] = useState(0.5);
   const [holeSpacing, setHoleSpacing] = useState(0.8);
   const [tabsPerEdge, setTabsPerEdge] = useState(2);
 
   const panel = usePanel();
+  const activeTool = useActiveTool();
+  const mousebiteConfig = usePanelStore((state) => state.mousebiteConfig);
   const autoDistributeTabs = usePanelStore((state) => state.autoDistributeTabs);
   const clearAllTabs = usePanelStore((state) => state.clearAllTabs);
   const removeTab = usePanelStore((state) => state.removeTab);
@@ -557,19 +618,9 @@ function TabsConfig() {
         </div>
       )}
 
-      {/* Tab-Typ */}
-      <div>
-        <label className="text-xs text-gray-600 block mb-1">Typ</label>
-        <select
-          value={tabType}
-          onChange={(e) => setTabType(e.target.value as typeof tabType)}
-          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
-                     focus:outline-none focus:ring-1 focus:ring-primary-500"
-        >
-          <option value="solid">Solid (Fräsen)</option>
-          <option value="mousebites">Mouse Bites (Perforiert)</option>
-          <option value="vscore">V-Score</option>
-        </select>
+      {/* Tab-Typ (fest auf Mousebites) */}
+      <div className="bg-blue-50 text-blue-700 text-xs px-2 py-1.5 rounded">
+        Typ: Mouse Bites (Perforiert)
       </div>
 
       {/* Tab-Breite */}
@@ -591,35 +642,25 @@ function TabsConfig() {
       />
 
       {/* Mouse Bite Einstellungen */}
-      {tabType === 'mousebites' && (
-        <div className="border-t pt-2 mt-2 space-y-2">
-          <div className="text-xs font-medium text-gray-600">Mouse Bite Einstellungen:</div>
-          <div className="grid grid-cols-2 gap-2">
-            <NumberInput
-              label="Bohr-Ø"
-              value={holeDiameter}
-              onChange={setHoleDiameter}
-              min={0.3}
-              max={1.0}
-            />
-            <NumberInput
-              label="Abstand"
-              value={holeSpacing}
-              onChange={setHoleSpacing}
-              min={0.5}
-              max={2.0}
-            />
-          </div>
+      <div className="border-t pt-2 mt-2 space-y-2">
+        <div className="text-xs font-medium text-gray-600">Mouse Bite Einstellungen:</div>
+        <div className="grid grid-cols-2 gap-2">
+          <NumberInput
+            label="Bohr-Ø"
+            value={holeDiameter}
+            onChange={setHoleDiameter}
+            min={0.3}
+            max={1.0}
+          />
+          <NumberInput
+            label="Abstand"
+            value={holeSpacing}
+            onChange={setHoleSpacing}
+            min={0.5}
+            max={2.0}
+          />
         </div>
-      )}
-
-      {/* V-Score Info */}
-      {tabType === 'vscore' && (
-        <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded">
-          V-Score: Durchgehende Ritzlinie über das ganze Panel.
-          Wird separat als V-Score-Linien definiert.
-        </div>
-      )}
+      </div>
 
       <button
         onClick={handleAutoDistribute}
@@ -634,6 +675,139 @@ function TabsConfig() {
           Zuerst Boards im Panel platzieren.
         </p>
       )}
+
+      {/* ================================================================ */}
+      {/* Mousebites an Rundungen (Board-Bögen + Panel-Ecken)            */}
+      {/* ================================================================ */}
+      {panel.instances.length > 0 && (() => {
+        // Anzahl der erkannten Bogen-Segmente in allen Board-Outlines zählen
+        // Erkennt sowohl echte Gerber-Arcs als auch linearisierte Bögen
+        const arcCount = panel.instances.reduce((count, inst) => {
+          const board = panel.boards.find((b) => b.id === inst.boardId);
+          if (!board) return count;
+          return count + countArcsInBoard(board);
+        }, 0);
+        const hasCornerRadius = panel.frame.cornerRadius > 0;
+        const canGenerate = arcCount > 0 || hasCornerRadius;
+
+        return (
+          <div className="border-t pt-3 mt-3 space-y-2">
+            <div className="text-xs font-medium text-gray-700">
+              Mousebites an Rundungen
+            </div>
+            <p className="text-[10px] text-gray-500">
+              Platziere Mousebite-Bohrungen per Klick auf Bogen-Konturen,
+              oder generiere sie automatisch an allen Rundungen.
+            </p>
+
+            {/* Info-Box: Erkannte Bögen */}
+            {arcCount > 0 ? (
+              <div className="bg-blue-50 text-blue-700 text-xs px-2 py-1 rounded">
+                {arcCount} Bogen-Segment{arcCount !== 1 ? 'e' : ''} in Board-Outlines erkannt
+              </div>
+            ) : (
+              <div className="bg-gray-50 text-gray-500 text-xs px-2 py-1 rounded">
+                Keine Bogen-Segmente im Outline-Layer gefunden.
+                Board-Outline enthält nur gerade Kanten.
+              </div>
+            )}
+            {hasCornerRadius && (
+              <div className="bg-blue-50 text-blue-700 text-xs px-2 py-1 rounded">
+                + 4 Panel-Ecken mit Radius {panel.frame.cornerRadius} mm
+              </div>
+            )}
+
+            {/* Mousebite-Konfiguration: Bogenlänge */}
+            <div className="space-y-1.5">
+              <label className="text-[10px] text-gray-500">Mousebite-Länge (mm)</label>
+              <input
+                type="number"
+                min={2}
+                max={50}
+                step={0.5}
+                value={mousebiteConfig.arcLength}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  if (!isNaN(val) && val >= 2 && val <= 50) {
+                    usePanelStore.getState().setMousebiteConfig({ arcLength: val });
+                  }
+                }}
+                className="w-full px-2 py-1 text-sm border rounded focus:ring-1 focus:ring-primary-500"
+              />
+              <p className="text-[10px] text-gray-400">
+                Bogenlänge des Mousebite-Abschnitts (2-50 mm)
+              </p>
+            </div>
+
+            {/* Tool-Aktivierungsbutton: Mousebite manuell platzieren */}
+            <button
+              onClick={() => {
+                usePanelStore.getState().setActiveTool(
+                  activeTool === 'place-mousebite' ? 'select' : 'place-mousebite'
+                );
+              }}
+              disabled={!canGenerate}
+              className={cn(
+                'w-full flex items-center justify-center gap-2 text-sm py-1.5 rounded transition-colors',
+                activeTool === 'place-mousebite'
+                  ? 'bg-primary-600 text-white hover:bg-primary-700'
+                  : 'btn-primary disabled:opacity-50 disabled:cursor-not-allowed'
+              )}
+            >
+              <MousePointerClick className="w-4 h-4" />
+              {activeTool === 'place-mousebite'
+                ? 'Platzierung aktiv (ESC = abbrechen)'
+                : 'Mousebite platzieren (Klick auf Kontur)'}
+            </button>
+            {activeTool === 'place-mousebite' && (
+              <div className="text-[10px] text-primary-600 space-y-1">
+                <p>
+                  1. Maus zur Bogen-Kontur bewegen (Cyan-Vorschau erscheint)
+                </p>
+                <p>
+                  2. <kbd className="px-0.5 bg-white border rounded text-[9px] font-bold">A</kbd> drücken = Anker setzen (fixiert Position auf der Linie)
+                </p>
+                <p>
+                  3. Klick = Mousebite am Anker platzieren
+                </p>
+                <p className="text-gray-400">
+                  Oder direkt auf die Kontur klicken (ohne Anker).
+                  ESC = Anker löschen.
+                </p>
+              </div>
+            )}
+
+            {/* Anzeige vorhandener Rundungs-Mousebites */}
+            {panel.freeMousebites.length > 0 && (
+              <div className="flex items-center justify-between bg-green-50 text-green-700 text-xs px-2 py-1 rounded">
+                <span>{panel.freeMousebites.length} Rundungs-Mousebite(s)</span>
+                <button
+                  onClick={() => usePanelStore.getState().clearAllFreeMousebites()}
+                  className="text-red-500 hover:text-red-700"
+                >
+                  Alle löschen
+                </button>
+              </div>
+            )}
+
+            {/* Auto-Generieren als Komfort-Funktion beibehalten */}
+            <button
+              onClick={() => {
+                usePanelStore.getState().autoGenerateArcMousebites({
+                  holeDiameter,
+                  holeSpacing,
+                });
+              }}
+              disabled={!canGenerate}
+              className="w-full text-xs text-gray-600 border border-gray-300 py-1 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {panel.freeMousebites.length > 0
+                ? 'Alle Rundungen auto-generieren (ersetzt bestehende)'
+                : 'Alle Rundungen auto-generieren'}
+            </button>
+          </div>
+        );
+      })()}
 
       {/* ================================================================ */}
       {/* Liste der platzierten Tabs (nur erste Instanz, Rest wird sync) */}
@@ -801,8 +975,9 @@ function TabItem({
   );
 }
 
+
 // ============================================================================
-// V-Score-Konfiguration
+// V-Score Konfiguration
 // ============================================================================
 
 function VScoreConfig() {
@@ -1093,13 +1268,13 @@ function RoutingContoursConfig() {
   const toggleRoutingContourVisibility = usePanelStore((state) => state.toggleRoutingContourVisibility);
   const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
   const selectedRoutingContourId = useSelectedRoutingContourId();
+  const updateRoutingContourEndpoints = usePanelStore((state) => state.updateRoutingContourEndpoints);
 
   const { routingConfig, routingContours } = panel;
   const contourCount = routingContours.length;
   const instanceCount = panel.instances.length;
 
   // Warnung wenn Gap < Fräser-Ø
-  // Wir berechnen den Gap aus dem Array-Abstand (Differenz zwischen Board-Positionen)
   const boards = panel.boards;
   const instances = panel.instances;
   let gapWarning: string | null = null;
@@ -1107,11 +1282,9 @@ function RoutingContoursConfig() {
   if (instances.length >= 2 && boards.length > 0) {
     const board = boards.find((b) => b.id === instances[0].boardId);
     if (board) {
-      // Einfache Heuristik: Abstand zwischen erstem und zweitem Board prüfen
       const sortedByX = [...instances].sort((a, b) => a.position.x - b.position.x);
       const sortedByY = [...instances].sort((a, b) => a.position.y - b.position.y);
 
-      // Gap X berechnen (Abstand zwischen nebeneinanderliegenden Boards)
       if (sortedByX.length >= 2) {
         const isRotated = sortedByX[0].rotation === 90 || sortedByX[0].rotation === 270;
         const bWidth = isRotated ? board.height : board.width;
@@ -1121,7 +1294,6 @@ function RoutingContoursConfig() {
         }
       }
 
-      // Gap Y berechnen
       if (!gapWarning && sortedByY.length >= 2) {
         const isRotated = sortedByY[0].rotation === 90 || sortedByY[0].rotation === 270;
         const bHeight = isRotated ? board.width : board.height;
@@ -1212,7 +1384,7 @@ function RoutingContoursConfig() {
       {/* Warnung bei zu kleinem Gap */}
       {gapWarning && (
         <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 p-2 rounded">
-          ⚠ {gapWarning}
+          {gapWarning}
         </div>
       )}
 
@@ -1250,6 +1422,75 @@ function RoutingContoursConfig() {
               />
             ))}
           </div>
+
+          {/* Koordinaten-Editor für ausgewählte manuelle Kontur */}
+          {(() => {
+            const selectedContour = routingContours.find((c) => c.id === selectedRoutingContourId);
+            if (!selectedContour || selectedContour.creationMethod === 'auto' || selectedContour.isSyncCopy) return null;
+            const firstSeg = selectedContour.segments[0];
+            const lastSeg = selectedContour.segments[selectedContour.segments.length - 1];
+            if (!firstSeg || !lastSeg) return null;
+
+            return (
+              <div className="border-t pt-2 mt-2 space-y-1.5">
+                <span className="text-[11px] font-medium text-gray-700">Endpunkte:</span>
+
+                {/* Startpunkt - kompakt in einer Zeile */}
+                <div className="space-y-0.5">
+                  <span className="text-[10px] text-green-600 font-medium">Start</span>
+                  <div className="flex gap-1.5">
+                    <NumberInput
+                      label="X"
+                      value={firstSeg.start.x}
+                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, { x: v, y: firstSeg.start.y })}
+                      min={0}
+                      max={500}
+                      step={0.01}
+                      decimals={2}
+                      compact
+                    />
+                    <NumberInput
+                      label="Y"
+                      value={firstSeg.start.y}
+                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, { x: firstSeg.start.x, y: v })}
+                      min={0}
+                      max={500}
+                      step={0.01}
+                      decimals={2}
+                      compact
+                    />
+                  </div>
+                </div>
+
+                {/* Endpunkt - kompakt in einer Zeile */}
+                <div className="space-y-0.5">
+                  <span className="text-[10px] text-red-600 font-medium">Ende</span>
+                  <div className="flex gap-1.5">
+                    <NumberInput
+                      label="X"
+                      value={lastSeg.end.x}
+                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, undefined, { x: v, y: lastSeg.end.y })}
+                      min={0}
+                      max={500}
+                      step={0.01}
+                      decimals={2}
+                      compact
+                    />
+                    <NumberInput
+                      label="Y"
+                      value={lastSeg.end.y}
+                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, undefined, { x: lastSeg.end.x, y: v })}
+                      min={0}
+                      max={500}
+                      step={0.01}
+                      decimals={2}
+                      compact
+                    />
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
     </div>
@@ -1312,6 +1553,23 @@ function RoutingContourItem({
           )}>
             {isBoardOutline ? 'Board' : 'Panel'}
           </span>
+          {/* Badge für Erstellungsmethode */}
+          <span className={cn(
+            "px-1 py-0.5 rounded text-[10px]",
+            contour.creationMethod === 'auto'
+              ? "bg-gray-100 text-gray-500"
+              : contour.creationMethod === 'follow-outline'
+              ? "bg-green-50 text-green-600"
+              : "bg-purple-50 text-purple-600"
+          )}>
+            {contour.creationMethod === 'auto' ? 'Auto' : contour.creationMethod === 'follow-outline' ? 'Outline' : 'Frei'}
+          </span>
+          {/* Badge für Sync-Kopie (vom Master-Board synchronisiert) */}
+          {contour.isSyncCopy && (
+            <span className="px-1 py-0.5 rounded text-[10px] bg-blue-50 text-blue-600">
+              Kopie
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {/* Sichtbarkeits-Toggle */}
@@ -1329,16 +1587,18 @@ function RoutingContourItem({
               <EyeOff className="w-3.5 h-3.5" />
             )}
           </button>
-          {/* Löschen */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove();
-            }}
-            className="text-red-400 hover:text-red-600 text-xs"
-          >
-            ✕
-          </button>
+          {/* Löschen - bei Sync-Kopien ausgeblendet (werden automatisch verwaltet) */}
+          {!contour.isSyncCopy && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onRemove();
+              }}
+              className="text-red-400 hover:text-red-600 text-xs"
+            >
+              ✕
+            </button>
+          )}
         </div>
       </div>
 
@@ -1623,14 +1883,18 @@ function FiducialItem({ index, fiducial, isSelected, onSelect, onUpdatePosition,
 // ============================================================================
 
 function ToolingConfig() {
-  const [diameter, setDiameter] = useState(3.0);
-  const [plated, setPlated] = useState(false);
   const [offset, setOffset] = useState(3.0);
+
+  const toolingHoleConfig = usePanelStore((state) => state.toolingHoleConfig);
+  const setToolingHoleConfig = usePanelStore((state) => state.setToolingHoleConfig);
+  const diameter = toolingHoleConfig.diameter;
+  const plated = toolingHoleConfig.plated;
 
   const addToolingHole = usePanelStore((state) => state.addToolingHole);
   const removeToolingHole = usePanelStore((state) => state.removeToolingHole);
   const clearAllToolingHoles = usePanelStore((state) => state.clearAllToolingHoles);
   const updateToolingHolePosition = usePanelStore((state) => state.updateToolingHolePosition);
+  const updateToolingHole = usePanelStore((state) => state.updateToolingHole);
   const selectToolingHole = usePanelStore((state) => state.selectToolingHole);
   const selectedToolingHoleId = usePanelStore((state) => state.selectedToolingHoleId);
   const panel = usePanel();
@@ -1685,6 +1949,7 @@ function ToolingConfig() {
                 isSelected={hole.id === selectedToolingHoleId}
                 onSelect={() => selectToolingHole(hole.id)}
                 onUpdatePosition={(pos) => updateToolingHolePosition(hole.id, pos)}
+                onUpdateHole={(data) => updateToolingHole(hole.id, data)}
                 onRemove={() => removeToolingHole(hole.id)}
               />
             ))}
@@ -1700,7 +1965,7 @@ function ToolingConfig() {
           <NumberInput
             label="Durchm."
             value={diameter}
-            onChange={setDiameter}
+            onChange={(v) => setToolingHoleConfig({ diameter: v })}
           />
           <NumberInput
             label="Abstand vom Rand"
@@ -1714,7 +1979,7 @@ function ToolingConfig() {
             type="checkbox"
             id="plated"
             checked={plated}
-            onChange={(e) => setPlated(e.target.checked)}
+            onChange={(e) => setToolingHoleConfig({ plated: e.target.checked })}
             className="rounded"
           />
           <label htmlFor="plated" className="text-xs text-gray-600">
@@ -1733,24 +1998,31 @@ function ToolingConfig() {
   );
 }
 
-// Einzelnes Tooling Hole Item mit editierbaren Koordinaten (wie FiducialItem)
+// Einzelnes Tooling Hole Item mit editierbaren Koordinaten, Durchmesser und PTH
 interface ToolingHoleItemProps {
   index: number;
   hole: { id: string; position: { x: number; y: number }; diameter: number; plated: boolean };
   isSelected: boolean;
   onSelect: () => void;
   onUpdatePosition: (position: { x: number; y: number }) => void;
+  onUpdateHole: (data: { diameter?: number; plated?: boolean }) => void;
   onRemove: () => void;
 }
 
-function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, onRemove }: ToolingHoleItemProps) {
+function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, onUpdateHole, onRemove }: ToolingHoleItemProps) {
   const [xValue, setXValue] = useState(hole.position.x.toFixed(2));
   const [yValue, setYValue] = useState(hole.position.y.toFixed(2));
+  const [diaValue, setDiaValue] = useState(hole.diameter.toFixed(2));
 
+  // Synchronisiert lokale Werte wenn sich die Hole-Daten ändern (z.B. durch Drag&Drop)
   useEffect(() => {
     setXValue(hole.position.x.toFixed(2));
     setYValue(hole.position.y.toFixed(2));
   }, [hole.position]);
+
+  useEffect(() => {
+    setDiaValue(hole.diameter.toFixed(2));
+  }, [hole.diameter]);
 
   const handleXBlur = () => {
     const x = parseFloat(xValue);
@@ -1763,6 +2035,14 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
     const y = parseFloat(yValue);
     if (!isNaN(y)) {
       onUpdatePosition({ x: hole.position.x, y });
+    }
+  };
+
+  // Durchmesser speichern wenn Eingabefeld verlassen wird
+  const handleDiaBlur = () => {
+    const d = parseFloat(diaValue);
+    if (!isNaN(d) && d > 0) {
+      onUpdateHole({ diameter: d });
     }
   };
 
@@ -1785,7 +2065,7 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
           "font-medium",
           isSelected ? "text-orange-700" : "text-gray-700"
         )}>
-          Bohrung {index} {hole.plated ? '(PTH)' : '(NPTH)'} {isSelected && "✓"}
+          Bohrung {index} {isSelected && "✓"}
         </span>
         <button
           onClick={(e) => {
@@ -1797,6 +2077,8 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
           ✕
         </button>
       </div>
+
+      {/* Position: X und Y */}
       <div className="grid grid-cols-2 gap-2">
         <div className="flex items-center gap-1">
           <span className="text-gray-500 w-4">X:</span>
@@ -1821,6 +2103,36 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
             className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
           />
           <span className="text-gray-400">mm</span>
+        </div>
+      </div>
+
+      {/* Durchmesser und PTH/NPTH */}
+      <div className="grid grid-cols-2 gap-2 mt-1.5">
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500 w-4">Ø:</span>
+          <input
+            type="text"
+            value={diaValue}
+            onChange={(e) => setDiaValue(e.target.value)}
+            onBlur={handleDiaBlur}
+            onKeyDown={(e) => handleKeyDown(e, handleDiaBlur)}
+            className="flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full"
+          />
+          <span className="text-gray-400">mm</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <input
+            type="checkbox"
+            checked={hole.plated}
+            onChange={(e) => {
+              e.stopPropagation();
+              onUpdateHole({ plated: e.target.checked });
+            }}
+            className="rounded"
+          />
+          <span className="text-gray-500 text-xs">
+            {hole.plated ? 'PTH' : 'NPTH'}
+          </span>
         </div>
       </div>
     </div>
