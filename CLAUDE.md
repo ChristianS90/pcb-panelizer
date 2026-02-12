@@ -116,6 +116,7 @@ Der `usePanelStore` enthält:
 - `selectedToolingHoleId` - Ausgewählte Tooling-Bohrung (für Bearbeitung)
 - `selectedVScoreLineId` - Ausgewählte V-Score-Linie
 - `selectedRoutingContourId` - Ausgewählte Fräskontur
+- `showDimensions` - Bemaßungs-Overlay ein/aus (Toggle-Button "Maße")
 - `cursorPosition` - Live-Cursor-Koordinaten (für Statusbar)
 - `toolingHoleConfig` - Konfiguration für neue Bohrungen (Durchmesser, PTH/NPTH)
 - `mousebiteConfig` - Konfiguration für Mousebite-Platzierung (Bogenlänge)
@@ -253,6 +254,47 @@ Der `usePanelStore` enthält:
   - Löschen einer Master-Kontur entfernt automatisch alle zugehörigen Kopien
   - `RoutingContour` erweitert um `masterContourId` und `isSyncCopy` Felder
 
+### Phase 8 - Erledigt
+
+- [x] **Interaktives Bemaßungs-Overlay im Canvas**
+  - Toggle-Button "Maße" (Ruler-Icon) in der Toolbar
+  - Alle Bemaßungen direkt im PixiJS-Canvas sichtbar
+  - **V-Score Labels** (pink): Position + Tiefe/Winkel, mit Pfeil zum V-Score
+  - **Fiducial Labels** (grün): Koordinaten + Pad/Mask-Durchmesser, gestrichelte Hilfslinien, Pfeil
+  - **Tooling Hole Labels** (rot): Durchmesser + PTH/NPTH + Koordinaten, Hilfslinien, Pfeil
+  - **Fräskontur Labels** (cyan/orange): Typ + Fräser-Ø, Pfeil zum Kontur-Mittelpunkt
+  - **Maßlinien**: Gesamtbreite/-höhe, Nutzenrand, Board-Positionen, Gaps
+- [x] **Drag & Drop für alle Labels** — Positionen per Maus anpassbar
+  - Label-Offsets werden in `panel.dimensionOverrides.labelOffsets` gespeichert
+  - Offsets bleiben beim Projekt-Speichern erhalten
+- [x] **Drag für Maßlinien** — Abstände per Maus anpassbar
+  - Maßlinien-Abstände werden in `panel.dimensionOverrides.dimLineDistances` gespeichert
+  - Horizontale Maßlinien: vertikal verschiebbar (ns-resize Cursor)
+  - Vertikale Maßlinien: horizontal verschiebbar (ew-resize Cursor)
+- [x] **Rechtsklick zum Ausblenden** — Einzelne Labels/Maßlinien per Rechtsklick entfernen
+  - Ausgeblendete Elemente in `panel.dimensionOverrides.hiddenElements` gespeichert
+- [x] **Pfeile mit kürzestem Weg** (Ray-Box-Intersection)
+  - Pfeil startet immer am nächsten Punkt der Text-Box-Kante zum Zielobjekt
+  - Funktioniert korrekt wenn Label auf die andere Seite gezogen wird
+- [x] **Verlängerungslinien** an Maßlinien
+  - Dünne Linien (0.5px) vom gemessenen Objekt bis zur Maßlinie + 1.5mm Überstand
+  - Korrekte Richtung: immer vom Objekt weg
+- [x] **PDF-Export exakt wie Canvas**
+  - Alle Bemaßungen, Labels, Pfeile, Verlängerungslinien identisch positioniert
+  - Verschobene Label-Positionen werden aus dem Store übernommen
+  - Ausgeblendete Elemente werden übersprungen
+  - Nur sichtbare Canvas-Inhalte im PDF (keine Extra-Tabellen)
+  - Sichtbare Gerber-Layer werden gerendert
+- [x] **Fräskontur-Bemaßung** — Labels mit Typ + Fräser-Ø
+  - Cyan für Board-Konturen, Orange für Panel-Konturen
+  - Pfeil vom Label zum Kontur-Mittelpunkt (auch bei Bögen korrekt)
+  - Sync-Kopien erhalten kein Label (vermeidet Clutter)
+  - Auto-Cleanup beim Löschen von Konturen
+- [x] **DimensionOverrides** Datenmodell auf Panel-Ebene
+  - `labelOffsets: Record<string, { dx, dy }>` — Label-Verschiebungen
+  - `dimLineDistances: DimensionLineDistances` — Maßlinien-Abstände (8 konfigurierbare Werte)
+  - `hiddenElements: string[]` — ausgeblendete Element-Keys
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
@@ -273,6 +315,7 @@ Der `usePanelStore` enthält:
 | V-Score | - | V-Score Linie zeichnen |
 | Tab/Mousebite | - | Dropdown: Tab oder Mousebite platzieren |
 | Fräskontur | - | Dropdown: Kontur folgen oder Frei zeichnen |
+| **Maße** | - | Bemaßungs-Overlay ein-/ausschalten (Toggle) |
 
 ### Mess-Werkzeug Tasten
 
@@ -386,23 +429,36 @@ Der `usePanelStore` enthält:
 3. **"Tabs automatisch verteilen"** klicken
 4. Mousebites an Rundungen: Klick auf Bogen-Konturen oder automatisch generieren
 
+### Bemaßungs-Overlay (Canvas)
+1. **"Maße"**-Button in der Toolbar klicken (Ruler-Icon)
+2. Bemaßungen erscheinen im Canvas:
+   - **V-Score Labels** (pink): Position + Tiefe/Winkel, Pfeil zum V-Score
+   - **Fiducial Labels** (grün): Koordinaten + Durchmesser, Hilfslinien + Pfeil
+   - **Tooling Hole Labels** (rot): Ø + PTH/NPTH + Koordinaten, Hilfslinien + Pfeil
+   - **Fräskontur Labels** (cyan/orange): Typ + Fräser-Ø, Pfeil zur Kontur
+   - **Maßlinien**: Gesamtbreite/-höhe, Nutzenrand, Board-Position, Gaps
+3. **Labels verschieben**: Per Drag & Drop an gewünschte Position ziehen
+4. **Maßlinien verschieben**: Maßlinien-Texte per Drag anpassen
+5. **Ausblenden**: Rechtsklick auf Label oder Maßlinie → Element wird ausgeblendet
+6. Alle Positionen werden automatisch im Projekt gespeichert
+7. Erneut klicken = Overlay ausschalten
+
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
-2. PDF wird generiert und heruntergeladen (A4 Querformat)
-3. Enthält:
-   - Panel-Umriss mit allen Board-Positionen
-   - **Gesamtbemaßungen** (Breite unten, Höhe rechts)
-   - **Nutzenrand-Bemaßungen** alle 4 Seiten (links, rechts, oben, unten)
-   - **Board-Positionsbemaßungen** (X/Y-Offset, Board-Größe, Gaps)
-   - **V-Score Linien** (gestrichelt pink, mit Y/X-Position, Tiefe %, Winkel°)
+2. PDF wird generiert und heruntergeladen (dynamische Seitengröße, mind. A4 quer)
+3. Enthält **exakt das, was im Canvas sichtbar ist**:
+   - Panel-Umriss mit Board-Umrissen (blau) und sichtbaren Gerber-Layern
+   - **V-Score Linien** (gestrichelt pink) mit Labels + Pfeile
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
-   - **Fiducials** mit kombiniertem Label `FID (X.X/Y.Y) Ø1.0/3.0` und Hilfslinien
-   - **Tooling Holes** mit kombiniertem Label `Ø3.0 NPTH (X.X/Y.Y)` und Hilfslinien
-   - **Detail-Tabelle** rechts: Board-Info, Fiducials, Tooling Holes, V-Score, Tabs
-   - **Legende** (dynamisch, nur vorhandene Elementtypen)
-   - **Titelblock** mit Projekt, Autor, Datum, Panel-Größe, alle Zähler
-   - **Gitterreferenz** 6×3 (Spalten 1-6, Reihen A-C)
-   - Bemaßungen gestaffelt auf 4 Ebenen (keine Überlappungen)
+   - **Fiducials** mit Label + Hilfslinien + Pfeil
+   - **Tooling Holes** mit Label + Hilfslinien + Pfeil
+   - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Labels + Pfeil
+   - **Fräskonturen-Visualisierung**: Fräserbreite-Streifen, Tab-Übergangskreise
+   - **Maßlinien** mit Verlängerungslinien: Gesamtbreite/-höhe, Nutzenrand, Board-Positionen, Gaps
+   - **Zeichnungsrahmen** mit Gitterreferenz-System (dynamische Spalten/Reihen)
+   - **ISO-Titelblock** mit SMTEC AG Logo
+4. Label-Positionen aus dem Canvas-Overlay werden 1:1 übernommen
+5. Ausgeblendete Elemente erscheinen nicht im PDF
 
 ---
 
@@ -466,6 +522,11 @@ npm start
 - **Tabs** (farbcodiert nach Typ)
 - **V-Score Linien** (gestrichelt pink)
 - **Fräskonturen** (Segmente mit Tabs, Sync-Kopien halbtransparent alpha 0.5)
+- **Bemaßungs-Overlay** (optional, Toggle "Maße"):
+  - V-Score Labels (pink) + Fiducial Labels (grün) + Tooling Hole Labels (rot) + Fräskontur Labels (cyan/orange)
+  - Maßlinien mit Verlängerungslinien und Endstrichen
+  - Pfeile von Labels zu Objekten (Ray-Box-Intersection)
+  - Alle Labels per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
 - **Mess-Overlay** (gestrichelte Linie, Marker, Koordinaten, Distanz)
 
 ### Mess-Overlay
@@ -601,6 +662,44 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 - Blaues "Kopie"-Badge in der Konturen-Liste bei `isSyncCopy`
 - Löschen-Button bei Kopien ausgeblendet
 - Endpunkt-Editor bei Kopien ausgeblendet
+
+### Bemaßungs-Overlay Architektur (`pixi-panel-canvas.tsx` + `dimension-drawing.ts`)
+
+**Canvas-Overlay (`createDimensionOverlay`):**
+- Erzeugt einen PixiJS Container mit allen Bemaßungs-Elementen
+- Wird im Haupt-`useEffect` nach allen anderen Render-Schritten hinzugefügt wenn `showDimensions === true`
+- Hilfsfunktionen:
+  - `drawPixiDashedLine(g, x1, y1, x2, y2, color, width, dash, gap)` — Gestrichelte Linie
+  - `drawPixiDimLine(container, g, x1, y1, x2, y2, text, color, orientation, dimKey?, objectEdge?)` — Maßlinie mit Endstrichen, Text, Verlängerungslinien
+  - `getLabelWorldBox(container)` — Berechnet Welt-Bounding-Box eines Label-Containers
+  - `drawArrowToTarget(g, textBox, toX, toY, color, minDist)` — Ray-Box-Intersection Pfeil
+
+**Label-Keys für Offsets/Hidden:**
+- V-Score: `vscore-{id}`
+- Fiducial: `fiducial-{id}`
+- Tooling Hole: `toolinghole-{id}`
+- Fräskontur: `routing-{id}`
+- Maßlinie: `dimline-{key}` (z.B. `dimline-totalWidthBottom`, `dimline-boardDimNearH`)
+
+**Drag-Logik:**
+- `dragItemTypeRef = 'dimensionLabel'` für Element-Labels (V-Score, Fiducial, Tooling Hole, Fräskontur)
+- `dragItemTypeRef = 'dimensionLine'` für Maßlinien-Texte
+- Basis-Position wird beim Drag-Start berechnet: `currentPosition - currentOffset`
+- Neuer Offset = `mousePosition - basePosition`
+
+**PDF-Export (`dimension-drawing.ts`):**
+- Liest `panel.dimensionOverrides` für Offsets, Abstände und ausgeblendete Elemente
+- Verwendet exakt gleiche Formeln wie Canvas (mm → PDF-Punkte statt mm → Pixel)
+- Koordinaten-Mapping: `toX(mm) = offsetX + mm * scale`, `toY(mm) = offsetY + panelHeightPx - mm * scale`
+- Canvas `PIXELS_PER_MM = 4` ↔ PDF `MM_TO_PT ≈ 2.8346`
+- `drawPdfArrowToTarget` — Gleiche Ray-Box-Intersection wie Canvas
+
+**Auto-Cleanup:**
+- `removeFiducial` → entfernt `fiducial-{id}` Offset
+- `removeToolingHole` → entfernt `toolinghole-{id}` Offset
+- `removeVScoreLine` → entfernt `vscore-{id}` Offset
+- `removeRoutingContour` → entfernt `routing-{id}` Offset
+- `clearAllRoutingContours` → entfernt alle `routing-*` Offsets und Hidden-Elements
 
 ---
 

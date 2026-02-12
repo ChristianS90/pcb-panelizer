@@ -35,6 +35,9 @@ import type {
   Unit,
   Point,
   BoardArray,
+  DimensionLabelOffset,
+  DimensionLineDistances,
+  DimensionOverrides,
 } from '@/types';
 
 // ============================================================================
@@ -106,6 +109,15 @@ interface PanelStore {
     selectedSegmentIndices: number[];       // Frei wählbare Segment-Indizes
     outlineSegments: OutlinePathSegment[];  // Gecachte Outline-Segmente
   };
+
+  /** V-Score Linien im Canvas ein-/ausblenden */
+  showVScoreLines: boolean;
+
+  /** Fräskonturen im Canvas ein-/ausblenden */
+  showRoutingContours: boolean;
+
+  /** Bemaßungs-Overlay im Canvas ein-/ausblenden */
+  showDimensions: boolean;
 
   /** Undo/Redo History (für später) */
   history: {
@@ -353,6 +365,28 @@ interface PanelStore {
   clearSegmentSelectState: () => void;
 
   // --------------------------------------------------------------------------
+  // Bemaßungs-Overlay Aktionen
+  // --------------------------------------------------------------------------
+
+  /** Schaltet das Bemaßungs-Overlay ein/aus */
+  toggleDimensions: () => void;
+
+  /** Setzt den Label-Offset für ein Element (Key = "vscore-{id}", "fiducial-{id}", etc.) */
+  setDimensionLabelOffset: (key: string, offset: DimensionLabelOffset) => void;
+
+  /** Aktualisiert die Maßlinien-Abstände (teilweise Aktualisierung möglich) */
+  setDimLineDistances: (distances: Partial<DimensionLineDistances>) => void;
+
+  /** Setzt alle Bemaßungs-Überschreibungen zurück */
+  resetDimensionOverrides: () => void;
+
+  /** Blendet ein Bemaßungs-Element aus (Key z.B. "dimline-totalWidthBottom" oder "vscore-{id}") */
+  hideDimensionElement: (key: string) => void;
+
+  /** Zeigt alle ausgeblendeten Bemaßungs-Elemente wieder an */
+  showAllDimensionElements: () => void;
+
+  // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
   // --------------------------------------------------------------------------
 
@@ -386,6 +420,12 @@ interface PanelStore {
 
   /** Schaltet die Board-Beschriftung (blauer Rahmen, Name, Größe) ein/aus */
   toggleBoardLabels: () => void;
+
+  /** Schaltet V-Score Linien im Canvas ein/aus */
+  toggleVScoreLines: () => void;
+
+  /** Schaltet Fräskonturen im Canvas ein/aus */
+  toggleRoutingContours: () => void;
 
   // --------------------------------------------------------------------------
   // Grid-Einstellungen
@@ -483,6 +523,21 @@ const initialGrid: GridConfig = {
   visible: true,
   size: 0.1, // 0.1mm Grid für präzises Messen
   snapEnabled: true,
+};
+
+/**
+ * Standard-Abstände für Maßlinien (in mm)
+ * Diese Werte werden für das Canvas-Overlay und den PDF-Export verwendet.
+ */
+export const DEFAULT_DIM_DISTANCES: DimensionLineDistances = {
+  totalWidthBottom: 12.3,     // Gesamtbreite-Maßlinie: Abstand unter dem Panel
+  totalHeightRight: 14.1,     // Gesamthöhe-Maßlinie: Abstand rechts
+  frameBottom: 7.8,           // Nutzenrand unten
+  frameRightTop: 18.3,        // Nutzenrand rechts oben
+  frameRightBottom: 21.9,     // Nutzenrand rechts unten
+  boardOffsetBottom: 10.6,    // Board X-Offset unten
+  boardDimNear: 4.9,          // Board-Breite/Höhe nah
+  boardOffsetLeft: 4.2,       // Board Y-Offset links
 };
 
 // ============================================================================
@@ -1506,6 +1561,9 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   mousebiteConfig: { arcLength: 5, holeDiameter: 0.5, holeSpacing: 0.8 },
   routeFreeDrawState: { points: [] },
   routeSegmentSelectState: { boardInstanceId: null, selectedSegmentIndices: [], outlineSegments: [] },
+  showVScoreLines: true,
+  showRoutingContours: true,
+  showDimensions: false,
   history: {
     past: [],
     future: [],
@@ -2178,13 +2236,26 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     })),
 
   removeFiducial: (fiducialId) =>
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        fiducials: state.panel.fiducials.filter((f) => f.id !== fiducialId),
-        modifiedAt: new Date(),
-      },
-    })),
+    set((state) => {
+      // Auto-Cleanup: Verwaisten Label-Offset entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const key = `fiducial-${fiducialId}`;
+        if (overrides.labelOffsets[key]) {
+          const { [key]: _, ...rest } = overrides.labelOffsets;
+          cleanedOverrides = { ...overrides, labelOffsets: rest };
+        }
+      }
+      return {
+        panel: {
+          ...state.panel,
+          fiducials: state.panel.fiducials.filter((f) => f.id !== fiducialId),
+          dimensionOverrides: cleanedOverrides,
+          modifiedAt: new Date(),
+        },
+      };
+    }),
 
   clearAllFiducials: () =>
     set((state) => ({
@@ -2222,16 +2293,28 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     })),
 
   removeToolingHole: (holeId) =>
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        toolingHoles: state.panel.toolingHoles.filter((h) => h.id !== holeId),
-        modifiedAt: new Date(),
-      },
-      // Falls die gelöschte Bohrung ausgewählt war, Auswahl zurücksetzen
-      selectedToolingHoleId:
-        state.selectedToolingHoleId === holeId ? null : state.selectedToolingHoleId,
-    })),
+    set((state) => {
+      // Auto-Cleanup: Verwaisten Label-Offset entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const key = `toolinghole-${holeId}`;
+        if (overrides.labelOffsets[key]) {
+          const { [key]: _, ...rest } = overrides.labelOffsets;
+          cleanedOverrides = { ...overrides, labelOffsets: rest };
+        }
+      }
+      return {
+        panel: {
+          ...state.panel,
+          toolingHoles: state.panel.toolingHoles.filter((h) => h.id !== holeId),
+          dimensionOverrides: cleanedOverrides,
+          modifiedAt: new Date(),
+        },
+        selectedToolingHoleId:
+          state.selectedToolingHoleId === holeId ? null : state.selectedToolingHoleId,
+      };
+    }),
 
   clearAllToolingHoles: () =>
     set((state) => ({
@@ -2288,16 +2371,28 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     })),
 
   removeVScoreLine: (lineId) =>
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        vscoreLines: state.panel.vscoreLines.filter((l) => l.id !== lineId),
-        modifiedAt: new Date(),
-      },
-      // Falls die gelöschte Linie ausgewählt war, Auswahl zurücksetzen
-      selectedVScoreLineId:
-        state.selectedVScoreLineId === lineId ? null : state.selectedVScoreLineId,
-    })),
+    set((state) => {
+      // Auto-Cleanup: Verwaisten Label-Offset entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const key = `vscore-${lineId}`;
+        if (overrides.labelOffsets[key]) {
+          const { [key]: _, ...rest } = overrides.labelOffsets;
+          cleanedOverrides = { ...overrides, labelOffsets: rest };
+        }
+      }
+      return {
+        panel: {
+          ...state.panel,
+          vscoreLines: state.panel.vscoreLines.filter((l) => l.id !== lineId),
+          dimensionOverrides: cleanedOverrides,
+          modifiedAt: new Date(),
+        },
+        selectedVScoreLineId:
+          state.selectedVScoreLineId === lineId ? null : state.selectedVScoreLineId,
+      };
+    }),
 
   clearAllVScoreLines: () =>
     set((state) => ({
@@ -2606,9 +2701,21 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         (c) => c.id !== contourId && c.masterContourId !== contourId
       );
 
+      // Auto-Cleanup: Verwaisten Label-Offset entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const key = `routing-${contourId}`;
+        if (overrides.labelOffsets[key]) {
+          const { [key]: _, ...rest } = overrides.labelOffsets;
+          cleanedOverrides = { ...overrides, labelOffsets: rest };
+        }
+      }
+
       const updatedPanel = {
         ...state.panel,
         routingContours: filtered,
+        dimensionOverrides: cleanedOverrides,
         modifiedAt: new Date(),
       };
 
@@ -2624,14 +2731,30 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
 
   // Entfernt alle Fräskonturen
   clearAllRoutingContours: () =>
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        routingContours: [],
-        modifiedAt: new Date(),
-      },
-      selectedRoutingContourId: null,
-    })),
+    set((state) => {
+      // Auto-Cleanup: Alle routing-*-Offsets und hiddenElements entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const cleanedOffsets: Record<string, any> = {};
+        for (const [k, v] of Object.entries(overrides.labelOffsets)) {
+          if (!k.startsWith('routing-')) cleanedOffsets[k] = v;
+        }
+        const cleanedHidden = (overrides.hiddenElements || []).filter(
+          (h: string) => !h.startsWith('routing-')
+        );
+        cleanedOverrides = { ...overrides, labelOffsets: cleanedOffsets, hiddenElements: cleanedHidden };
+      }
+      return {
+        panel: {
+          ...state.panel,
+          routingContours: [],
+          dimensionOverrides: cleanedOverrides,
+          modifiedAt: new Date(),
+        },
+        selectedRoutingContourId: null,
+      };
+    }),
 
   // Schaltet die Sichtbarkeit einer Fräskontur um
   toggleRoutingContourVisibility: (contourId) =>
@@ -3113,6 +3236,113 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       showBoardLabels: !state.showBoardLabels,
     })),
 
+  // V-Score Linien im Canvas ein-/ausschalten
+  toggleVScoreLines: () =>
+    set((state) => ({
+      showVScoreLines: !state.showVScoreLines,
+    })),
+
+  // Fräskonturen im Canvas ein-/ausschalten
+  toggleRoutingContours: () =>
+    set((state) => ({
+      showRoutingContours: !state.showRoutingContours,
+    })),
+
+  // --------------------------------------------------------------------------
+  // Bemaßungs-Overlay
+  // --------------------------------------------------------------------------
+
+  // Schaltet das Bemaßungs-Overlay im Canvas ein/aus
+  toggleDimensions: () =>
+    set((state) => ({
+      showDimensions: !state.showDimensions,
+    })),
+
+  // Setzt den Label-Offset für ein bestimmtes Element
+  setDimensionLabelOffset: (key, offset) =>
+    set((state) => {
+      const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            labelOffsets: {
+              ...existing.labelOffsets,
+              [key]: offset,
+            },
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
+  // Aktualisiert die Maßlinien-Abstände
+  setDimLineDistances: (distances) =>
+    set((state) => {
+      const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            dimLineDistances: {
+              ...DEFAULT_DIM_DISTANCES,
+              ...existing.dimLineDistances,
+              ...distances,
+            },
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
+  // Setzt alle Bemaßungs-Überschreibungen zurück
+  resetDimensionOverrides: () =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        dimensionOverrides: undefined,
+        modifiedAt: new Date(),
+      },
+    })),
+
+  // Blendet ein Bemaßungs-Element aus (fügt Key zur hiddenElements-Liste hinzu)
+  hideDimensionElement: (key) =>
+    set((state) => {
+      const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
+      const hidden = existing.hiddenElements || [];
+      // Nur hinzufügen wenn nicht bereits ausgeblendet
+      if (hidden.includes(key)) return state;
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            hiddenElements: [...hidden, key],
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
+  // Zeigt alle ausgeblendeten Bemaßungs-Elemente wieder an
+  showAllDimensionElements: () =>
+    set((state) => {
+      const existing = state.panel.dimensionOverrides;
+      if (!existing) return state;
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            hiddenElements: [],
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
   // --------------------------------------------------------------------------
   // Grid-Einstellungen
   // --------------------------------------------------------------------------
@@ -3275,3 +3505,12 @@ export const useRouteFreeDrawState = () => usePanelStore((state) => state.routeF
 
 /** Hook: Segment-Auswahl-State für Canvas-Vorschau */
 export const useRouteSegmentSelectState = () => usePanelStore((state) => state.routeSegmentSelectState);
+
+/** Hook: V-Score Linien ein-/ausblenden */
+export const useShowVScoreLines = () => usePanelStore((state) => state.showVScoreLines);
+
+/** Hook: Fräskonturen ein-/ausblenden */
+export const useShowRoutingContours = () => usePanelStore((state) => state.showRoutingContours);
+
+/** Hook: Bemaßungs-Overlay ein-/ausblenden */
+export const useShowDimensions = () => usePanelStore((state) => state.showDimensions);

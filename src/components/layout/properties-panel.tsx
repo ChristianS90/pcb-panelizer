@@ -28,7 +28,7 @@ import {
   Eye,
   EyeOff,
 } from 'lucide-react';
-import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, countArcsInBoard } from '@/stores/panel-store';
+import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
 import type { Tab, VScoreLine, RoutingContour } from '@/types';
 
@@ -67,18 +67,40 @@ export function PropertiesPanel() {
 
     const section = toolToSection[activeTool];
     if (section) {
-      setExpandedSections((prev) => ({
-        ...prev,
-        [section]: true,   // Passende Sektion aufklappen
-      }));
+      // Akkordeon: Alle anderen schließen, nur passende Sektion öffnen
+      setExpandedSections({
+        frame: false,
+        array: false,
+        tabs: false,
+        vscore: false,
+        routing: false,
+        fiducials: false,
+        tooling: false,
+        dimensions: false,
+        [section]: true,
+      });
     }
   }, [activeTool]);
 
+  // Akkordeon-Verhalten: Nur eine Sektion gleichzeitig offen
   const toggleSection = (section: keyof typeof expandedSections) => {
-    setExpandedSections((prev) => ({
-      ...prev,
-      [section]: !prev[section],
-    }));
+    setExpandedSections((prev) => {
+      const isCurrentlyOpen = prev[section];
+      // Alle Sektionen schließen
+      const allClosed = {
+        frame: false,
+        array: false,
+        tabs: false,
+        vscore: false,
+        routing: false,
+        fiducials: false,
+        tooling: false,
+        dimensions: false,
+      };
+      // Wenn die angeklickte Sektion offen war → alle zu
+      // Wenn sie geschlossen war → nur diese öffnen
+      return isCurrentlyOpen ? allClosed : { ...allClosed, [section]: true };
+    });
   };
 
   return (
@@ -537,7 +559,7 @@ function ArrayConfig() {
 // ============================================================================
 
 function TabsConfig() {
-  const [tabType] = useState<'solid' | 'mousebites' | 'vscore'>('mousebites');
+  const [tabType, setTabType] = useState<'solid' | 'mousebites' | 'vscore'>('mousebites');
   const [tabWidth, setTabWidth] = useState(3);
   const [holeDiameter, setHoleDiameter] = useState(0.5);
   const [holeSpacing, setHoleSpacing] = useState(0.8);
@@ -618,9 +640,18 @@ function TabsConfig() {
         </div>
       )}
 
-      {/* Tab-Typ (fest auf Mousebites) */}
-      <div className="bg-blue-50 text-blue-700 text-xs px-2 py-1.5 rounded">
-        Typ: Mouse Bites (Perforiert)
+      {/* Tab-Typ Auswahl */}
+      <div>
+        <label className="text-xs text-gray-500">Tab-Typ</label>
+        <select
+          value={tabType}
+          onChange={(e) => setTabType(e.target.value as 'solid' | 'mousebites')}
+          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                     focus:outline-none focus:ring-1 focus:ring-primary-500 mt-1"
+        >
+          <option value="mousebites">Mouse Bites (Perforiert)</option>
+          <option value="solid">Solid (Ohne Perforierung)</option>
+        </select>
       </div>
 
       {/* Tab-Breite */}
@@ -641,26 +672,28 @@ function TabsConfig() {
         unit="Stk"
       />
 
-      {/* Mouse Bite Einstellungen */}
-      <div className="border-t pt-2 mt-2 space-y-2">
-        <div className="text-xs font-medium text-gray-600">Mouse Bite Einstellungen:</div>
-        <div className="grid grid-cols-2 gap-2">
-          <NumberInput
-            label="Bohr-Ø"
-            value={holeDiameter}
-            onChange={setHoleDiameter}
-            min={0.3}
-            max={1.0}
-          />
-          <NumberInput
-            label="Abstand"
-            value={holeSpacing}
-            onChange={setHoleSpacing}
-            min={0.5}
-            max={2.0}
-          />
+      {/* Mouse Bite Einstellungen - nur bei Typ "mousebites" sichtbar */}
+      {tabType === 'mousebites' && (
+        <div className="border-t pt-2 mt-2 space-y-2">
+          <div className="text-xs font-medium text-gray-600">Mouse Bite Einstellungen:</div>
+          <div className="grid grid-cols-2 gap-2">
+            <NumberInput
+              label="Bohr-Ø"
+              value={holeDiameter}
+              onChange={setHoleDiameter}
+              min={0.3}
+              max={1.0}
+            />
+            <NumberInput
+              label="Abstand"
+              value={holeSpacing}
+              onChange={setHoleSpacing}
+              min={0.5}
+              max={2.0}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       <button
         onClick={handleAutoDistribute}
@@ -1042,10 +1075,13 @@ function VScoreConfig() {
         Sie ermöglichen das Auseinanderbrechen der Boards.
       </p>
 
-      {/* Vorhandene V-Scores anzeigen */}
+      {/* Sichtbarkeit + Vorhandene V-Scores anzeigen */}
       {lineCount > 0 && (
         <div className="flex items-center justify-between bg-pink-50 text-pink-700 text-xs px-2 py-1 rounded">
-          <span>{lineCount} V-Score Linie(n)</span>
+          <div className="flex items-center gap-2">
+            <VScoreVisibilityToggle />
+            <span>{lineCount} V-Score Linie(n)</span>
+          </div>
           <button
             onClick={clearAllVScoreLines}
             className="text-red-500 hover:text-red-700"
@@ -1320,10 +1356,13 @@ function RoutingContoursConfig() {
         Fräskonturen definieren den Fräsverlauf um und zwischen den Boards.
       </p>
 
-      {/* Vorhandene Konturen anzeigen */}
+      {/* Sichtbarkeit + Vorhandene Konturen anzeigen */}
       {contourCount > 0 && (
         <div className="flex items-center justify-between bg-cyan-50 text-cyan-700 text-xs px-2 py-1 rounded">
-          <span>{contourCount} Fräskontur(en)</span>
+          <div className="flex items-center gap-2">
+            <RoutingVisibilityToggle />
+            <span>{contourCount} Fräskontur(en)</span>
+          </div>
           <button
             onClick={clearAllRoutingContours}
             className="text-red-500 hover:text-red-700"
@@ -2214,5 +2253,61 @@ function DimensionsInfo() {
         step={0.1}
       />
     </div>
+  );
+}
+
+// ============================================================================
+// Sichtbarkeits-Toggles (Auge ein/aus)
+// ============================================================================
+
+/**
+ * Auge-Button zum Ein-/Ausblenden der V-Score Linien im Canvas.
+ */
+function VScoreVisibilityToggle() {
+  const showVScoreLines = useShowVScoreLines();
+  const toggleVScoreLines = usePanelStore((state) => state.toggleVScoreLines);
+
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        toggleVScoreLines();
+      }}
+      className={cn(
+        'p-0.5 rounded transition-colors',
+        showVScoreLines
+          ? 'text-pink-600 hover:text-pink-800'
+          : 'text-gray-300 hover:text-gray-500'
+      )}
+      title={showVScoreLines ? 'V-Score Linien ausblenden' : 'V-Score Linien einblenden'}
+    >
+      {showVScoreLines ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+    </button>
+  );
+}
+
+/**
+ * Auge-Button zum Ein-/Ausblenden der Fräskonturen im Canvas.
+ */
+function RoutingVisibilityToggle() {
+  const showRoutingContours = useShowRoutingContours();
+  const toggleRoutingContours = usePanelStore((state) => state.toggleRoutingContours);
+
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        toggleRoutingContours();
+      }}
+      className={cn(
+        'p-0.5 rounded transition-colors',
+        showRoutingContours
+          ? 'text-cyan-600 hover:text-cyan-800'
+          : 'text-gray-300 hover:text-gray-500'
+      )}
+      title={showRoutingContours ? 'Fräskonturen ausblenden' : 'Fräskonturen einblenden'}
+    >
+      {showRoutingContours ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+    </button>
   );
 }

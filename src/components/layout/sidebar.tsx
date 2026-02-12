@@ -29,8 +29,9 @@ import {
   Scissors,
   Spline,
   Pencil,
+  RotateCw,
 } from 'lucide-react';
-import { usePanelStore, useBoards, useActiveTool } from '@/stores/panel-store';
+import { usePanelStore, useBoards, useActiveTool, useShowDimensions } from '@/stores/panel-store';
 import { cn } from '@/lib/utils';
 import { getAllLayerTypes, getLayerColor } from '@/lib/gerber';
 import type { Tool, GerberLayerType } from '@/types';
@@ -725,7 +726,11 @@ export function Toolbar() {
         )}
       </div>
 
-      {/* Trennlinie + Tastenkürzel-Hinweis */}
+      {/* Trennlinie + Maße-Button */}
+      <div className="w-px h-6 bg-gray-200 mx-1" />
+      <DimensionToggleButton />
+
+      {/* Tastenkürzel-Hinweis */}
       <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
         <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">ESC</kbd> Abbrechen</span>
         <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">Del</kbd> Löschen</span>
@@ -740,6 +745,58 @@ export function Toolbar() {
           <span><kbd className="px-1 bg-gray-50 rounded border border-gray-200">Doppelklick</kbd> Abschliessen</span>
         )}
       </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Bemaßungs-Overlay Toggle-Button
+// ============================================================================
+
+/**
+ * Button zum Ein-/Ausschalten des Bemaßungs-Overlays im Canvas.
+ * Zeigt ein Lineal-Icon und wird blau hervorgehoben wenn aktiv.
+ */
+function DimensionToggleButton() {
+  const showDimensions = useShowDimensions();
+  const toggleDimensions = usePanelStore((state) => state.toggleDimensions);
+  const showAllDimensionElements = usePanelStore((state) => state.showAllDimensionElements);
+  const hiddenCount = usePanelStore((state) => state.panel.dimensionOverrides?.hiddenElements?.length || 0);
+
+  return (
+    <div className="flex items-center gap-1">
+      <button
+        onClick={toggleDimensions}
+        className={cn(
+          'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium',
+          showDimensions
+            ? 'bg-blue-100 text-blue-700'
+            : 'hover:bg-gray-100 text-gray-600'
+        )}
+        title="Bemaßungs-Overlay ein-/ausblenden"
+      >
+        <div
+          className={cn(
+            'p-1 rounded',
+            showDimensions ? 'bg-blue-200' : 'bg-gray-100'
+          )}
+        >
+          <Ruler className="w-4 h-4" />
+        </div>
+        Maße
+      </button>
+      {/* Reset-Button: zeigt ausgeblendete Maße wieder an */}
+      {showDimensions && hiddenCount > 0 && (
+        <button
+          onClick={showAllDimensionElements}
+          className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium
+                     bg-amber-50 text-amber-700 hover:bg-amber-100 transition-colors"
+          title={`${hiddenCount} ausgeblendete(s) Maß(e) wiederherstellen`}
+        >
+          <RotateCw className="w-3.5 h-3.5" />
+          {hiddenCount}
+        </button>
+      )}
     </div>
   );
 }

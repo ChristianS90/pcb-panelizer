@@ -491,6 +491,8 @@ export interface Panel {
   routingContours: RoutingContour[];
   /** Konfiguration für Fräskonturen-Generierung */
   routingConfig: RoutingConfig;
+  /** Bemaßungs-Überschreibungen (Label-Positionen, Maßlinien-Abstände) */
+  dimensionOverrides?: DimensionOverrides;
   /** Erstellungsdatum */
   createdAt: Date;
   /** Letzte Änderung */
@@ -538,6 +540,57 @@ export interface GridConfig {
   size: number;
   /** Snap to Grid aktiviert */
   snapEnabled: boolean;
+}
+
+// ============================================================================
+// Bemaßungs-Overlay Typen (Canvas + PDF)
+// ============================================================================
+
+/**
+ * Verschiebung eines Labels relativ zur Standard-Position (in mm)
+ * Wird im Canvas per Drag & Drop gesetzt und im PDF-Export verwendet.
+ */
+export interface DimensionLabelOffset {
+  /** Horizontale Verschiebung in mm */
+  dx: number;
+  /** Vertikale Verschiebung in mm */
+  dy: number;
+}
+
+/**
+ * Abstände der Maßlinien zum Panel-Rand (in mm)
+ * Ermöglicht die Anpassung der Positionen der Maßlinien im Canvas und PDF.
+ */
+export interface DimensionLineDistances {
+  /** Gesamtbreite-Maßlinie: Abstand unter dem Panel (default 12.3mm) */
+  totalWidthBottom: number;
+  /** Gesamthöhe-Maßlinie: Abstand rechts vom Panel (default 14.1mm) */
+  totalHeightRight: number;
+  /** Nutzenrand-Maßlinie unten: Abstand unter dem Panel (default 7.8mm) */
+  frameBottom: number;
+  /** Nutzenrand-Maßlinie rechts oben: Abstand rechts vom Panel (default 18.3mm) */
+  frameRightTop: number;
+  /** Nutzenrand-Maßlinie rechts unten: Abstand rechts vom Panel (default 21.9mm) */
+  frameRightBottom: number;
+  /** Board X-Offset Maßlinie: Abstand unter dem Panel (default 10.6mm) */
+  boardOffsetBottom: number;
+  /** Board-Breite nah am Board: Abstand unter dem Board (default 4.9mm) */
+  boardDimNear: number;
+  /** Board Y-Offset Maßlinie: Abstand links vom Panel (default 4.2mm) */
+  boardOffsetLeft: number;
+}
+
+/**
+ * Alle Bemaßungs-Überschreibungen zusammen
+ * Wird im Panel gespeichert und für Canvas-Overlay und PDF-Export verwendet.
+ */
+export interface DimensionOverrides {
+  /** Label-Verschiebungen pro Element (Key = "vscore-{id}", "fiducial-{id}", "toolinghole-{id}") */
+  labelOffsets: Record<string, DimensionLabelOffset>;
+  /** Optionale Überschreibung der Maßlinien-Abstände */
+  dimLineDistances?: DimensionLineDistances;
+  /** Ausgeblendete Bemaßungs-Elemente (Keys wie "dimline-totalWidthBottom", "vscore-{id}", etc.) */
+  hiddenElements?: string[];
 }
 
 // ============================================================================

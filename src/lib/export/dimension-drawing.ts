@@ -12,32 +12,37 @@
  */
 
 import { PDFDocument, PDFPage, PDFFont, PDFImage, rgb, StandardFonts } from 'pdf-lib';
-import type { Panel, BoardInstance, Board, RoutingSegment } from '@/types';
+import type { Panel, BoardInstance, Board, RoutingSegment, DimensionLineDistances } from '@/types';
+import { DEFAULT_DIM_DISTANCES } from '@/stores/panel-store';
 
 // ============================================================================
 // Konstanten für die Zeichnung - A4 Querformat
 // ============================================================================
 
-// A4 Querformat in Punkten (1 Punkt = 1/72 Zoll)
-const PAGE_WIDTH = 841.89;    // A4 quer (297mm)
-const PAGE_HEIGHT = 595.28;   // A4 quer (210mm)
+// Umrechnungsfaktor mm → PDF-Punkte für 1:1 Maßstab
+// 1 Zoll = 25.4 mm, 1 Zoll = 72 PDF-Punkte → 1 mm = 72/25.4 ≈ 2.8346 Punkte
+const MM_TO_PT = 72 / 25.4;
+
+// A4 Querformat in Punkten (1 Punkt = 1/72 Zoll) – Standardwerte, werden dynamisch überschrieben
+let PAGE_WIDTH = 841.89;    // A4 quer (297mm)
+let PAGE_HEIGHT = 595.28;   // A4 quer (210mm)
 
 // Ränder und Abstände
 const MARGIN = 20;                    // Äußerer Rand (ca. 7mm)
 const INNER_MARGIN = 6;              // Abstand innerer Rahmen zum äußeren
 const BORDER_LEFT = MARGIN + INNER_MARGIN;
 const BORDER_BOTTOM = MARGIN + INNER_MARGIN;
-const BORDER_RIGHT = PAGE_WIDTH - MARGIN - INNER_MARGIN;
-const BORDER_TOP = PAGE_HEIGHT - MARGIN - INNER_MARGIN;
+let BORDER_RIGHT = PAGE_WIDTH - MARGIN - INNER_MARGIN;
+let BORDER_TOP = PAGE_HEIGHT - MARGIN - INNER_MARGIN;
 
 // Titelblock-Dimensionen (unten rechts)
 const TITLE_BLOCK_WIDTH = 380;       // ca. 134mm
 const TITLE_BLOCK_HEIGHT = 130;      // ca. 46mm
-const TITLE_BLOCK_X = BORDER_RIGHT - TITLE_BLOCK_WIDTH;
-const TITLE_BLOCK_Y = BORDER_BOTTOM;
+let TITLE_BLOCK_X = BORDER_RIGHT - TITLE_BLOCK_WIDTH;
+let TITLE_BLOCK_Y = BORDER_BOTTOM;
 
-// Zeichnungsbereiche
-const NOTES_AREA = {
+// Zeichnungsbereiche – werden in generateDimensionDrawing() dynamisch neu berechnet
+let NOTES_AREA = {
   x: BORDER_LEFT + 5,
   y: BORDER_TOP - 10,
   width: 280,
@@ -45,7 +50,7 @@ const NOTES_AREA = {
 };
 
 // Panel-Zeichnungsbereich (Hauptbereich in der Mitte)
-const DRAWING_AREA = {
+let DRAWING_AREA = {
   x: BORDER_LEFT + 30,
   y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 30,
   width: BORDER_RIGHT - BORDER_LEFT - 80,
@@ -402,6 +407,98 @@ function drawGerberLayersOnBoard(
 }
 
 // ============================================================================
+// Label-Kollisionsvermeidung: Bounding-Box-Registry
+// ============================================================================
+
+// Bounding-Box eines platzierten Labels (PDF-Koordinaten: Y aufwärts)
+interface LabelRect {
+  x: number;       // Linke Kante
+  bottom: number;  // Untere Kante (kleinster Y-Wert)
+  width: number;   // Breite des Labels
+  height: number;  // Höhe des Labels
+}
+
+// Prüft ob eine Position mit bestehenden Labels kollidiert.
+function hasCollision(
+  registry: LabelRect[],
+  x: number,
+  bottom: number,
+  width: number,
+  height: number,
+  gap: number
+): boolean {
+  const top = bottom + height;
+  for (const placed of registry) {
+    const placedTop = placed.bottom + placed.height;
+    // Horizontale Überlappung?
+    if (x < placed.x + placed.width && x + width > placed.x) {
+      // Vertikale Überlappung (mit Mindestabstand)?
+      if (bottom < placedTop + gap && top > placed.bottom - gap) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Findet eine kollisionsfreie Y-Position für ein neues Label.
+// Versucht BEIDE Richtungen (oben + unten) und wählt die kleinere Verschiebung.
+function resolveOverlap(
+  registry: LabelRect[],
+  x: number,
+  bottom: number,
+  width: number,
+  height: number,
+  gap: number = 3
+): number {
+  // Keine Kollision → Originalposition verwenden
+  if (!hasCollision(registry, x, bottom, width, height, gap)) {
+    return bottom;
+  }
+
+  // --- Nach unten versuchen (kleinere Y-Werte in PDF) ---
+  let downBottom = bottom;
+  for (let i = 0; i < 30; i++) {
+    let moved = false;
+    const downTop = downBottom + height;
+    for (const placed of registry) {
+      const placedTop = placed.bottom + placed.height;
+      if (x < placed.x + placed.width && x + width > placed.x) {
+        if (downBottom < placedTop + gap && downTop > placed.bottom - gap) {
+          downBottom = placed.bottom - height - gap;
+          moved = true;
+          break;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+
+  // --- Nach oben versuchen (größere Y-Werte in PDF) ---
+  let upBottom = bottom;
+  for (let i = 0; i < 30; i++) {
+    let moved = false;
+    const upTop = upBottom + height;
+    for (const placed of registry) {
+      const placedTop = placed.bottom + placed.height;
+      if (x < placed.x + placed.width && x + width > placed.x) {
+        if (upBottom < placedTop + gap && upTop > placed.bottom - gap) {
+          upBottom = placedTop + gap;
+          moved = true;
+          break;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+
+  // Richtung mit kleinerer Verschiebung wählen
+  const downDist = Math.abs(downBottom - bottom);
+  const upDist = Math.abs(upBottom - bottom);
+  return downDist <= upDist ? downBottom : upBottom;
+}
+
+// ============================================================================
 // Hauptfunktion: PDF erstellen
 // ============================================================================
 
@@ -433,27 +530,58 @@ export async function generateDimensionDrawing(
     }
   }
 
-  // Seite hinzufügen (A4 Querformat)
+  // ---- Dynamische Seitengrößen-Berechnung (1:1 Maßstab) ----
+  // Ränder um das Panel für Bemaßungen und Annotationen (in PDF-Punkten)
+  const PANEL_MARGIN_LEFT = 80;    // Platz für Y-Offset-Bemaßungen links
+  const PANEL_MARGIN_RIGHT = 250;  // Platz für Bemaßungen + Detail-Tabelle rechts
+  const PANEL_MARGIN_TOP = 100;    // Platz für Notizen-Bereich oben
+  const PANEL_MARGIN_BOTTOM = 200; // Platz für Titelblock + Bemaßungen unten
+
+  // Panel-Dimensionen in PDF-Punkten (1:1 Maßstab: 1mm = MM_TO_PT Punkte)
+  const panelWidthPt = panel.width * MM_TO_PT;
+  const panelHeightPt = panel.height * MM_TO_PT;
+
+  // Seitengröße dynamisch berechnen (mindestens A4 quer)
+  PAGE_WIDTH = Math.max(841.89, panelWidthPt + PANEL_MARGIN_LEFT + PANEL_MARGIN_RIGHT + 2 * (MARGIN + INNER_MARGIN));
+  PAGE_HEIGHT = Math.max(595.28, panelHeightPt + PANEL_MARGIN_TOP + PANEL_MARGIN_BOTTOM + 2 * (MARGIN + INNER_MARGIN));
+
+  // Alle abgeleiteten Werte neu berechnen
+  BORDER_RIGHT = PAGE_WIDTH - MARGIN - INNER_MARGIN;
+  BORDER_TOP = PAGE_HEIGHT - MARGIN - INNER_MARGIN;
+  TITLE_BLOCK_X = BORDER_RIGHT - TITLE_BLOCK_WIDTH;
+  TITLE_BLOCK_Y = BORDER_BOTTOM;
+  NOTES_AREA = {
+    x: BORDER_LEFT + 5,
+    y: BORDER_TOP - 10,
+    width: 280,
+    height: 85,
+  };
+  DRAWING_AREA = {
+    x: BORDER_LEFT + 30,
+    y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 30,
+    width: BORDER_RIGHT - BORDER_LEFT - 80,
+    height: BORDER_TOP - BORDER_BOTTOM - TITLE_BLOCK_HEIGHT - NOTES_AREA.height - 60,
+  };
+
+  // Seite hinzufügen (dynamische Größe, passt sich an Panel an)
   const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
-  // Skalierung berechnen: Panel auf Zeichnungsfläche einpassen
-  const scaleX = DRAWING_AREA.width / panel.width;
-  const scaleY = DRAWING_AREA.height / panel.height;
-  const scale = Math.min(scaleX, scaleY) * 0.55;
+  // Skalierung: exakt 1:1 Maßstab (1mm Panel = 1mm auf PDF)
+  const scale = MM_TO_PT;
 
-  // Offset für Zentrierung im Zeichnungsbereich (leicht nach links-oben verschoben)
+  // Panel-Positionierung: mittig im verfügbaren Zeichnungsbereich
   const panelWidthPx = panel.width * scale;
   const panelHeightPx = panel.height * scale;
-  const offsetX = DRAWING_AREA.x + (DRAWING_AREA.width - panelWidthPx) / 2 - 20;
-  const offsetY = DRAWING_AREA.y + (DRAWING_AREA.height - panelHeightPx) / 2;
+  const offsetX = BORDER_LEFT + PANEL_MARGIN_LEFT;
+  const offsetY = BORDER_BOTTOM + PANEL_MARGIN_BOTTOM;
 
   // Hilfsfunktion: mm → PDF-Koordinaten
   // toY ist invertiert: Panel Y=0 (oben im Canvas) → PDF oben, Y=panel.height (unten) → PDF unten
   const toX = (mm: number) => offsetX + mm * scale;
   const toY = (mm: number) => offsetY + panelHeightPx - mm * scale;
 
-  // Maßstab berechnen (für Titelblock-Anzeige)
-  const scaleRatio = Math.round(1 / scale * 72 / 25.4);
+  // Maßstab-Anzeige im Titelblock: immer 1:1
+  const scaleRatio = 1;
 
   // ----------------------------------------------------------------
   // 1. Rahmen mit Gitterreferenz-System
@@ -482,7 +610,7 @@ export async function generateDimensionDrawing(
   }
 
   // ----------------------------------------------------------------
-  // 3. Boards einzeichnen (mit sichtbaren Gerber-Layern)
+  // 3. Boards einzeichnen (Umriss + sichtbare Gerber-Layer, ohne Hintergrund/Beschriftung)
   // ----------------------------------------------------------------
   for (const instance of instances) {
     const board = boards.find(b => b.id === instance.boardId);
@@ -492,10 +620,7 @@ export async function generateDimensionDrawing(
     const width = isRotated ? board.height : board.width;
     const height = isRotated ? board.width : board.height;
 
-    // Prüfen ob sichtbare Gerber-Layer vorhanden sind
-    const hasVisibleLayers = board.layers.some(l => l.visible && l.parsedData);
-
-    // Board-Hintergrund: Dunkles PCB-Grün wenn Layer vorhanden, sonst helles Blau
+    // Board-Umriss (blau)
     page.drawRectangle({
       x: toX(instance.position.x),
       y: toY(instance.position.y + height),
@@ -503,40 +628,24 @@ export async function generateDimensionDrawing(
       height: height * scale,
       borderColor: COLORS.blue,
       borderWidth: 0.5,
-      color: hasVisibleLayers ? rgb(0.10, 0.24, 0.10) : rgb(0.93, 0.96, 1),
     });
 
-    // Sichtbare Gerber-Layer rendern (Kupfer, Silkscreen, Outline, etc.)
+    // Sichtbare Gerber-Layer rendern (exakt wie im Canvas)
+    const hasVisibleLayers = board.layers.some(l => l.visible && l.parsedData);
     if (hasVisibleLayers) {
       drawGerberLayersOnBoard(page, board, instance, scale, toX, toY);
     }
-
-    // Board-Umriss nochmal darüber zeichnen (damit er sichtbar bleibt)
-    page.drawRectangle({
-      x: toX(instance.position.x),
-      y: toY(instance.position.y + height),
-      width: width * scale,
-      height: height * scale,
-      borderColor: COLORS.blue,
-      borderWidth: 0.5,
-    });
-
-    // Board-Name in der Mitte
-    const boardNameText = board.name;
-    const boardNameWidth = font.widthOfTextAtSize(boardNameText, 4);
-    page.drawText(boardNameText, {
-      x: toX(instance.position.x) + (width * scale) / 2 - boardNameWidth / 2,
-      y: toY(instance.position.y + height / 2) - 2,
-      size: 4,
-      font: font,
-      color: hasVisibleLayers ? rgb(1, 1, 1) : COLORS.blue,
-    });
   }
 
+  // Label-Offsets und ausgeblendete Elemente aus dem Panel holen
+  const dimLabelOffsets = panel.dimensionOverrides?.labelOffsets || {};
+  const hiddenElements = new Set(panel.dimensionOverrides?.hiddenElements || []);
+
   // ----------------------------------------------------------------
-  // 4. V-Score Linien zeichnen
+  // 4. V-Score Linien zeichnen (mit Labels + Pfeile — exakt wie Canvas)
   // ----------------------------------------------------------------
   for (const vscore of panel.vscoreLines) {
+    const vscoreKey = `vscore-${vscore.id}`;
     const startX = toX(vscore.start.x);
     const startY = toY(vscore.start.y);
     const endX = toX(vscore.end.x);
@@ -549,42 +658,58 @@ export async function generateDimensionDrawing(
       gapLength: 2,
     });
 
+    // Label überspringen wenn ausgeblendet
+    if (hiddenElements.has(vscoreKey)) continue;
+
     const isHorizontal = Math.abs(vscore.end.y - vscore.start.y) < 0.1;
+    const offset = dimLabelOffsets[vscoreKey] || { dx: 0, dy: 0 };
 
     if (isHorizontal) {
+      // Horizontale V-Score: Label rechts vom Panel (exakt wie Canvas)
+      // Canvas-Basis: (panel.width + 1, vscore.start.y) in mm
+      const labelXmm = panel.width + 1 + offset.dx;
+      const labelYmm = vscore.start.y + offset.dy;
+      const labelPdfX = toX(labelXmm);
+      const labelPdfY = toY(labelYmm);
+
       const posLabel = `Y=${vscore.start.y.toFixed(1)}`;
       const detailLabel = `${vscore.depth}% / ${vscore.angle}°`;
-      page.drawText(posLabel, {
-        x: endX + 3,
-        y: endY + 2,
-        size: 4,
-        font: font,
-        color: COLORS.pink,
-      });
-      page.drawText(detailLabel, {
-        x: endX + 3,
-        y: endY - 4,
-        size: 3.5,
-        font: font,
-        color: COLORS.pink,
-      });
+      // posText im Canvas bei (0, -5px) → -1.25mm → höher im PDF
+      page.drawText(posLabel, { x: labelPdfX, y: labelPdfY + 1.25 * MM_TO_PT, size: 4, font, color: COLORS.pink });
+      page.drawText(detailLabel, { x: labelPdfX, y: labelPdfY - 1.25 * MM_TO_PT - 3.5, size: 3.5, font, color: COLORS.pink });
+
+      // Pfeil vom Label zum V-Score (Ziel: rechter Panel-Rand auf V-Score-Y)
+      const posLabelW = font.widthOfTextAtSize(posLabel, 4);
+      const detailLabelW = font.widthOfTextAtSize(detailLabel, 3.5);
+      const blockW = Math.max(posLabelW, detailLabelW);
+      const blockH = 2.5 * MM_TO_PT + 3.5 + 4;
+      drawPdfArrowToTarget(page,
+        { x: labelPdfX, y: labelPdfY - 1.25 * MM_TO_PT - 3.5, width: blockW, height: blockH },
+        toX(panel.width), toY(vscore.start.y), COLORS.pink
+      );
     } else {
+      // Vertikale V-Score: Label unter dem Panel (exakt wie Canvas)
+      // Canvas-Basis: (vscore.start.x, panel.height + 1) in mm
+      const labelXmm = vscore.start.x + offset.dx;
+      const labelYmm = panel.height + 1 + offset.dy;
+      const labelPdfX = toX(labelXmm);
+      const labelPdfY = toY(labelYmm);
+
       const posLabel = `X=${vscore.start.x.toFixed(1)}`;
       const detailLabel = `${vscore.depth}% / ${vscore.angle}°`;
-      page.drawText(posLabel, {
-        x: startX - 3,
-        y: endY + 3,
-        size: 4,
-        font: font,
-        color: COLORS.pink,
-      });
-      page.drawText(detailLabel, {
-        x: startX - 3,
-        y: endY + 10,
-        size: 3.5,
-        font: font,
-        color: COLORS.pink,
-      });
+      const posLabelW = font.widthOfTextAtSize(posLabel, 4);
+      const detailLabelW = font.widthOfTextAtSize(detailLabel, 3.5);
+      // Canvas: anchor (0.5, 0) → Text zentriert, nach unten
+      page.drawText(posLabel, { x: labelPdfX - posLabelW / 2, y: labelPdfY, size: 4, font, color: COLORS.pink });
+      page.drawText(detailLabel, { x: labelPdfX - detailLabelW / 2, y: labelPdfY - 2.5 * MM_TO_PT, size: 3.5, font, color: COLORS.pink });
+
+      // Pfeil vom Label zum V-Score (Ziel: unterer Panel-Rand auf V-Score-X)
+      const blockW = Math.max(posLabelW, detailLabelW);
+      const blockH = 2.5 * MM_TO_PT + 3.5 + 4;
+      drawPdfArrowToTarget(page,
+        { x: labelPdfX - blockW / 2, y: labelPdfY - blockH, width: blockW, height: blockH },
+        toX(vscore.start.x), toY(panel.height), COLORS.pink
+      );
     }
   }
 
@@ -693,23 +818,39 @@ export async function generateDimensionDrawing(
       color: COLORS.green,
     });
 
-    // Koordinaten + Durchmesser in einer Zeile
+    // Label überspringen wenn ausgeblendet
+    const fidKey = `fiducial-${fiducial.id}`;
+    if (hiddenElements.has(fidKey)) {
+      // Hilfslinien trotzdem zeichnen
+      drawDashedLine(page, toX(0), y, x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+      drawDashedLine(page, x, toY(0), x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+      continue;
+    }
+
+    // Label-Position exakt wie Canvas: (fid.x + maskRadius_mm + 1 + offset.dx, fid.y + offset.dy)
+    const maskRadius = fiducial.maskDiameter / 2;
+    const fidOffset = dimLabelOffsets[fidKey] || { dx: 0, dy: 0 };
+    const labelXmm = fiducial.position.x + maskRadius + 1 + fidOffset.dx;
+    const labelYmm = fiducial.position.y + fidOffset.dy;
+    const labelPdfX = toX(labelXmm);
+    const labelPdfY = toY(labelYmm);
+
     const fidLabel = `FID (${fiducial.position.x.toFixed(1)}/${fiducial.position.y.toFixed(1)}) Ø${fiducial.padDiameter}/${fiducial.maskDiameter}`;
-    page.drawText(fidLabel, {
-      x: x + radius + 3,
-      y: y - 1,
-      size: 3.5,
-      font: font,
-      color: COLORS.green,
-    });
+    const fidLabelW = font.widthOfTextAtSize(fidLabel, 3.5);
+    const fidLabelH = 3.5;
+
+    // Canvas: anchor (0, 0.5) → linksbündig, vertikal zentriert
+    page.drawText(fidLabel, { x: labelPdfX, y: labelPdfY - fidLabelH / 2, size: 3.5, font, color: COLORS.green });
+
+    // Pfeil vom Label zum Fiducial-Mittelpunkt
+    drawPdfArrowToTarget(page,
+      { x: labelPdfX, y: labelPdfY - fidLabelH / 2, width: fidLabelW, height: fidLabelH },
+      x, y, COLORS.green
+    );
 
     // Hilfslinien zum Panel-Rand
-    drawDashedLine(page, toX(0), y, x, y, {
-      color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2,
-    });
-    drawDashedLine(page, x, toY(0), x, y, {
-      color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2,
-    });
+    drawDashedLine(page, toX(0), y, x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+    drawDashedLine(page, x, toY(0), x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
   }
 
   // ----------------------------------------------------------------
@@ -731,76 +872,173 @@ export async function generateDimensionDrawing(
     page.drawLine({ start: { x: x - radius, y }, end: { x: x + radius, y }, color: COLORS.red, thickness: 0.3 });
     page.drawLine({ start: { x, y: y - radius }, end: { x, y: y + radius }, color: COLORS.red, thickness: 0.3 });
 
+    // Label überspringen wenn ausgeblendet
+    const holeKey = `toolinghole-${hole.id}`;
+    if (hiddenElements.has(holeKey)) {
+      drawDashedLine(page, toX(0), y, x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+      drawDashedLine(page, x, toY(0), x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+      continue;
+    }
+
+    // Label-Position exakt wie Canvas: (hole.x + radius_mm + 1 + offset.dx, hole.y + offset.dy)
+    const holeRadiusMm = hole.diameter / 2;
+    const holeOffset = dimLabelOffsets[holeKey] || { dx: 0, dy: 0 };
+    const holeLabelXmm = hole.position.x + holeRadiusMm + 1 + holeOffset.dx;
+    const holeLabelYmm = hole.position.y + holeOffset.dy;
+    const holeLabelPdfX = toX(holeLabelXmm);
+    const holeLabelPdfY = toY(holeLabelYmm);
+
     const holeType = hole.plated ? 'PTH' : 'NPTH';
     const holeLabel = `Ø${hole.diameter.toFixed(1)} ${holeType} (${hole.position.x.toFixed(1)}/${hole.position.y.toFixed(1)})`;
-    page.drawText(holeLabel, {
-      x: x + radius + 3,
-      y: y - 1,
-      size: 3.5,
-      font: font,
-      color: COLORS.red,
-    });
+    const holeLabelW = font.widthOfTextAtSize(holeLabel, 3.5);
+    const holeLabelH = 3.5;
+
+    // Canvas: anchor (0, 0.5) → linksbündig, vertikal zentriert
+    page.drawText(holeLabel, { x: holeLabelPdfX, y: holeLabelPdfY - holeLabelH / 2, size: 3.5, font, color: COLORS.red });
+
+    // Pfeil vom Label zum Tooling-Hole-Mittelpunkt
+    drawPdfArrowToTarget(page,
+      { x: holeLabelPdfX, y: holeLabelPdfY - holeLabelH / 2, width: holeLabelW, height: holeLabelH },
+      x, y, COLORS.red
+    );
 
     // Hilfslinien
-    drawDashedLine(page, toX(0), y, x, y, {
-      color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2,
-    });
-    drawDashedLine(page, x, toY(0), x, y, {
-      color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2,
-    });
+    drawDashedLine(page, toX(0), y, x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
+    drawDashedLine(page, x, toY(0), x, y, { color: COLORS.dimGray, thickness: 0.2, dashLength: 2, gapLength: 2 });
   }
 
   // ----------------------------------------------------------------
-  // 8. Bemaßungen: Gesamt (Ebene 4 – ganz außen)
+  // 7b. Fräskontur-Labels (Cyan=Board, Orange=Panel) — exakt wie Canvas
   // ----------------------------------------------------------------
-  drawDimension(page, font, {
-    x1: toX(0), y1: toY(panel.height) - 22,
-    x2: toX(panel.width), y2: toY(panel.height) - 22,
-    text: `${panel.width.toFixed(1)} mm`,
-    color: COLORS.black,
-  });
+  for (const contour of panel.routingContours) {
+    // Nur sichtbare, nicht-Sync-Kopien beschriften
+    if (!contour.visible) continue;
+    if (contour.isSyncCopy) continue;
 
-  drawDimensionVertical(page, font, {
-    x1: toX(panel.width) + 18, y1: toY(0),
-    x2: toX(panel.width) + 18, y2: toY(panel.height),
-    text: `${panel.height.toFixed(1)} mm`,
-    color: COLORS.black,
-  });
+    const routeKey = `routing-${contour.id}`;
+    if (hiddenElements.has(routeKey)) continue;
+
+    const segments = contour.segments;
+    if (segments.length === 0) continue;
+
+    // Farbe je nach Kontur-Typ
+    const routeColor = contour.contourType === 'boardOutline'
+      ? COLORS.routingCyan : COLORS.routingOrange;
+
+    // Mittelpunkt der Kontur berechnen (exakt wie Canvas)
+    const midSegIdx = Math.floor(segments.length / 2);
+    const midSeg = segments[midSegIdx];
+    let targetMmX: number, targetMmY: number;
+    if (midSeg.arc) {
+      const midAngle = (midSeg.arc.startAngle + midSeg.arc.endAngle) / 2;
+      targetMmX = midSeg.arc.center.x + Math.cos(midAngle) * midSeg.arc.radius;
+      targetMmY = midSeg.arc.center.y + Math.sin(midAngle) * midSeg.arc.radius;
+    } else {
+      targetMmX = (midSeg.start.x + midSeg.end.x) / 2;
+      targetMmY = (midSeg.start.y + midSeg.end.y) / 2;
+    }
+
+    // Label-Position: 3mm nach rechts vom Mittelpunkt + Offset
+    const routeOffset = dimLabelOffsets[routeKey] || { dx: 0, dy: 0 };
+    const routeLabelXmm = targetMmX + 3 + routeOffset.dx;
+    const routeLabelYmm = targetMmY + routeOffset.dy;
+    const routeLabelPdfX = toX(routeLabelXmm);
+    const routeLabelPdfY = toY(routeLabelYmm);
+
+    // Label-Text: Typ + Fräser-Durchmesser
+    const routeTypeLabel = contour.contourType === 'boardOutline' ? 'Board' : 'Panel';
+    const routeLabel = `${routeTypeLabel} Ø${contour.toolDiameter.toFixed(1)}`;
+    const routeLabelW = font.widthOfTextAtSize(routeLabel, 3.5);
+    const routeLabelH = 3.5;
+
+    // Canvas: anchor (0, 0.5) → linksbündig, vertikal zentriert
+    page.drawText(routeLabel, {
+      x: routeLabelPdfX,
+      y: routeLabelPdfY - routeLabelH / 2,
+      size: 3.5,
+      font,
+      color: routeColor,
+    });
+
+    // Pfeil vom Label zum Kontur-Mittelpunkt
+    drawPdfArrowToTarget(page,
+      { x: routeLabelPdfX, y: routeLabelPdfY - routeLabelH / 2, width: routeLabelW, height: routeLabelH },
+      toX(targetMmX), toY(targetMmY), routeColor
+    );
+  }
 
   // ----------------------------------------------------------------
-  // 9. Bemaßungen: Nutzenrand (alle 4 Seiten) – Ebene 2
+  // 8. Bemaßungen — exakt wie im Canvas positioniert
   // ----------------------------------------------------------------
-  if (panel.frame.left > 0) {
+  // Maßlinien-Abstände aus Panel-Overrides oder Defaults verwenden
+  const dimDist = panel.dimensionOverrides?.dimLineDistances || DEFAULT_DIM_DISTANCES;
+
+  // Objekt-Kanten für Verlängerungslinien (in PDF-Koordinaten)
+  const panelBottomPdf = toY(panel.height);  // Panel-Unterkante
+  const panelRightPdf = toX(panel.width);    // Panel-Rechtskante
+  const panelTopPdf = toY(0);               // Panel-Oberkante
+  const panelLeftPdf = toX(0);              // Panel-Linkskante
+
+  // Gesamtbreite (unter dem Panel) — exakt wie Canvas: y = panel.height + dist
+  if (!hiddenElements.has('dimline-totalWidthBottom')) {
+    const dimY = toY(panel.height + dimDist.totalWidthBottom);
     drawDimension(page, font, {
-      x1: toX(0), y1: toY(0) + 18,
-      x2: toX(panel.frame.left), y2: toY(0) + 18,
-      text: `${panel.frame.left.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
+      x1: toX(0), y1: dimY, x2: toX(panel.width), y2: dimY,
+      text: `${panel.width.toFixed(1)} mm`, color: COLORS.black,
+      objectEdge: panelBottomPdf,
     });
   }
-  if (panel.frame.right > 0) {
-    drawDimension(page, font, {
-      x1: toX(panel.width - panel.frame.right), y1: toY(0) + 18,
-      x2: toX(panel.width), y2: toY(0) + 18,
-      text: `${panel.frame.right.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
-    });
-  }
-  if (panel.frame.top > 0) {
+
+  // Gesamthöhe (rechts vom Panel) — exakt wie Canvas: x = panel.width + dist
+  if (!hiddenElements.has('dimline-totalHeightRight')) {
+    const dimX = toX(panel.width + dimDist.totalHeightRight);
     drawDimensionVertical(page, font, {
-      x1: toX(panel.width) + 28, y1: toY(panel.frame.top),
-      x2: toX(panel.width) + 28, y2: toY(0),
+      x1: dimX, y1: toY(panel.height), x2: dimX, y2: toY(0),
+      text: `${panel.height.toFixed(1)} mm`, color: COLORS.black,
+      objectEdge: panelRightPdf,
+    });
+  }
+
+  // ----------------------------------------------------------------
+  // 9. Nutzenrand — exakt wie Canvas positioniert
+  // ----------------------------------------------------------------
+  if (!hiddenElements.has('dimline-frameBottom')) {
+    if (panel.frame.left > 0) {
+      const dimY = toY(panel.height + dimDist.frameBottom);
+      drawDimension(page, font, {
+        x1: toX(0), y1: dimY, x2: toX(panel.frame.left), y2: dimY,
+        text: `${panel.frame.left.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
+        objectEdge: panelBottomPdf,
+      });
+    }
+    if (panel.frame.right > 0) {
+      const dimY = toY(panel.height + dimDist.frameBottom);
+      drawDimension(page, font, {
+        x1: toX(panel.width - panel.frame.right), y1: dimY, x2: toX(panel.width), y2: dimY,
+        text: `${panel.frame.right.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
+        objectEdge: panelBottomPdf,
+      });
+    }
+  }
+  if (!hiddenElements.has('dimline-frameRightTop') && panel.frame.top > 0) {
+    const dimX = toX(panel.width + dimDist.frameRightTop);
+    drawDimensionVertical(page, font, {
+      x1: dimX, y1: toY(panel.frame.top), x2: dimX, y2: toY(0),
       text: `${panel.frame.top.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
+      objectEdge: panelRightPdf,
     });
   }
-  if (panel.frame.bottom > 0) {
+  if (!hiddenElements.has('dimline-frameRightBottom') && panel.frame.bottom > 0) {
+    const dimX = toX(panel.width + dimDist.frameRightBottom);
     drawDimensionVertical(page, font, {
-      x1: toX(panel.width) + 38, y1: toY(panel.height),
-      x2: toX(panel.width) + 38, y2: toY(panel.height - panel.frame.bottom),
+      x1: dimX, y1: toY(panel.height), x2: dimX, y2: toY(panel.height - panel.frame.bottom),
       text: `${panel.frame.bottom.toFixed(1)}`, color: COLORS.gray, fontSize: 4.5,
+      objectEdge: panelRightPdf,
     });
   }
 
   // ----------------------------------------------------------------
-  // 10. Bemaßungen: Board-Positionen und Gaps
+  // 10. Board-Positionen und Gaps — exakt wie Canvas positioniert
   // ----------------------------------------------------------------
   if (instances.length > 0) {
     const firstInstance = instances[0];
@@ -811,34 +1049,53 @@ export async function generateDimensionDrawing(
       const boardW = isRotated ? firstBoard.height : firstBoard.width;
       const boardH = isRotated ? firstBoard.width : firstBoard.height;
 
-      if (firstInstance.position.x > 0.1) {
+      // Objekt-Kanten für Board-Maßlinien
+      const boardBottomPdf = toY(firstInstance.position.y + boardH);
+      const boardLeftPdf = toX(firstInstance.position.x);
+
+      // Board X-Offset (unter dem Panel) — Canvas: y = panel.height + dist.boardOffsetBottom
+      if (!hiddenElements.has('dimline-boardOffsetBottom') && firstInstance.position.x > 0.1) {
+        const dimY = toY(panel.height + dimDist.boardOffsetBottom);
         drawDimension(page, font, {
-          x1: toX(0), y1: toY(0) + 30,
-          x2: toX(firstInstance.position.x), y2: toY(0) + 30,
+          x1: toX(0), y1: dimY, x2: toX(firstInstance.position.x), y2: dimY,
           text: `${firstInstance.position.x.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
+          objectEdge: panelBottomPdf,
         });
       }
-      if (firstInstance.position.y > 0.1) {
+
+      // Board Y-Offset (links vom Panel) — Canvas: x = -dist.boardOffsetLeft
+      if (!hiddenElements.has('dimline-boardOffsetLeft') && firstInstance.position.y > 0.1) {
+        const dimX = toX(-dimDist.boardOffsetLeft);
         drawDimensionVertical(page, font, {
-          x1: toX(0) - 12, y1: toY(0),
-          x2: toX(0) - 12, y2: toY(firstInstance.position.y),
+          x1: dimX, y1: toY(0), x2: dimX, y2: toY(firstInstance.position.y),
           text: `${firstInstance.position.y.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
+          objectEdge: panelLeftPdf,
         });
       }
 
-      // Board-Breite/Höhe – Ebene 1 (nah am Panel)
-      drawDimension(page, font, {
-        x1: toX(firstInstance.position.x), y1: toY(firstInstance.position.y) + 14,
-        x2: toX(firstInstance.position.x + boardW), y2: toY(firstInstance.position.y) + 14,
-        text: `${boardW.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
-      });
-      drawDimensionVertical(page, font, {
-        x1: toX(firstInstance.position.x) - 8, y1: toY(firstInstance.position.y),
-        x2: toX(firstInstance.position.x) - 8, y2: toY(firstInstance.position.y + boardH),
-        text: `${boardH.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
-      });
+      // Board-Breite — Canvas: y = firstInst.y + boardH + dist.boardDimNear
+      const boardDimY = toY(firstInstance.position.y + boardH + dimDist.boardDimNear);
+      if (!hiddenElements.has('dimline-boardDimNearH')) {
+        drawDimension(page, font, {
+          x1: toX(firstInstance.position.x), y1: boardDimY,
+          x2: toX(firstInstance.position.x + boardW), y2: boardDimY,
+          text: `${boardW.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
+          objectEdge: boardBottomPdf,
+        });
+      }
 
-      // Gaps zwischen Boards
+      // Board-Höhe — Canvas: x = firstInst.x - dist.boardDimNear
+      const boardDimX = toX(firstInstance.position.x - dimDist.boardDimNear);
+      if (!hiddenElements.has('dimline-boardDimNearV')) {
+        drawDimensionVertical(page, font, {
+          x1: boardDimX, y1: toY(firstInstance.position.y),
+          x2: boardDimX, y2: toY(firstInstance.position.y + boardH),
+          text: `${boardH.toFixed(1)}`, color: COLORS.blue, fontSize: 4.5,
+          objectEdge: boardLeftPdf,
+        });
+      }
+
+      // Gaps zwischen Boards (gleiche Ebene wie Board-Maße)
       if (instances.length > 1) {
         const sortedByX = [...instances].sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
         for (let i = 1; i < sortedByX.length; i++) {
@@ -851,9 +1108,10 @@ export async function generateDimensionDrawing(
           const gapX = currInst.position.x - (prevInst.position.x + prevW);
           if (gapX > 0.1 && Math.abs(currInst.position.y - prevInst.position.y) < 0.1) {
             drawDimension(page, font, {
-              x1: toX(prevInst.position.x + prevW), y1: toY(prevInst.position.y) + 14,
-              x2: toX(currInst.position.x), y2: toY(currInst.position.y) + 14,
+              x1: toX(prevInst.position.x + prevW), y1: boardDimY,
+              x2: toX(currInst.position.x), y2: boardDimY,
               text: `${gapX.toFixed(1)}`, color: COLORS.dimGray, fontSize: 4.5,
+              objectEdge: boardBottomPdf,
             });
             break;
           }
@@ -870,9 +1128,10 @@ export async function generateDimensionDrawing(
           const gapY = currInst.position.y - (prevInst.position.y + prevH);
           if (gapY > 0.1 && Math.abs(currInst.position.x - prevInst.position.x) < 0.1) {
             drawDimensionVertical(page, font, {
-              x1: toX(prevInst.position.x) - 8, y1: toY(prevInst.position.y + prevH),
-              x2: toX(currInst.position.x) - 8, y2: toY(currInst.position.y),
+              x1: boardDimX, y1: toY(prevInst.position.y + prevH),
+              x2: boardDimX, y2: toY(currInst.position.y),
               text: `${gapY.toFixed(1)}`, color: COLORS.dimGray, fontSize: 4.5,
+              objectEdge: boardLeftPdf,
             });
             break;
           }
@@ -881,35 +1140,8 @@ export async function generateDimensionDrawing(
     }
   }
 
-  // ----------------------------------------------------------------
-  // 11. Detail-Tabelle (rechts neben dem Panel)
-  // ----------------------------------------------------------------
-  drawDetailTable(page, font, fontBold, panel, boards, instances, {
-    x: toX(panel.width) + 48,
-    y: DRAWING_AREA.y + DRAWING_AREA.height - 10,
-  });
-
-  // ----------------------------------------------------------------
-  // 12. Notizen-Bereich (oben links)
-  // ----------------------------------------------------------------
-  drawNotesArea(page, font, fontBold, panel, options);
-
-  // ----------------------------------------------------------------
-  // 13. Element-Beschreibungen am Panel
-  // ----------------------------------------------------------------
-  drawElementDescriptions(page, font, fontBold, panel, toX, toY, scale, options);
-
-  // ----------------------------------------------------------------
-  // 14. V-Score Detail-Ansicht (unten Mitte)
-  // ----------------------------------------------------------------
-  if (panel.vscoreLines.length > 0) {
-    drawVScoreDetail(page, font, fontBold, panel, options);
-  }
-
-  // ----------------------------------------------------------------
-  // 15. PCB-Dicken-Tabelle (unten links)
-  // ----------------------------------------------------------------
-  drawPcbThicknessTable(page, font, fontBold, panel, options);
+  // (Detail-Tabelle, Notizen, Element-Beschreibungen, V-Score-Detail, PCB-Dicken-Tabelle
+  //  werden NICHT gerendert — nur was im Canvas sichtbar ist)
 
   // ----------------------------------------------------------------
   // 16. ISO-Titelblock (unten rechts) mit Logo
@@ -954,11 +1186,11 @@ function drawBorderWithGrid(
     borderWidth: 0.5,
   });
 
-  // Gitterreferenz: Spalten (Zahlen 1-6 oben und unten)
+  // Gitterreferenz: Spalten und Reihen dynamisch an Seitengröße anpassen
   const innerWidth = BORDER_RIGHT - BORDER_LEFT;
   const innerHeight = BORDER_TOP - BORDER_BOTTOM;
-  const numCols = 6;
-  const numRows = 3;
+  const numCols = Math.max(6, Math.ceil(PAGE_WIDTH / 130));
+  const numRows = Math.max(3, Math.ceil(PAGE_HEIGHT / 200));
   const colWidth = innerWidth / numCols;
   const rowHeight = innerHeight / numRows;
 
@@ -1206,7 +1438,10 @@ function drawTitleBlockISO(
   page.drawText(options.client || '', { x: x + 30, y: row2Y - 9, size: 5, font: fontBold, color: COLORS.black });
 
   page.drawText('Format:', { x: x + 2, y: row2Y - 19, size: 4.5, font, color: COLORS.gray });
-  page.drawText('A4', { x: x + 30, y: row2Y - 19, size: 5, font: fontBold, color: COLORS.black });
+  // Dynamisches Format: A4 wenn Standardgröße, sonst mm-Angabe
+  const formatLabel = (PAGE_WIDTH <= 842 && PAGE_HEIGHT <= 596) ? 'A4' :
+    `${Math.round(PAGE_WIDTH / MM_TO_PT)}×${Math.round(PAGE_HEIGHT / MM_TO_PT)} mm`;
+  page.drawText(formatLabel, { x: x + 30, y: row2Y - 19, size: 5, font: fontBold, color: COLORS.black });
 
   page.drawText('Scale:', { x: x + 2, y: row2Y - 29, size: 4.5, font, color: COLORS.gray });
   page.drawText(`1:${scaleRatio}`, { x: x + 30, y: row2Y - 29, size: 5, font: fontBold, color: COLORS.black });
@@ -2007,75 +2242,158 @@ interface DimensionParams {
   text: string;
   color: ReturnType<typeof rgb>;
   fontSize?: number;
+  objectEdge?: number; // Y für horizontal, X für vertikal — Objekt-Kante für Verlängerungslinien
 }
 
+// Konstanten für Bemaßungen (identisch zu Canvas-Werten in mm)
+const DIM_TICK_SIZE = 1.5 * MM_TO_PT;     // Endstriche: 1.5mm
+const DIM_EXT_OVERRUN = 1.5 * MM_TO_PT;   // Verlängerungslinie: 1.5mm Überstand
+const DIM_TEXT_OFFSET_H = 2 * MM_TO_PT;   // Text-Abstand horizontal: 2mm über der Linie
+const DIM_TEXT_OFFSET_V = 3 * MM_TO_PT;   // Text-Abstand vertikal: 3mm neben der Linie
+
 /**
- * Zeichnet eine horizontale Bemaßung mit Maßlinie, Endstrichen und Text
+ * Zeichnet eine horizontale Bemaßung — exakt wie im Canvas:
+ * Verlängerungslinien vom Objekt, Maßlinie, Endstriche, Text ÜBER der Linie
  */
 function drawDimension(
   page: PDFPage,
   font: PDFFont,
   params: DimensionParams
 ) {
-  const { x1, y1, x2, text, color, fontSize = 6 } = params;
+  const { x1, y1, x2, text, color, fontSize = 6, objectEdge } = params;
   const y = y1;
 
-  if (Math.abs(x2 - x1) < 3) return;
+  if (Math.abs(x2 - x1) < 2) return;
 
-  // Maßlinie
-  page.drawLine({
-    start: { x: x1, y }, end: { x: x2, y },
-    color, thickness: 0.5,
-  });
+  // Verlängerungslinien vom Objekt bis über die Maßlinie hinaus
+  if (objectEdge !== undefined) {
+    const overDir = y < objectEdge ? -DIM_EXT_OVERRUN : DIM_EXT_OVERRUN;
+    page.drawLine({ start: { x: x1, y: objectEdge }, end: { x: x1, y: y + overDir }, color, thickness: 0.3 });
+    page.drawLine({ start: { x: x2, y: objectEdge }, end: { x: x2, y: y + overDir }, color, thickness: 0.3 });
+  }
 
-  // Endstriche
-  page.drawLine({ start: { x: x1, y: y - 3 }, end: { x: x1, y: y + 3 }, color, thickness: 0.5 });
-  page.drawLine({ start: { x: x2, y: y - 3 }, end: { x: x2, y: y + 3 }, color, thickness: 0.5 });
+  // Maßlinie (durchgehend)
+  page.drawLine({ start: { x: x1, y }, end: { x: x2, y }, color, thickness: 0.5 });
 
-  // Hilfslinien
-  page.drawLine({ start: { x: x1, y: y + 3 }, end: { x: x1, y: y + 15 }, color: rgb(0.7, 0.7, 0.7), thickness: 0.3 });
-  page.drawLine({ start: { x: x2, y: y + 3 }, end: { x: x2, y: y + 15 }, color: rgb(0.7, 0.7, 0.7), thickness: 0.3 });
+  // Endstriche (vertikal)
+  page.drawLine({ start: { x: x1, y: y - DIM_TICK_SIZE / 2 }, end: { x: x1, y: y + DIM_TICK_SIZE / 2 }, color, thickness: 0.5 });
+  page.drawLine({ start: { x: x2, y: y - DIM_TICK_SIZE / 2 }, end: { x: x2, y: y + DIM_TICK_SIZE / 2 }, color, thickness: 0.5 });
 
-  // Text
+  // Text ÜBER der Linie (wie im Canvas)
   const textWidth = font.widthOfTextAtSize(text, fontSize);
   const midX = (x1 + x2) / 2 - textWidth / 2;
 
+  // Richtung "über" bestimmen: weg vom Objekt (oder Standard: nach oben im PDF)
+  const textAboveDir = objectEdge !== undefined ? (y < objectEdge ? -1 : 1) : 1;
+  const textY = textAboveDir > 0 ? y + DIM_TEXT_OFFSET_H : y - DIM_TEXT_OFFSET_H - fontSize;
+
   if (Math.abs(x2 - x1) > textWidth + 4) {
-    page.drawText(text, {
-      x: midX, y: y - fontSize - 2,
-      size: fontSize, font, color,
-    });
+    page.drawText(text, { x: midX, y: textY, size: fontSize, font, color });
   } else {
-    page.drawText(text, {
-      x: x2 + 2, y: y - 3,
-      size: fontSize - 1, font, color,
-    });
+    page.drawText(text, { x: x2 + 2, y: y - 3, size: fontSize - 1, font, color });
   }
 }
 
 /**
- * Zeichnet eine vertikale Bemaßung mit Maßlinie, Endstrichen und Text
+ * Zeichnet eine vertikale Bemaßung — exakt wie im Canvas:
+ * Verlängerungslinien vom Objekt, Maßlinie, Endstriche, Text RECHTS NEBEN der Linie
  */
 function drawDimensionVertical(
   page: PDFPage,
   font: PDFFont,
   params: DimensionParams
 ) {
-  const { x1, y1, y2, text, color, fontSize = 6 } = params;
+  const { x1, y1, y2, text, color, fontSize = 6, objectEdge } = params;
   const x = x1;
 
-  if (Math.abs(y2 - y1) < 3) return;
+  if (Math.abs(y2 - y1) < 2) return;
 
+  // Verlängerungslinien vom Objekt bis über die Maßlinie hinaus
+  if (objectEdge !== undefined) {
+    const overDir = x > objectEdge ? DIM_EXT_OVERRUN : -DIM_EXT_OVERRUN;
+    page.drawLine({ start: { x: objectEdge, y: y1 }, end: { x: x + overDir, y: y1 }, color, thickness: 0.3 });
+    page.drawLine({ start: { x: objectEdge, y: y2 }, end: { x: x + overDir, y: y2 }, color, thickness: 0.3 });
+  }
+
+  // Maßlinie (durchgehend)
   page.drawLine({ start: { x, y: y1 }, end: { x, y: y2 }, color, thickness: 0.5 });
-  page.drawLine({ start: { x: x - 3, y: y1 }, end: { x: x + 3, y: y1 }, color, thickness: 0.5 });
-  page.drawLine({ start: { x: x - 3, y: y2 }, end: { x: x + 3, y: y2 }, color, thickness: 0.5 });
-  page.drawLine({ start: { x: x - 15, y: y1 }, end: { x: x - 3, y: y1 }, color: rgb(0.7, 0.7, 0.7), thickness: 0.3 });
-  page.drawLine({ start: { x: x - 15, y: y2 }, end: { x: x - 3, y: y2 }, color: rgb(0.7, 0.7, 0.7), thickness: 0.3 });
+
+  // Endstriche (horizontal)
+  page.drawLine({ start: { x: x - DIM_TICK_SIZE / 2, y: y1 }, end: { x: x + DIM_TICK_SIZE / 2, y: y1 }, color, thickness: 0.5 });
+  page.drawLine({ start: { x: x - DIM_TICK_SIZE / 2, y: y2 }, end: { x: x + DIM_TICK_SIZE / 2, y: y2 }, color, thickness: 0.5 });
+
+  // Text RECHTS NEBEN der Linie (wie im Canvas)
+  const textXDir = objectEdge !== undefined ? (x > objectEdge ? 1 : -1) : 1;
+  const textX = textXDir > 0 ? x + DIM_TEXT_OFFSET_V : x - DIM_TEXT_OFFSET_V - font.widthOfTextAtSize(text, fontSize);
 
   page.drawText(text, {
-    x: x + 5, y: (y1 + y2) / 2 - 3,
+    x: textX, y: (y1 + y2) / 2 - fontSize / 2,
     size: fontSize, font, color,
   });
+}
+
+/**
+ * Zeichnet einen Pfeil vom nächsten Punkt der Text-Box zum Zielobjekt (wie im Canvas).
+ * Benutzt Ray-Box-Intersection für kürzesten Weg.
+ */
+function drawPdfArrowToTarget(
+  page: PDFPage,
+  textBox: { x: number; y: number; width: number; height: number }, // PDF-Koordinaten (x,y = bottom-left)
+  toX: number, toY: number,
+  color: ReturnType<typeof rgb>,
+  minDist: number = 5
+): void {
+  const cx = textBox.x + textBox.width / 2;
+  const cy = textBox.y + textBox.height / 2;
+  const dirX = toX - cx;
+  const dirY = toY - cy;
+  const dist = Math.sqrt(dirX * dirX + dirY * dirY);
+  if (dist < minDist) return;
+
+  const halfW = textBox.width / 2;
+  const halfH = textBox.height / 2;
+
+  let fromX: number, fromY: number;
+  if (halfW < 0.1 && halfH < 0.1) {
+    fromX = cx; fromY = cy;
+  } else if (halfW < 0.1) {
+    fromX = cx;
+    fromY = dirY > 0 ? cy + halfH : cy - halfH;
+  } else if (halfH < 0.1) {
+    fromX = dirX > 0 ? cx + halfW : cx - halfW;
+    fromY = cy;
+  } else {
+    const tX = halfW / Math.abs(dirX);
+    const tY = halfH / Math.abs(dirY);
+    if (tX < tY) {
+      fromX = cx + Math.sign(dirX) * halfW;
+      fromY = cy + dirY * tX;
+    } else {
+      fromX = cx + dirX * tY;
+      fromY = cy + Math.sign(dirY) * halfH;
+    }
+  }
+
+  const dx = toX - fromX;
+  const dy = toY - fromY;
+  const len = Math.sqrt(dx * dx + dy * dy);
+  if (len < minDist) return;
+
+  const nx = dx / len;
+  const ny = dy / len;
+
+  // Linie
+  page.drawLine({ start: { x: fromX, y: fromY }, end: { x: toX, y: toY }, color, thickness: 0.4 });
+
+  // Pfeilspitze (2.5mm lang, ~23° Öffnung)
+  const arrowLen = 2.5 * MM_TO_PT;
+  const arrowAngle = 0.4;
+  const ax1 = toX - arrowLen * (nx * Math.cos(arrowAngle) - ny * Math.sin(arrowAngle));
+  const ay1 = toY - arrowLen * (ny * Math.cos(arrowAngle) + nx * Math.sin(arrowAngle));
+  const ax2 = toX - arrowLen * (nx * Math.cos(arrowAngle) + ny * Math.sin(arrowAngle));
+  const ay2 = toY - arrowLen * (ny * Math.cos(arrowAngle) - nx * Math.sin(arrowAngle));
+  page.drawLine({ start: { x: toX, y: toY }, end: { x: ax1, y: ay1 }, color, thickness: 0.5 });
+  page.drawLine({ start: { x: toX, y: toY }, end: { x: ax2, y: ay2 }, color, thickness: 0.5 });
 }
 
 // ============================================================================
