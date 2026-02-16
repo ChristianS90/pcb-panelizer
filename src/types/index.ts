@@ -373,6 +373,8 @@ export interface RoutingContour {
   creationMethod: 'auto' | 'follow-outline' | 'free-draw';
   /** Richtung entlang der Outline (nur bei follow-outline): forward = steigende Indizes, reverse = fallende */
   outlineDirection?: 'forward' | 'reverse';
+  /** Offset-Seite geflippt: true = Fräskontur auf der gegenüberliegenden Seite der Outline */
+  flipOffset?: boolean;
   /** ID der Master-Kontur (nur bei synchronisierten Kopien gesetzt) */
   masterContourId?: string;
   /** true = diese Kontur ist eine synchronisierte Kopie vom Master-Board (schreibgeschützt) */
@@ -599,6 +601,8 @@ export interface DimensionOverrides {
   hiddenElements?: string[];
   /** Abstand der Ordinate-Achsen vom Panel-Rand in mm (Default: { x: 10, y: 10 }) */
   ordinateAxisOffset?: { x: number; y: number };
+  /** Fräskonturen-Bemaßung in der Ordinatenbemaßung ausblenden */
+  hideRoutingDimensions?: boolean;
 }
 
 // ============================================================================

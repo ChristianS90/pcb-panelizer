@@ -338,6 +338,9 @@ interface PanelStore {
   /** Schaltet die Sichtbarkeit einer Fräskontur um */
   toggleRoutingContourVisibility: (contourId: string) => void;
 
+  /** Wechselt die Offset-Seite einer Fräskontur (flipOffset toggeln + Segmente neu berechnen) */
+  toggleRoutingContourFlipOffset: (contourId: string) => void;
+
   /** Aktualisiert die Fräskonturen-Konfiguration */
   setRoutingConfig: (config: Partial<RoutingConfig>) => void;
 
@@ -395,6 +398,9 @@ interface PanelStore {
 
   /** Setzt den Abstand einer Ordinate-Achse vom Panel (x = links, y = unten, min 5mm) */
   setOrdinateAxisOffset: (axis: 'x' | 'y', value: number) => void;
+
+  /** Fräskonturen-Bemaßung in Ordinate ein-/ausblenden */
+  toggleRoutingDimensions: () => void;
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
@@ -470,6 +476,9 @@ interface PanelStore {
   // --------------------------------------------------------------------------
   // Undo/Redo (für später)
   // --------------------------------------------------------------------------
+
+  /** Speichert den aktuellen Panel-Zustand in die History (für Drag-Start im Canvas) */
+  saveHistorySnapshot: () => void;
 
   /** Macht die letzte Aktion rückgängig */
   undo: () => void;
@@ -747,6 +756,7 @@ function syncMasterContours(panel: Panel): RoutingContour[] {
         visible: masterContour.visible,
         creationMethod: masterContour.creationMethod,
         outlineDirection: masterContour.outlineDirection,
+        flipOffset: masterContour.flipOffset, // Flip-Status vom Master übernehmen
         masterContourId: masterContour.id,
         isSyncCopy: true,
       });
@@ -1209,6 +1219,48 @@ export function findNearestArcAtPoint(
 }
 
 /**
+ * Berechnet die Umlaufrichtung (Winding Direction) einer geschlossenen Outline.
+ * Verwendet die Shoelace-Formel (Signed Area) mit Bogen-Mittelpunkten für bessere Genauigkeit.
+ * @returns +1 = CW in Screen-Koordinaten (Y-down), -1 = CCW
+ */
+export function computeOutlineWindingSign(outlineSegs: OutlinePathSegment[]): number {
+  // Punkte sammeln (bei Bögen zusätzlich Mittelpunkt für bessere Flächen-Approximation)
+  const points: Point[] = [];
+  const normalize = (a: number) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+
+  for (const seg of outlineSegs) {
+    points.push(seg.start);
+    if (seg.arc) {
+      const arc = seg.arc;
+      let midAngle: number;
+      if (arc.clockwise) {
+        let sweep = normalize(arc.startAngle) - normalize(arc.endAngle);
+        if (sweep <= 0) sweep += Math.PI * 2;
+        midAngle = arc.startAngle - 0.5 * sweep;
+      } else {
+        let sweep = normalize(arc.endAngle) - normalize(arc.startAngle);
+        if (sweep <= 0) sweep += Math.PI * 2;
+        midAngle = arc.startAngle + 0.5 * sweep;
+      }
+      points.push({
+        x: arc.center.x + Math.cos(midAngle) * arc.radius,
+        y: arc.center.y + Math.sin(midAngle) * arc.radius,
+      });
+    }
+  }
+
+  // Shoelace-Formel: Vorzeichen der Fläche bestimmt die Umlaufrichtung
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const j = (i + 1) % points.length;
+    area += points[i].x * points[j].y - points[j].x * points[i].y;
+  }
+
+  // area > 0 = CW (Screen-Koordinaten Y-down), area < 0 = CCW
+  return area > 0 ? 1 : -1;
+}
+
+/**
  * Baut die echten Outline-Segmente eines Boards in Panel-Koordinaten auf.
  *
  * Liest die Gerber-Outline-Daten (Linien + Bögen) und transformiert sie
@@ -1547,7 +1599,33 @@ function nativeArcToFreeMousebite(
 // Store Implementierung
 // ============================================================================
 
-export const usePanelStore = create<PanelStore>((set, get) => ({
+// Maximale Anzahl an Undo-Schritten (ältere werden verworfen)
+const HISTORY_LIMIT = 50;
+
+export const usePanelStore = create<PanelStore>((set, get) => {
+
+  /**
+   * Speichert den aktuellen Panel-Zustand in die History.
+   * Wird VOR jeder wichtigen Aktion aufgerufen, damit man sie rückgängig machen kann.
+   * Leert den Redo-Stack (Future), weil nach einer neuen Aktion kein "Wiederholen" mehr sinnvoll ist.
+   * Begrenzt den History-Stack auf HISTORY_LIMIT Einträge.
+   */
+  const saveHistory = () => {
+    const state = get();
+    const newPast = [...state.history.past, state.panel];
+    // Älteste Einträge verwerfen wenn Limit überschritten
+    if (newPast.length > HISTORY_LIMIT) {
+      newPast.splice(0, newPast.length - HISTORY_LIMIT);
+    }
+    set({
+      history: {
+        past: newPast,
+        future: [], // Redo-Stack leeren bei neuer Aktion
+      },
+    });
+  };
+
+  return ({
   // --------------------------------------------------------------------------
   // Initiale Daten
   // --------------------------------------------------------------------------
@@ -1583,16 +1661,19 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // Board-Aktionen
   // --------------------------------------------------------------------------
 
-  addBoard: (board) =>
+  addBoard: (board) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         boards: [...state.panel.boards, board],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  removeBoard: (boardId) =>
+  removeBoard: (boardId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -1602,7 +1683,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         instances: state.panel.instances.filter((i) => i.boardId !== boardId),
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   toggleLayerVisibility: (boardId, layerId) =>
     set((state) => ({
@@ -1665,7 +1747,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       },
     })),
 
-  rotateBoardLayers: (boardId) =>
+  rotateBoardLayers: (boardId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -1677,9 +1760,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         }),
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  toggleBoardMirrorX: (boardId) =>
+  toggleBoardMirrorX: (boardId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -1688,9 +1773,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         ),
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  toggleBoardMirrorY: (boardId) =>
+  toggleBoardMirrorY: (boardId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -1699,7 +1786,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         ),
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   // Dreht das gesamte Panel um 90° gegen den Uhrzeigersinn.
   // Dabei werden alle Positionen transformiert:
@@ -1707,7 +1795,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // - Fiducials, Tooling Holes, V-Score Linien
   // - Nutzenrand (left/right/top/bottom werden getauscht)
   // - Panel-Breite und -Höhe werden getauscht
-  rotatePanelCCW: () =>
+  rotatePanelCCW: () => {
+    saveHistory();
     set((state) => {
       const { panel } = state;
       const oldWidth = panel.width;
@@ -1816,13 +1905,15 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
   // --------------------------------------------------------------------------
   // Board-Instanz-Aktionen
   // --------------------------------------------------------------------------
 
-  addBoardInstance: (boardId, position, rotation = 0) =>
+  addBoardInstance: (boardId, position, rotation = 0) => {
+    saveHistory();
     set((state) => {
       const newInstance: BoardInstance = {
         id: uuidv4(),
@@ -1839,9 +1930,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
-  removeBoardInstance: (instanceId) =>
+  removeBoardInstance: (instanceId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -1851,7 +1944,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
       selectedInstances: state.selectedInstances.filter((id) => id !== instanceId),
-    })),
+    }));
+  },
 
   moveBoardInstance: (instanceId, newPosition) =>
     set((state) => ({
@@ -1875,7 +1969,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       },
     })),
 
-  createBoardArray: (boardId, config, startPosition) =>
+  createBoardArray: (boardId, config, startPosition) => {
+    saveHistory();
     set((state) => {
       // Board finden um Größe zu ermitteln
       const board = state.panel.boards.find((b) => b.id === boardId);
@@ -1910,7 +2005,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
         selectedInstances: [], // Auswahl zurücksetzen
       };
-    }),
+    });
+  },
 
   // --------------------------------------------------------------------------
   // Auswahl-Aktionen
@@ -1973,6 +2069,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // --------------------------------------------------------------------------
 
   setFrame: (frame) => {
+    saveHistory();
     const currentState = get();
     const oldFrame = currentState.panel.frame;
     const newFrame = { ...oldFrame, ...frame };
@@ -2008,7 +2105,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     }));
   },
 
-  setPanelSize: (width, height) =>
+  setPanelSize: (width, height) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2016,45 +2114,55 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         height,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  setPanelName: (name) =>
+  setPanelName: (name) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         name,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  setDrawingNumber: (drawingNumber) =>
+  setDrawingNumber: (drawingNumber) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         drawingNumber,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  setDrawnBy: (drawnBy) =>
+  setDrawnBy: (drawnBy) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         drawnBy,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  setApprovedBy: (approvedBy) =>
+  setApprovedBy: (approvedBy) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         approvedBy,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  updatePanelSize: () =>
+  updatePanelSize: () => {
+    saveHistory();
     set((state) => {
       const { instances, boards, frame } = state.panel;
 
@@ -2101,24 +2209,28 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
   // --------------------------------------------------------------------------
   // Tabs, Fiducials, Tooling Holes
   // --------------------------------------------------------------------------
 
-  addTab: (tab) =>
+  addTab: (tab) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         tabs: [...state.panel.tabs, { ...tab, id: uuidv4() }],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   // Entfernt einen Tab UND alle "entsprechenden" Tabs an anderen Instanzen
   // (gleiche Kante + gleicher Index), damit alle Boards identisch bleiben.
-  removeTab: (tabId) =>
+  removeTab: (tabId) => {
+    saveHistory();
     set((state) => {
       const tab = state.panel.tabs.find((t) => t.id === tabId);
       if (!tab) return state;
@@ -2151,9 +2263,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           ? null
           : state.selectedTabId,
       };
-    }),
+    });
+  },
 
-  clearAllTabs: () =>
+  clearAllTabs: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2161,7 +2275,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
       selectedTabId: null,
-    })),
+    }));
+  },
 
   // Wählt einen Tab aus (oder null zum Abwählen)
   selectTab: (tabId) =>
@@ -2212,7 +2327,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     }),
 
   // Verteilt Tabs automatisch auf alle Board-Kanten
-  autoDistributeTabs: (config) =>
+  autoDistributeTabs: (config) => {
+    saveHistory();
     set((state) => {
       const newTabs: Tab[] = [];
 
@@ -2261,18 +2377,22 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
-  addFiducial: (fiducial) =>
+  addFiducial: (fiducial) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         fiducials: [...state.panel.fiducials, { ...fiducial, id: uuidv4() }],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  removeFiducial: (fiducialId) =>
+  removeFiducial: (fiducialId) => {
+    saveHistory();
     set((state) => {
       // Auto-Cleanup: Verwaisten Label-Offset entfernen
       const overrides = state.panel.dimensionOverrides;
@@ -2292,16 +2412,19 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
-  clearAllFiducials: () =>
+  clearAllFiducials: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         fiducials: [],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   updateFiducialPosition: (fiducialId, position) =>
     set((state) => ({
@@ -2320,16 +2443,19 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       selectedFiducialId: fiducialId,
     })),
 
-  addToolingHole: (hole) =>
+  addToolingHole: (hole) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         toolingHoles: [...state.panel.toolingHoles, { ...hole, id: uuidv4() }],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  removeToolingHole: (holeId) =>
+  removeToolingHole: (holeId) => {
+    saveHistory();
     set((state) => {
       // Auto-Cleanup: Verwaisten Label-Offset entfernen
       const overrides = state.panel.dimensionOverrides;
@@ -2351,9 +2477,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         selectedToolingHoleId:
           state.selectedToolingHoleId === holeId ? null : state.selectedToolingHoleId,
       };
-    }),
+    });
+  },
 
-  clearAllToolingHoles: () =>
+  clearAllToolingHoles: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2361,7 +2489,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
       selectedToolingHoleId: null,
-    })),
+    }));
+  },
 
   updateToolingHolePosition: (holeId, position) =>
     set((state) => ({
@@ -2375,7 +2504,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     })),
 
   // Aktualisiert Durchmesser und/oder PTH einer Tooling-Bohrung
-  updateToolingHole: (holeId, data) =>
+  updateToolingHole: (holeId, data) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2384,7 +2514,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         ),
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   // Setzt die Tooling-Bohrung-Konfiguration (für Platzierungs-Tool)
   setToolingHoleConfig: (config) =>
@@ -2398,16 +2529,19 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       selectedToolingHoleId: holeId,
     })),
 
-  addVScoreLine: (line) =>
+  addVScoreLine: (line) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         vscoreLines: [...state.panel.vscoreLines, { ...line, id: uuidv4() }],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
-  removeVScoreLine: (lineId) =>
+  removeVScoreLine: (lineId) => {
+    saveHistory();
     set((state) => {
       // Auto-Cleanup: Verwaisten Label-Offset entfernen
       const overrides = state.panel.dimensionOverrides;
@@ -2429,9 +2563,11 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         selectedVScoreLineId:
           state.selectedVScoreLineId === lineId ? null : state.selectedVScoreLineId,
       };
-    }),
+    });
+  },
 
-  clearAllVScoreLines: () =>
+  clearAllVScoreLines: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2439,7 +2575,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
       selectedVScoreLineId: null,
-    })),
+    }));
+  },
 
   // Wählt eine V-Score Linie aus (oder null zum Abwählen)
   selectVScoreLine: (lineId) =>
@@ -2488,7 +2625,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
 
   // Generiert V-Score Linien automatisch an allen Board-Kanten.
   // V-Score Linien laufen immer von Kante zu Kante über das gesamte Panel.
-  autoDistributeVScoreLines: (config) =>
+  autoDistributeVScoreLines: (config) => {
+    saveHistory();
     set((state) => {
       const { panel } = state;
       const { depth, angle, includeOuterEdges } = config;
@@ -2567,14 +2705,16 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
         selectedVScoreLineId: null,
       };
-    }),
+    });
+  },
 
   // --------------------------------------------------------------------------
   // Mousebites an Rundungen (Ecken des Nutzenrands)
   // --------------------------------------------------------------------------
 
   // Entfernt alle Rundungs-Mousebites
-  clearAllFreeMousebites: () =>
+  clearAllFreeMousebites: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2582,7 +2722,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
       selectedFreeMousebiteId: null,
-    })),
+    }));
+  },
 
   // Wählt eine Rundungs-Mousebite aus (oder null zum Abwählen)
   selectFreeMousebite: (mousebiteId) =>
@@ -2594,7 +2735,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // UND an den Ecken-Rundungen des Nutzenrands (wenn cornerRadius > 0).
   // Erkennt sowohl echte Gerber-Arcs (G02/G03) als auch
   // linearisierte Bögen (viele kleine Geraden, die einen Kreis bilden).
-  autoGenerateArcMousebites: (config) =>
+  autoGenerateArcMousebites: (config) => {
+    saveHistory();
     set((state) => {
       const { panel } = state;
       const newMousebites: FreeMousebite[] = [];
@@ -2683,20 +2825,24 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
         selectedFreeMousebiteId: null,
       };
-    }),
+    });
+  },
 
   // Fügt ein einzelnes FreeMousebite hinzu (für manuelle Klick-Platzierung)
-  addFreeMousebite: (mousebite) =>
+  addFreeMousebite: (mousebite) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         freeMousebites: [...state.panel.freeMousebites, { ...mousebite, id: uuidv4() }],
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   // Entfernt ein einzelnes FreeMousebite anhand seiner ID
-  removeFreeMousebite: (mousebiteId) =>
+  removeFreeMousebite: (mousebiteId) => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
@@ -2706,7 +2852,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       // Auswahl zurücksetzen falls das gelöschte Element ausgewählt war
       selectedFreeMousebiteId:
         state.selectedFreeMousebiteId === mousebiteId ? null : state.selectedFreeMousebiteId,
-    })),
+    }));
+  },
 
   // Setzt die Mousebite-Konfiguration (Bogenlänge, Bohrungsparameter)
   setMousebiteConfig: (config) =>
@@ -2727,7 +2874,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // Entfernt eine einzelne Fräskontur.
   // Sync-Kopien können nicht einzeln gelöscht werden (werden automatisch verwaltet).
   // Wenn eine Master-Kontur gelöscht wird, werden auch alle zugehörigen Kopien entfernt.
-  removeRoutingContour: (contourId) =>
+  removeRoutingContour: (contourId) => {
+    saveHistory();
     set((state) => {
       const contourToRemove = state.panel.routingContours.find(c => c.id === contourId);
       // Sync-Kopien können nicht manuell gelöscht werden
@@ -2774,10 +2922,12 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         selectedRoutingContourId:
           state.selectedRoutingContourId === contourId ? null : state.selectedRoutingContourId,
       };
-    }),
+    });
+  },
 
   // Entfernt alle Fräskonturen
-  clearAllRoutingContours: () =>
+  clearAllRoutingContours: () => {
+    saveHistory();
     set((state) => {
       // Auto-Cleanup: Alle routing-*-Offsets und hiddenElements entfernen
       const overrides = state.panel.dimensionOverrides;
@@ -2801,7 +2951,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
         selectedRoutingContourId: null,
       };
-    }),
+    });
+  },
 
   // Schaltet die Sichtbarkeit einer Fräskontur um
   toggleRoutingContourVisibility: (contourId) =>
@@ -2814,6 +2965,109 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         modifiedAt: new Date(),
       },
     })),
+
+  // Wechselt die Offset-Seite einer Fräskontur:
+  // 1. flipOffset-Flag toggeln
+  // 2. Segmente geometrisch auf die andere Seite verschieben (2 * toolRadius)
+  // 3. Master-Board-Synchronisation aufrufen
+  toggleRoutingContourFlipOffset: (contourId) => {
+    saveHistory();
+    set((state) => {
+      const contour = state.panel.routingContours.find((c) => c.id === contourId);
+      if (!contour || contour.isSyncCopy || contour.creationMethod === 'auto') return state;
+
+      const instance = state.panel.instances.find((i) => i.id === contour.boardInstanceId);
+      if (!instance) return state;
+      const board = state.panel.boards.find((b) => b.id === instance.boardId);
+      if (!board) return state;
+
+      // Outline-Segmente und Winding-Direction für dieses Board holen
+      const outlineSegs = buildOutlineSegments(board, instance);
+      if (outlineSegs.length === 0) return state;
+      const wSign = computeOutlineWindingSign(outlineSegs);
+
+      const toolRadius = contour.toolDiameter / 2;
+      const newFlip = !contour.flipOffset;
+
+      // Segmente um 2 * toolRadius verschieben — Richtung hängt davon ab,
+      // ob wir gerade ZUM Flip oder ZURÜCK wechseln:
+      //   false → true  (zum Flip):   Verschiebung in Minus-Richtung der Normalen
+      //   true  → false (zurück):     Verschiebung in Plus-Richtung der Normalen
+      // So springt die Kontur beim zweiten Klick exakt an die Originalposition zurück.
+      const flipDirection = contour.flipOffset ? 1 : -1;
+
+      const flippedSegments: RoutingSegment[] = contour.segments.map((seg) => {
+        if (seg.arc) {
+          // Bogen: Radius-Inversion
+          // Basis-Sign aus Winding-Direction + Bogenrichtung berechnen
+          const outlineCW = wSign > 0;
+          let baseSign = (outlineCW === seg.arc.clockwise) ? 1 : -1;
+          // Wenn die Kontur bereits geflippt ist, wurde das Sign schon invertiert —
+          // wir müssen das berücksichtigen, um den Original-Radius korrekt zurückzurechnen
+          const currentSign = contour.flipOffset ? -baseSign : baseSign;
+          // Originaler Radius (ohne Offset) zurückrechnen
+          const originalRadius = seg.arc.radius - currentSign * toolRadius;
+          // Neues Sign = invertiert (andere Seite)
+          const newSign = -currentSign;
+          const newRadius = originalRadius + newSign * toolRadius;
+          if (newRadius < 0.01) return seg; // Zu kleiner Radius, Segment beibehalten
+
+          // Start/End-Punkte auf neuem Radius setzen
+          const oStart: Point = {
+            x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * newRadius,
+            y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * newRadius,
+          };
+          const oEnd: Point = {
+            x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * newRadius,
+            y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * newRadius,
+          };
+
+          return {
+            start: oStart,
+            end: oEnd,
+            arc: {
+              ...seg.arc,
+              radius: newRadius,
+            },
+          };
+        } else {
+          // Linie: Normale berechnen und Punkte verschieben
+          const dx = seg.end.x - seg.start.x;
+          const dy = seg.end.y - seg.start.y;
+          const len = Math.sqrt(dx * dx + dy * dy);
+          if (len < 0.001) return seg;
+
+          // Normale (basierend auf Winding-Direction)
+          const nx = wSign > 0 ? dy / len : -dy / len;
+          const ny = wSign > 0 ? -dx / len : dx / len;
+
+          // flipDirection bestimmt ob wir hin oder zurück schieben:
+          //   -1 = zum Flip (Minus-Richtung der Normalen)
+          //   +1 = zurück zur Original-Seite (Plus-Richtung)
+          const shift = 2 * toolRadius;
+          return {
+            start: { x: seg.start.x + flipDirection * nx * shift, y: seg.start.y + flipDirection * ny * shift },
+            end: { x: seg.end.x + flipDirection * nx * shift, y: seg.end.y + flipDirection * ny * shift },
+          };
+        }
+      });
+
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: state.panel.routingContours.map((c) =>
+          c.id === contourId
+            ? { ...c, flipOffset: newFlip, segments: flippedSegments }
+            : c
+        ),
+        modifiedAt: new Date(),
+      };
+
+      // Master-Board-Synchronisation aufrufen
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+
+      return { panel: updatedPanel };
+    });
+  },
 
   // Aktualisiert die Fräskonturen-Konfiguration
   setRoutingConfig: (config) =>
@@ -2829,7 +3083,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // Kern-Algorithmus:
   // A) Board-Outline-Konturen: Für jedes Board eine Kontur mit Lücken an Tab-Positionen
   // B) Panel-Außenkontur: Einfaches Rechteck (optional mit Eckenradius-Approximation)
-  autoGenerateRoutingContours: () =>
+  autoGenerateRoutingContours: () => {
+    saveHistory();
     set((state) => {
       const { panel } = state;
       const { routingConfig } = panel;
@@ -3013,12 +3268,14 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
         selectedRoutingContourId: null,
       };
-    }),
+    });
+  },
 
   // Fügt eine neue Fräskontur hinzu (für manuelle Methoden: free-draw, follow-outline)
   // Nach dem Hinzufügen wird die Master-Board-Synchronisation ausgeführt,
   // damit Konturen auf dem Master automatisch auf alle anderen Boards kopiert werden.
-  addRoutingContour: (contour) =>
+  addRoutingContour: (contour) => {
+    saveHistory();
     set((state) => {
       const updatedContours = [
         ...state.panel.routingContours,
@@ -3034,7 +3291,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         updatedPanel.routingContours = syncMasterContours(updatedPanel);
       }
       return { panel: updatedPanel };
-    }),
+    });
+  },
 
   // Fügt einen Punkt zur Free-Draw-Polyline hinzu
   addFreeDrawPoint: (point) =>
@@ -3054,7 +3312,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
   // Mindestens 2 Punkte nötig, damit ein Segment entsteht.
   // Die boardInstanceId wird automatisch anhand der Nähe zum Board-Zentrum gesetzt,
   // damit die Master-Board-Synchronisation korrekt funktioniert.
-  finalizeFreeDrawContour: () =>
+  finalizeFreeDrawContour: () => {
+    saveHistory();
     set((state) => {
       const { points } = state.routeFreeDrawState;
       if (points.length < 2) {
@@ -3124,7 +3383,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         panel: updatedPanel,
         routeFreeDrawState: { points: [] }, // State zurücksetzen
       };
-    }),
+    });
+  },
 
   // Aktualisiert Start-/Endpunkt einer manuellen Fräskontur (für Drag & Drop Handles)
   // Sync-Kopien sind schreibgeschützt und werden ignoriert.
@@ -3345,17 +3605,20 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     }),
 
   // Setzt alle Bemaßungs-Überschreibungen zurück
-  resetDimensionOverrides: () =>
+  resetDimensionOverrides: () => {
+    saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         dimensionOverrides: undefined,
         modifiedAt: new Date(),
       },
-    })),
+    }));
+  },
 
   // Blendet ein Bemaßungs-Element aus (fügt Key zur hiddenElements-Liste hinzu)
-  hideDimensionElement: (key) =>
+  hideDimensionElement: (key) => {
+    saveHistory();
     set((state) => {
       const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
       const hidden = existing.hiddenElements || [];
@@ -3371,10 +3634,12 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
   // Zeigt alle ausgeblendeten Bemaßungs-Elemente wieder an
-  showAllDimensionElements: () =>
+  showAllDimensionElements: () => {
+    saveHistory();
     set((state) => {
       const existing = state.panel.dimensionOverrides;
       if (!existing) return state;
@@ -3388,7 +3653,8 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           modifiedAt: new Date(),
         },
       };
-    }),
+    });
+  },
 
   // Setzt den Abstand einer Ordinate-Achse vom Panel (min 5mm)
   setOrdinateAxisOffset: (axis, value) =>
@@ -3409,6 +3675,24 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
       };
     }),
+
+  // Fräskonturen-Bemaßung in der Ordinatenbemaßung ein-/ausblenden
+  toggleRoutingDimensions: () => {
+    saveHistory();
+    set((state) => {
+      const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            hideRoutingDimensions: !existing.hideRoutingDimensions,
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    });
+  },
 
   // --------------------------------------------------------------------------
   // Grid-Einstellungen
@@ -3456,8 +3740,13 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
     }),
 
   // --------------------------------------------------------------------------
-  // Undo/Redo (vereinfachte Implementierung)
+  // Undo/Redo
   // --------------------------------------------------------------------------
+
+  // Öffentliche Action: Speichert History-Snapshot (wird vom Canvas bei Drag-Start aufgerufen)
+  saveHistorySnapshot: () => {
+    saveHistory();
+  },
 
   undo: () =>
     set((state) => {
@@ -3490,7 +3779,7 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         },
       };
     }),
-}));
+})});
 
 // ============================================================================
 // Selector Hooks für häufig verwendete Daten

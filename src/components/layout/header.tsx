@@ -19,6 +19,8 @@ import {
   HelpCircle,
   FolderOpen,
   Loader2,
+  Undo2,
+  Redo2,
 } from 'lucide-react';
 import { usePanelStore, usePanel, useBoards, useInstances } from '@/stores/panel-store';
 import { ImportDialog } from '@/components/dialogs';
@@ -42,6 +44,12 @@ export function Header() {
 
   // Import-Dialog State
   const [isImportOpen, setIsImportOpen] = useState(false);
+
+  // Undo/Redo
+  const undo = usePanelStore((state) => state.undo);
+  const redo = usePanelStore((state) => state.redo);
+  const canUndo = usePanelStore((state) => state.history.past.length > 0);
+  const canRedo = usePanelStore((state) => state.history.future.length > 0);
 
   // Projekt laden/speichern
   const loadPanel = usePanelStore((state) => state.loadPanel);
@@ -302,7 +310,30 @@ export function Header() {
         </button>
 
         {/* Trennlinie */}
-        <div className="w-px h-6 bg-gray-200 mx-2" />
+        <div className="w-px h-6 bg-gray-200 mx-1" />
+
+        {/* Rückgängig */}
+        <button
+          onClick={undo}
+          disabled={!canUndo}
+          className="btn-icon"
+          title="Rückgängig (Ctrl+Z)"
+        >
+          <Undo2 className="w-5 h-5" />
+        </button>
+
+        {/* Wiederholen */}
+        <button
+          onClick={redo}
+          disabled={!canRedo}
+          className="btn-icon"
+          title="Wiederholen (Ctrl+Y)"
+        >
+          <Redo2 className="w-5 h-5" />
+        </button>
+
+        {/* Trennlinie */}
+        <div className="w-px h-6 bg-gray-200 mx-1" />
 
         {/* Gerber exportieren */}
         <button

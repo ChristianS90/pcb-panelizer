@@ -30,6 +30,7 @@ import {
   useShowDimensions,
   findNearestArcAtPoint,
   buildOutlineSegments,
+  computeOutlineWindingSign,
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
@@ -232,6 +233,19 @@ export function PixiPanelCanvas() {
   // ----------------------------------------------------------------
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Undo: Ctrl+Z / Cmd+Z
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
+        e.preventDefault();
+        usePanelStore.getState().undo();
+        return;
+      }
+      // Redo: Ctrl+Y / Cmd+Y oder Ctrl+Shift+Z / Cmd+Shift+Z
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
+        e.preventDefault();
+        usePanelStore.getState().redo();
+        return;
+      }
+
       // Taste "M" = Messmodus umschalten (Absolut ↔ Inkremental)
       if ((e.key === 'm' || e.key === 'M') && activeToolRef.current === 'measure') {
         const newMode = measureModeRef.current === 'incremental' ? 'absolute' : 'incremental';
@@ -255,38 +269,25 @@ export function PixiPanelCanvas() {
           const brd = inst ? state.panel.boards.find((b: any) => b.id === inst.boardId) : null;
 
           if (brd && inst) {
-            // Board-Mitte berechnen (für Offset-Richtung)
-            const layerRotation = brd.layerRotation || 0;
-            const isLayerRotated = layerRotation === 90 || layerRotation === 270;
-            const effectiveW = isLayerRotated ? brd.height : brd.width;
-            const effectiveH = isLayerRotated ? brd.width : brd.height;
-            const isInstanceRotated = inst.rotation === 90 || inst.rotation === 270;
-            const displayW = isInstanceRotated ? effectiveH : effectiveW;
-            const displayH = isInstanceRotated ? effectiveW : effectiveH;
-            const boardMidX = inst.position.x + displayW / 2;
-            const boardMidY = inst.position.y + displayH / 2;
             const toolRadius = state.panel.routingConfig.toolDiameter / 2;
 
-            // Offset-Hilfsfunktionen (identisch zu getOutlineSubpath)
+            // Umlaufrichtung (Winding) bestimmt zuverlässig die Außenseite
+            const wSign = computeOutlineWindingSign(outlineSegs);
+
+            // Offset-Hilfsfunktionen (identisch zu getOutlineSubpath, Winding-basiert)
             const offsetLinePoint = (pt: Point, seg: OutlinePathSegment): Point => {
               const dx = seg.end.x - seg.start.x;
               const dy = seg.end.y - seg.start.y;
               const len = Math.sqrt(dx * dx + dy * dy);
               if (len < 0.001) return pt;
-              const nx = -dy / len;
-              const ny = dx / len;
-              const toMidX = boardMidX - pt.x;
-              const toMidY = boardMidY - pt.y;
-              const dot = nx * toMidX + ny * toMidY;
-              const sign = dot > 0 ? -1 : 1;
-              return { x: pt.x + sign * nx * toolRadius, y: pt.y + sign * ny * toolRadius };
+              const nx = wSign > 0 ? dy / len : -dy / len;
+              const ny = wSign > 0 ? -dx / len : dx / len;
+              return { x: pt.x + nx * toolRadius, y: pt.y + ny * toolRadius };
             };
 
             const getArcOffsetSign = (arc: NonNullable<OutlinePathSegment['arc']>): number => {
-              const toMidX = boardMidX - arc.center.x;
-              const toMidY = boardMidY - arc.center.y;
-              const distToMid = Math.sqrt(toMidX * toMidX + toMidY * toMidY);
-              return distToMid < arc.radius ? 1 : -1;
+              const outlineCW = wSign > 0;
+              return (outlineCW === arc.clockwise) ? 1 : -1;
             };
 
             // Pro ausgewähltes Segment eine EIGENE Fräskontur erstellen
@@ -719,6 +720,8 @@ export function PixiPanelCanvas() {
           y: mouseY - fiducialScreenY,
         };
 
+        // History-Snapshot speichern (für Undo nach Drag)
+        usePanelStore.getState().saveHistorySnapshot();
         // Generischen Drag-State setzen
         isDraggingItemRef.current = true;
         draggedItemIdRef.current = fiducial.id;
@@ -760,6 +763,8 @@ export function PixiPanelCanvas() {
           y: mouseY - holeScreenY,
         };
 
+        // History-Snapshot speichern (für Undo nach Drag)
+        usePanelStore.getState().saveHistorySnapshot();
         // Generischen Drag-State setzen
         isDraggingItemRef.current = true;
         draggedItemIdRef.current = hole.id;
@@ -799,6 +804,8 @@ export function PixiPanelCanvas() {
         selectFiducial(null);
         selectToolingHole(null);
 
+        // History-Snapshot speichern (für Undo nach Drag)
+        usePanelStore.getState().saveHistorySnapshot();
         // Drag starten
         isDraggingItemRef.current = true;
         draggedItemIdRef.current = tab.id;
@@ -841,6 +848,8 @@ export function PixiPanelCanvas() {
         selectToolingHole(null);
         selectTab(null);
 
+        // History-Snapshot speichern (für Undo nach Drag)
+        usePanelStore.getState().saveHistorySnapshot();
         // Drag starten
         isDraggingItemRef.current = true;
         draggedItemIdRef.current = line.id;
@@ -917,6 +926,8 @@ export function PixiPanelCanvas() {
             const distToEnd = Math.sqrt((clickMmX - endPt.x) ** 2 + (clickMmY - endPt.y) ** 2);
 
             if (distToStart < handleRadiusMm) {
+              // History-Snapshot speichern (für Undo nach Drag)
+              usePanelStore.getState().saveHistorySnapshot();
               // Start-Handle Drag starten
               isDraggingItemRef.current = true;
               draggedItemIdRef.current = contour.id;
@@ -926,6 +937,8 @@ export function PixiPanelCanvas() {
             }
 
             if (distToEnd < handleRadiusMm) {
+              // History-Snapshot speichern (für Undo nach Drag)
+              usePanelStore.getState().saveHistorySnapshot();
               // End-Handle Drag starten
               isDraggingItemRef.current = true;
               draggedItemIdRef.current = contour.id;
@@ -979,6 +992,8 @@ export function PixiPanelCanvas() {
                 return;
               }
               event.stopPropagation();
+              // History-Snapshot speichern (für Undo nach Drag)
+              usePanelStore.getState().saveHistorySnapshot();
               isDraggingItemRef.current = true;
               dragItemTypeRef.current = 'dimensionLabel';
               dragDimLabelKeyRef.current = labelKey;
@@ -1569,7 +1584,8 @@ export function PixiPanelCanvas() {
             const savedDirection = contour.outlineDirection || 'forward';
             const result = getOutlineSubpath(
               currentState.panel, contour.boardInstanceId,
-              fromPt, toPt, toolRadius, savedDirection, fromHint, toHint
+              fromPt, toPt, toolRadius, savedDirection, fromHint, toHint,
+              contour.flipOffset
             );
 
             if (result.segments.length > 0) {
@@ -2095,6 +2111,8 @@ function nearestPointOnArc(
   }
 }
 
+// computeOutlineWindingSign ist jetzt in panel-store.ts exportiert und wird oben importiert
+
 /**
  * Extrahiert einen Teilpfad der Board-Outline zwischen zwei Punkten.
  * Gibt RoutingSegments (Linien + Bögen) zurück, die entlang der echten Outline verlaufen.
@@ -2113,7 +2131,9 @@ function getOutlineSubpath(
   // Das verhindert, dass die Funktion den Punkt intern einem ANDEREN Segment
   // zuordnet als der Aufrufer (was bei Ecken zu Sprüngen führt).
   fromSegHint?: { segIndex: number; t: number },
-  toSegHint?: { segIndex: number; t: number }
+  toSegHint?: { segIndex: number; t: number },
+  // Wenn true: Winding-Sign negieren → Offset auf die andere Seite der Outline
+  flipOffset?: boolean
 ): { segments: RoutingSegment[]; direction: 'forward' | 'reverse' } {
   const emptyResult = { segments: [] as RoutingSegment[], direction: 'forward' as const };
 
@@ -2127,18 +2147,11 @@ function getOutlineSubpath(
   const outlineSegs = buildOutlineSegments(board, instance);
   if (outlineSegs.length === 0) return emptyResult;
 
-  // Board-Mitte berechnen (für Offset-Richtung)
-  const layerRotation = board.layerRotation || 0;
-  const isLayerRotated = layerRotation === 90 || layerRotation === 270;
-  const effectiveW = isLayerRotated ? board.height : board.width;
-  const effectiveH = isLayerRotated ? board.width : board.height;
-  const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
-  const displayW = isInstanceRotated ? effectiveH : effectiveW;
-  const displayH = isInstanceRotated ? effectiveW : effectiveH;
-  const bx = instance.position.x;
-  const by = instance.position.y;
-  const boardMidX = bx + displayW / 2;
-  const boardMidY = by + displayH / 2;
+  // Umlaufrichtung (Winding) der Outline berechnen — bestimmt zuverlässig die Außenseite,
+  // auch bei Einbuchtungen/konkaven Formen (anders als die alte Board-Mitte-Heuristik)
+  // Wenn flipOffset gesetzt: Sign negieren → Offset auf die andere Seite
+  const rawWSign = computeOutlineWindingSign(outlineSegs);
+  const wSign = flipOffset ? -rawWSign : rawWSign;
 
   // --- Punkt auf Outline lokalisieren: Segment-Index + t-Parameter (0..1) ---
   const findOnOutline = (pt: Point): { segIndex: number; t: number; point: Point } | null => {
@@ -2218,29 +2231,25 @@ function getOutlineSubpath(
 
   // --- Offset-Funktionen: Punkt/Bogen um toolRadius nach außen verschieben ---
 
-  // Gerade Linie: Normalenvektor berechnen, Richtung über Board-Mitte prüfen
+  // Gerade Linie: Normalenvektor berechnen, Richtung über Winding Direction bestimmen
+  // CW Outline (wSign > 0): Außen = rechts vom Laufweg = (dy, -dx) / len
+  // CCW Outline (wSign < 0): Außen = links vom Laufweg = (-dy, dx) / len
   const offsetLinePoint = (pt: Point, seg: typeof outlineSegs[0]): Point => {
     const dx = seg.end.x - seg.start.x;
     const dy = seg.end.y - seg.start.y;
     const len = Math.sqrt(dx * dx + dy * dy);
     if (len < 0.001) return pt;
-    const nx = -dy / len;
-    const ny = dx / len;
-    const toMidX = boardMidX - pt.x;
-    const toMidY = boardMidY - pt.y;
-    const dot = nx * toMidX + ny * toMidY;
-    const sign = dot > 0 ? -1 : 1;
-    return { x: pt.x + sign * nx * toolRadius, y: pt.y + sign * ny * toolRadius };
+    const nx = wSign > 0 ? dy / len : -dy / len;
+    const ny = wSign > 0 ? -dx / len : dx / len;
+    return { x: pt.x + nx * toolRadius, y: pt.y + ny * toolRadius };
   };
 
-  // Bogen: Radius vergrößern/verkleinern je nach Richtung (Center bleibt gleich)
+  // Bogen: Radius vergrößern/verkleinern basierend auf Winding Direction
+  // Gleiche Richtung (Outline CW + Arc CW, oder Outline CCW + Arc CCW) → Zentrum innen → Radius vergrößern = +1
+  // Verschiedene Richtung → Zentrum außen (z.B. Einbuchtung) → Radius verkleinern = -1
   const getArcOffsetSign = (arc: NonNullable<typeof outlineSegs[0]['arc']>): number => {
-    // Prüfen ob Board-Mitte innerhalb oder außerhalb des Bogens liegt
-    const toMidX = boardMidX - arc.center.x;
-    const toMidY = boardMidY - arc.center.y;
-    const distToMid = Math.sqrt(toMidX * toMidX + toMidY * toMidY);
-    // Wenn Board-Mitte innerhalb des Radius → Offset nach außen = Radius vergrößern
-    return distToMid < arc.radius ? 1 : -1;
+    const outlineCW = wSign > 0;
+    return (outlineCW === arc.clockwise) ? 1 : -1;
   };
 
   // Berechnet den Winkel auf einem Bogen für einen gegebenen t-Parameter (0..1)
@@ -3950,8 +3959,9 @@ function createDimensionOverlay(
     addPos(yPositions, { value: hole.position.y, color: COLOR_HOLE, type: 'toolinghole', key: `ord-y-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
   }
 
-  // 7. Fräskonturen (nicht-auto, nicht-Kopie)
-  for (const contour of panel.routingContours) {
+  // 7. Fräskonturen (nicht-auto, nicht-Kopie) — nur wenn Bemaßung nicht ausgeblendet
+  const hideRoutingDims = panel.dimensionOverrides?.hideRoutingDimensions;
+  if (!hideRoutingDims) for (const contour of panel.routingContours) {
     if (!contour.visible || contour.isSyncCopy || contour.creationMethod === 'auto') continue;
     if (contour.segments.length === 0) continue;
     const routeColor = contour.contourType === 'boardOutline' ? COLOR_ROUTE_BOARD : COLOR_ROUTE_PANEL;
@@ -4085,51 +4095,54 @@ function createDimensionOverlay(
     const legendKey = 'routing-legend';
     if (!hidden.has(legendKey)) {
       const legendOffset = labelOffsets[legendKey] || { dx: 0, dy: 0 };
-      const allEntries: Array<{ color: number; label: string }> = [];
+      // Symbol-Typen: 'line' = farbige Linie, 'dashed' = gestrichelt, 'circle' = Kreis,
+      // 'fiducial' = Punkt+Ring, 'hole' = Bohrungssymbol, 'routing' = dicke Linie
+      type LegendSymbol = 'line' | 'dashed' | 'circle' | 'fiducial' | 'hole' | 'routing';
+      const allEntries: Array<{ color: number; label: string; symbol: LegendSymbol; toolDiameter?: number }> = [];
 
       // Farbcode-Erklärungen (immer anzeigen)
-      allEntries.push({ color: COLOR_PANEL, label: 'Panel-Kanten' });
+      allEntries.push({ color: COLOR_PANEL, label: 'Panel-Kanten', symbol: 'line' });
       if (panel.frame.left > 0 || panel.frame.right > 0 || panel.frame.top > 0 || panel.frame.bottom > 0) {
-        allEntries.push({ color: COLOR_FRAME, label: 'Nutzenrand' });
+        allEntries.push({ color: COLOR_FRAME, label: 'Nutzenrand', symbol: 'line' });
       }
       if (instances.length > 0) {
-        allEntries.push({ color: COLOR_BOARD, label: 'Board-Kanten' });
+        allEntries.push({ color: COLOR_BOARD, label: 'Board-Kanten', symbol: 'line' });
       }
 
-      // V-Score Detail (einmalig, wenn vorhanden)
+      // V-Score Detail (einmalig, wenn vorhanden) — gestrichelte Linie
       if (panel.vscoreLines.length > 0) {
         const vs = panel.vscoreLines[0];
-        allEntries.push({ color: COLOR_VSCORE, label: `V-Score: ${vs.depth}% / ${vs.angle}°` });
+        allEntries.push({ color: COLOR_VSCORE, label: `V-Score: ${vs.depth}% / ${vs.angle}°`, symbol: 'dashed' });
       }
-      // Fiducial Detail (einmalig, wenn vorhanden)
+      // Fiducial Detail (einmalig, wenn vorhanden) — Punkt+Ring Symbol
       if (panel.fiducials.length > 0) {
         const f = panel.fiducials[0];
-        allEntries.push({ color: COLOR_FID, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}` });
+        allEntries.push({ color: COLOR_FID, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}`, symbol: 'fiducial' });
       }
-      // Tooling Holes Detail (unique Kombinationen)
-      const holeTypes = new Map<string, string>();
+      // Tooling Holes Detail (unique Kombinationen) — Bohrungs-Symbol
+      const holeTypes = new Map<string, { label: string; plated: boolean }>();
       for (const h of panel.toolingHoles) {
         const k = `${h.diameter.toFixed(1)}-${h.plated}`;
         if (!holeTypes.has(k)) {
-          holeTypes.set(k, `Bohrung: Ø${h.diameter.toFixed(1)} ${h.plated ? 'PTH' : 'NPTH'}`);
+          holeTypes.set(k, { label: `Bohrung: Ø${h.diameter.toFixed(1)} ${h.plated ? 'PTH' : 'NPTH'}`, plated: h.plated });
         }
       }
-      Array.from(holeTypes.values()).forEach(label => {
-        allEntries.push({ color: COLOR_HOLE, label });
+      Array.from(holeTypes.values()).forEach(({ label }) => {
+        allEntries.push({ color: COLOR_HOLE, label, symbol: 'hole' });
       });
       // Fräskonturen (unique Typen)
-      const routingTypes = new Map<string, { color: number; label: string }>();
+      const routingTypes = new Map<string, { color: number; label: string; toolDiameter: number }>();
       for (const contour of panel.routingContours) {
         if (!contour.visible || contour.isSyncCopy) continue;
         const color = contour.contourType === 'boardOutline' ? COLOR_ROUTE_BOARD : COLOR_ROUTE_PANEL;
         const typeLabel = contour.contourType === 'boardOutline' ? 'Board' : 'Panel';
         const key = `${typeLabel}-${contour.toolDiameter.toFixed(1)}`;
         if (!routingTypes.has(key)) {
-          routingTypes.set(key, { color, label: `Fräskontur: ${typeLabel} Ø${contour.toolDiameter.toFixed(1)}` });
+          routingTypes.set(key, { color, label: `Fräskontur: ${typeLabel} Ø${contour.toolDiameter.toFixed(1)}`, toolDiameter: contour.toolDiameter });
         }
       }
       Array.from(routingTypes.values()).forEach(entry => {
-        allEntries.push(entry);
+        allEntries.push({ ...entry, symbol: 'routing' });
       });
 
       if (allEntries.length > 0) {
@@ -4170,22 +4183,74 @@ function createDimensionOverlay(
         sep.stroke({ color: 0x555555, width: 1 });
         legendContainer.addChild(sep);
 
-        // Einträge
+        // Einträge mit passenden Symbolen
         allEntries.forEach((entry, idx) => {
           const entryY = (titleH + pad + idx * lineH) * px;
-          // Farb-Linie
-          const line = new Graphics();
-          line.moveTo(pad * px, entryY + lineH * px * 0.5);
-          line.lineTo((pad + 6) * px, entryY + lineH * px * 0.5);
-          line.stroke({ color: entry.color, width: 2 });
-          legendContainer.addChild(line);
-          // Text
+          const symCenterX = (pad + 3) * px;
+          const symCenterY = entryY + lineH * px * 0.5;
+          const symG = new Graphics();
+
+          if (entry.symbol === 'fiducial') {
+            // Fiducial: gefüllter Punkt + äußerer Ring (kompakt)
+            const outerR = 1.2 * px;
+            const innerR = 0.5 * px;
+            symG.circle(symCenterX, symCenterY, outerR);
+            symG.stroke({ color: entry.color, width: 1 });
+            symG.circle(symCenterX, symCenterY, innerR);
+            symG.fill({ color: entry.color });
+          } else if (entry.symbol === 'hole') {
+            // Bohrung: Kreuz im Kreis (kompakt)
+            const holeR = 1.2 * px;
+            symG.circle(symCenterX, symCenterY, holeR);
+            symG.stroke({ color: entry.color, width: 1 });
+            symG.moveTo(symCenterX - holeR, symCenterY);
+            symG.lineTo(symCenterX + holeR, symCenterY);
+            symG.stroke({ color: entry.color, width: 0.8 });
+            symG.moveTo(symCenterX, symCenterY - holeR);
+            symG.lineTo(symCenterX, symCenterY + holeR);
+            symG.stroke({ color: entry.color, width: 0.8 });
+          } else if (entry.symbol === 'dashed') {
+            // V-Score: gestrichelte Linie (3 kurze Striche)
+            const dashLen = 1.5 * px;
+            const gapLen = 1.0 * px;
+            let dx = pad * px;
+            for (let d = 0; d < 3; d++) {
+              symG.moveTo(dx, symCenterY);
+              symG.lineTo(dx + dashLen, symCenterY);
+              symG.stroke({ color: entry.color, width: 1.5 });
+              dx += dashLen + gapLen;
+            }
+          } else if (entry.symbol === 'routing') {
+            // Fräskontur: halbtransparenter Fräserbreite-Streifen + dünne Mittellinie
+            // (exakt wie in der Hauptzeichnung)
+            const lineStartX = pad * px;
+            const lineEndX = (pad + 6) * px;
+            // Fräserbreite-Streifen (halbtransparent, proportional zum toolDiameter)
+            const toolWidthPx = (entry.toolDiameter || 2) * px;
+            symG.moveTo(lineStartX, symCenterY);
+            symG.lineTo(lineEndX, symCenterY);
+            symG.stroke({ color: entry.color, width: toolWidthPx, alpha: 0.15 });
+            // Dünne Mittellinie (wie in der Hauptzeichnung)
+            symG.moveTo(lineStartX, symCenterY);
+            symG.lineTo(lineEndX, symCenterY);
+            symG.stroke({ color: entry.color, width: 1.5 });
+          } else {
+            // Standard: einfache farbige Linie
+            symG.moveTo(pad * px, symCenterY);
+            symG.lineTo((pad + 6) * px, symCenterY);
+            symG.stroke({ color: entry.color, width: 2 });
+          }
+
+          legendContainer.addChild(symG);
+
+          // Text — vertikal auf Symbolmitte ausgerichtet
           const txt = new Text({
             text: entry.label,
             style: new TextStyle({ fontSize: 5, fill: entry.color, fontFamily: 'Arial' }),
           });
           txt.resolution = 4;
-          txt.position.set((pad + 7) * px, entryY + 1);
+          txt.anchor.set(0, 0.5); // Links ausrichten, vertikal zentriert
+          txt.position.set((pad + 7) * px, symCenterY);
           legendContainer.addChild(txt);
         });
 

@@ -69,6 +69,8 @@ const COLORS = {
   red: rgb(0.8, 0, 0),
   green: rgb(0, 0.6, 0),
   pink: rgb(0.8, 0.2, 0.5),
+  // Exakte Canvas-Farben für konsistente Darstellung
+  vscore: rgb(1.0, 0.412, 0.706),       // 0xff69b4 — V-Score (Canvas-Farbe)
   orange: rgb(0.9, 0.5, 0.0),
   cyan: rgb(0.0, 0.7, 0.9),
   // Fräskonturen und Mousebites
@@ -532,20 +534,55 @@ export async function generateDimensionDrawing(
     }
   }
 
-  // ---- Dynamische Seitengrößen-Berechnung (1:1 Maßstab) ----
+  // ---- Dynamische Seitengrößen-Berechnung mit automatischer Skalierung ----
   // Ränder um das Panel für Bemaßungen und Annotationen (in PDF-Punkten)
   const PANEL_MARGIN_LEFT = 80;    // Platz für Y-Offset-Bemaßungen links
   const PANEL_MARGIN_RIGHT = 250;  // Platz für Bemaßungen + Detail-Tabelle rechts
   const PANEL_MARGIN_TOP = 100;    // Platz für Notizen-Bereich oben
   const PANEL_MARGIN_BOTTOM = 200; // Platz für Titelblock + Bemaßungen unten
 
-  // Panel-Dimensionen in PDF-Punkten (1:1 Maßstab: 1mm = MM_TO_PT Punkte)
-  const panelWidthPt = panel.width * MM_TO_PT;
-  const panelHeightPt = panel.height * MM_TO_PT;
+  // Maximale Seitengrösse: A3 quer (420 x 297 mm)
+  // Grössere Seiten werden automatisch herunterskaliert
+  const MAX_PAGE_WIDTH = 420 * MM_TO_PT;   // 1190.55 pt
+  const MAX_PAGE_HEIGHT = 297 * MM_TO_PT;  // 841.89 pt
 
-  // Seitengröße dynamisch berechnen (mindestens A4 quer)
-  PAGE_WIDTH = Math.max(841.89, panelWidthPt + PANEL_MARGIN_LEFT + PANEL_MARGIN_RIGHT + 2 * (MARGIN + INNER_MARGIN));
-  PAGE_HEIGHT = Math.max(595.28, panelHeightPt + PANEL_MARGIN_TOP + PANEL_MARGIN_BOTTOM + 2 * (MARGIN + INNER_MARGIN));
+  // Minimale Seitengrösse: A4 quer (297 x 210 mm)
+  const MIN_PAGE_WIDTH = 841.89;   // 297mm
+  const MIN_PAGE_HEIGHT = 595.28;  // 210mm
+
+  // Gesamte Ränder um das Panel (in PDF-Punkten)
+  const totalMarginH = PANEL_MARGIN_LEFT + PANEL_MARGIN_RIGHT + 2 * (MARGIN + INNER_MARGIN);
+  const totalMarginV = PANEL_MARGIN_TOP + PANEL_MARGIN_BOTTOM + 2 * (MARGIN + INNER_MARGIN);
+
+  // Verfügbarer Platz für das Panel bei maximaler Seitengrösse
+  const maxPanelAreaW = MAX_PAGE_WIDTH - totalMarginH;
+  const maxPanelAreaH = MAX_PAGE_HEIGHT - totalMarginV;
+
+  // Panel-Dimensionen bei 1:1 Massstab
+  const panelWidthPt1to1 = panel.width * MM_TO_PT;
+  const panelHeightPt1to1 = panel.height * MM_TO_PT;
+
+  // Standard-Massstäbe für technische Zeichnungen (ISO 5455)
+  const STANDARD_SCALES = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20];
+
+  // Massstab berechnen: Passt das Panel bei 1:1 auf max. A3?
+  let scaleRatio = 1;
+  if (panelWidthPt1to1 > maxPanelAreaW || panelHeightPt1to1 > maxPanelAreaH) {
+    // Panel ist zu gross für A3 bei 1:1 → Skalierung nötig
+    const fitScaleW = maxPanelAreaW / panelWidthPt1to1;
+    const fitScaleH = maxPanelAreaH / panelHeightPt1to1;
+    const fitScale = Math.min(fitScaleW, fitScaleH);
+    // Nächsten Standard-Massstab finden, bei dem das Panel passt (1/ratio <= fitScale)
+    scaleRatio = STANDARD_SCALES.find(r => 1 / r <= fitScale) || STANDARD_SCALES[STANDARD_SCALES.length - 1];
+  }
+
+  // Skalierte Panel-Dimensionen
+  const panelWidthPt = panel.width * MM_TO_PT / scaleRatio;
+  const panelHeightPt = panel.height * MM_TO_PT / scaleRatio;
+
+  // Seitengrösse: passend zum skalierten Panel (min A4, max A3)
+  PAGE_WIDTH = Math.min(MAX_PAGE_WIDTH, Math.max(MIN_PAGE_WIDTH, panelWidthPt + totalMarginH));
+  PAGE_HEIGHT = Math.min(MAX_PAGE_HEIGHT, Math.max(MIN_PAGE_HEIGHT, panelHeightPt + totalMarginV));
 
   // Alle abgeleiteten Werte neu berechnen
   BORDER_RIGHT = PAGE_WIDTH - MARGIN - INNER_MARGIN;
@@ -568,8 +605,8 @@ export async function generateDimensionDrawing(
   // Seite hinzufügen (dynamische Größe, passt sich an Panel an)
   const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
-  // Skalierung: exakt 1:1 Maßstab (1mm Panel = 1mm auf PDF)
-  const scale = MM_TO_PT;
+  // Skalierung: MM_TO_PT / scaleRatio (bei 1:1 = MM_TO_PT, bei 1:2 = halbe Grösse etc.)
+  const scale = MM_TO_PT / scaleRatio;
 
   // Panel-Positionierung: mittig im verfügbaren Zeichnungsbereich
   const panelWidthPx = panel.width * scale;
@@ -577,13 +614,10 @@ export async function generateDimensionDrawing(
   const offsetX = BORDER_LEFT + PANEL_MARGIN_LEFT;
   const offsetY = BORDER_BOTTOM + PANEL_MARGIN_BOTTOM;
 
-  // Hilfsfunktion: mm → PDF-Koordinaten
+  // Hilfsfunktion: mm → PDF-Koordinaten (skaliert mit dem gewählten Massstab)
   // toY ist invertiert: Panel Y=0 (oben im Canvas) → PDF oben, Y=panel.height (unten) → PDF unten
   const toX = (mm: number) => offsetX + mm * scale;
   const toY = (mm: number) => offsetY + panelHeightPx - mm * scale;
-
-  // Maßstab-Anzeige im Titelblock: immer 1:1
-  const scaleRatio = 1;
 
   // ----------------------------------------------------------------
   // 1. Rahmen mit Gitterreferenz-System
@@ -652,7 +686,7 @@ export async function generateDimensionDrawing(
     const endY = toY(vscore.end.y);
 
     drawDashedLine(page, startX, startY, endX, endY, {
-      color: COLORS.pink,
+      color: COLORS.vscore,
       thickness: 0.8,
       dashLength: 4,
       gapLength: 2,
@@ -702,7 +736,7 @@ export async function generateDimensionDrawing(
     switch (tab.type) {
       case 'solid': tabColor = COLORS.orange; break;
       case 'mousebites': tabColor = COLORS.cyan; break;
-      case 'vscore': tabColor = COLORS.pink; break;
+      case 'vscore': tabColor = COLORS.vscore; break;
       default: tabColor = COLORS.orange;
     }
 
@@ -790,16 +824,18 @@ export async function generateDimensionDrawing(
   // ----------------------------------------------------------------
 
   // Farben für PDF (gleiche Zuordnung wie im Canvas)
+  // Farben exakt wie im Canvas (Hex → RGB)
+  // Canvas: 0xcccccc, 0x888888, 0x3b82f6, 0xff69b4, 0x00cc66, 0xff6666, 0x00e5ff, 0xff9100
   const ORD_COLORS = {
-    panel:  COLORS.gray,        // Panel-Kanten
-    frame:  COLORS.dimGray,     // Rahmen
-    board:  COLORS.blue,        // Board-Kanten
-    vscore: COLORS.pink,        // V-Scores
-    fiducial: COLORS.green,     // Fiducials
-    toolinghole: COLORS.red,    // Tooling Holes
-    routeBoard: COLORS.routingCyan,
-    routePanel: COLORS.routingOrange,
-    axis: COLORS.dimGray,       // Achsen-Farbe
+    panel:      rgb(0.8, 0.8, 0.8),         // 0xcccccc
+    frame:      rgb(0.533, 0.533, 0.533),    // 0x888888
+    board:      rgb(0.231, 0.510, 0.965),    // 0x3b82f6
+    vscore:     rgb(1.0, 0.412, 0.706),      // 0xff69b4
+    fiducial:   rgb(0.0, 0.8, 0.4),          // 0x00cc66
+    toolinghole: rgb(1.0, 0.4, 0.4),         // 0xff6666
+    routeBoard: rgb(0.0, 0.898, 1.0),        // 0x00e5ff
+    routePanel: rgb(1.0, 0.569, 0.0),        // 0xff9100
+    axis: COLORS.dimGray,
   };
 
   // Position-Interfaces (gleich wie im Canvas)
@@ -866,8 +902,9 @@ export async function generateDimensionDrawing(
     addPdfPos(pdfYPositions, { value: hole.position.y, color: ORD_COLORS.toolinghole, type: 'toolinghole', key: `ord-y-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
   }
 
-  // Fräskonturen (nicht-auto, nicht-Kopie)
-  for (const contour of panel.routingContours) {
+  // Fräskonturen (nicht-auto, nicht-Kopie) — nur wenn Bemaßung nicht ausgeblendet
+  const hideRoutingDims = panel.dimensionOverrides?.hideRoutingDimensions;
+  if (!hideRoutingDims) for (const contour of panel.routingContours) {
     if (!contour.visible || contour.isSyncCopy || contour.creationMethod === 'auto') continue;
     if (contour.segments.length === 0) continue;
     const rColor = contour.contourType === 'boardOutline' ? ORD_COLORS.routeBoard : ORD_COLORS.routePanel;
@@ -901,19 +938,24 @@ export async function generateDimensionDrawing(
   const pdfYLevels = pdfAssignStagger(pdfYPositions);
 
   // Achsen-Abstand
+  // Achsen-Abstand zum Panel — mit scaleRatio kompensiert,
+  // damit der Abstand auf dem Papier immer gleich aussieht
   const axisOff = panel.dimensionOverrides?.ordinateAxisOffset || { x: 10, y: 10 };
-  const xAxisYmm = panel.height + axisOff.y;  // Y-Position der X-Achse (mm)
-  const yAxisXmm = -axisOff.x;                // X-Position der Y-Achse (mm)
-  const tickLen = 1.5;       // mm
-  const staggerStep = 5;    // mm pro Level
+  const xAxisYmm = panel.height + axisOff.y * scaleRatio;  // Y-Position der X-Achse (mm)
+  const yAxisXmm = -(axisOff.x * scaleRatio);              // X-Position der Y-Achse (mm)
+  // Tick-Länge und Stagger in mm — mit scaleRatio kompensiert,
+  // damit sie auf dem Papier immer gleich gross erscheinen
+  const tickLen = 1.5 * scaleRatio;       // mm (kompensiert)
+  const staggerStep = 5 * scaleRatio;    // mm pro Level (kompensiert)
   const fontSize = 3.5;
 
   // Nullpunkt-Marker
   const npX = toX(0);
   const npY = toY(0);
-  page.drawCircle({ x: npX, y: npY, size: 1.5 * scale, borderColor: COLORS.black, borderWidth: 0.8 });
-  page.drawLine({ start: { x: npX - 1 * scale, y: npY }, end: { x: npX + 1 * scale, y: npY }, color: COLORS.black, thickness: 0.4 });
-  page.drawLine({ start: { x: npX, y: npY - 1 * scale }, end: { x: npX, y: npY + 1 * scale }, color: COLORS.black, thickness: 0.4 });
+  // Nullpunkt-Marker: feste Grösse auf dem Papier (unabhängig vom Massstab)
+  page.drawCircle({ x: npX, y: npY, size: 1.5 * MM_TO_PT, borderColor: COLORS.black, borderWidth: 0.8 });
+  page.drawLine({ start: { x: npX - 1 * MM_TO_PT, y: npY }, end: { x: npX + 1 * MM_TO_PT, y: npY }, color: COLORS.black, thickness: 0.4 });
+  page.drawLine({ start: { x: npX, y: npY - 1 * MM_TO_PT }, end: { x: npX, y: npY + 1 * MM_TO_PT }, color: COLORS.black, thickness: 0.4 });
 
   // X-Achse (horizontal, unterhalb des Panels)
   page.drawLine({
@@ -956,7 +998,7 @@ export async function generateDimensionDrawing(
     // PDF Text: rotieren um -90° damit er senkrecht steht (liest man von rechts)
     page.drawText(txt, {
       x: toX(pos.value) + fontSize * 0.35,
-      y: toY(tickEndMm + 0.5) - txtW,
+      y: toY(tickEndMm + 0.5 * scaleRatio) - txtW,
       size: fontSize, font, color: pos.color,
       rotate: { type: 'degrees' as any, angle: 0 } as any,
     });
@@ -1003,7 +1045,7 @@ export async function generateDimensionDrawing(
     const txt = pos.value.toFixed(1);
     const txtW = font.widthOfTextAtSize(txt, fontSize);
     page.drawText(txt, {
-      x: toX(tickEndMm - 0.5) - txtW,
+      x: toX(tickEndMm - 0.5 * scaleRatio) - txtW,
       y: toY(pos.value) - fontSize * 0.35,
       size: fontSize, font, color: pos.color,
     });
@@ -1013,41 +1055,42 @@ export async function generateDimensionDrawing(
   // 9. Detail-Legende (Farbcode + Detailparameter)
   // ----------------------------------------------------------------
   if (!hiddenElements.has('routing-legend')) {
-    const allPdfEntries: Array<{ color: ReturnType<typeof rgb>; label: string }> = [];
+    type PdfLegendSymbol = 'line' | 'dashed' | 'fiducial' | 'hole' | 'routing';
+    const allPdfEntries: Array<{ color: ReturnType<typeof rgb>; label: string; symbol: PdfLegendSymbol; toolDiameter?: number }> = [];
 
     // Farbcode-Erklärungen
-    allPdfEntries.push({ color: ORD_COLORS.panel, label: 'Panel-Kanten' });
+    allPdfEntries.push({ color: ORD_COLORS.panel, label: 'Panel-Kanten', symbol: 'line' });
     if (panel.frame.left > 0 || panel.frame.right > 0 || panel.frame.top > 0 || panel.frame.bottom > 0) {
-      allPdfEntries.push({ color: ORD_COLORS.frame, label: 'Nutzenrand' });
+      allPdfEntries.push({ color: ORD_COLORS.frame, label: 'Nutzenrand', symbol: 'line' });
     }
     if (instances.length > 0) {
-      allPdfEntries.push({ color: ORD_COLORS.board, label: 'Board-Kanten' });
+      allPdfEntries.push({ color: ORD_COLORS.board, label: 'Board-Kanten', symbol: 'line' });
     }
 
     if (panel.vscoreLines.length > 0) {
       const vs = panel.vscoreLines[0];
-      allPdfEntries.push({ color: COLORS.pink, label: `V-Score: ${vs.depth}% / ${vs.angle}°` });
+      allPdfEntries.push({ color: ORD_COLORS.vscore, label: `V-Score: ${vs.depth}% / ${vs.angle}°`, symbol: 'dashed' });
     }
     if (panel.fiducials.length > 0) {
       const f = panel.fiducials[0];
-      allPdfEntries.push({ color: COLORS.green, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}` });
+      allPdfEntries.push({ color: ORD_COLORS.fiducial, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}`, symbol: 'fiducial' });
     }
     const pdfHoleTypes = new Map<string, string>();
     for (const h of panel.toolingHoles) {
       const k = `${h.diameter.toFixed(1)}-${h.plated}`;
       if (!pdfHoleTypes.has(k)) pdfHoleTypes.set(k, `Bohrung: Ø${h.diameter.toFixed(1)} ${h.plated ? 'PTH' : 'NPTH'}`);
     }
-    Array.from(pdfHoleTypes.values()).forEach(label => allPdfEntries.push({ color: COLORS.red, label }));
+    Array.from(pdfHoleTypes.values()).forEach(label => allPdfEntries.push({ color: ORD_COLORS.toolinghole, label, symbol: 'hole' }));
     // Fräskonturen
-    const pdfRoutingTypes = new Map<string, { color: ReturnType<typeof rgb>; label: string }>();
+    const pdfRoutingTypes = new Map<string, { color: ReturnType<typeof rgb>; label: string; toolDiameter: number }>();
     for (const contour of panel.routingContours) {
       if (!contour.visible || contour.isSyncCopy) continue;
-      const rColor = contour.contourType === 'boardOutline' ? COLORS.routingCyan : COLORS.routingOrange;
+      const rColor = contour.contourType === 'boardOutline' ? ORD_COLORS.routeBoard : ORD_COLORS.routePanel;
       const tLabel = contour.contourType === 'boardOutline' ? 'Board' : 'Panel';
       const rKey = `${tLabel}-${contour.toolDiameter.toFixed(1)}`;
-      if (!pdfRoutingTypes.has(rKey)) pdfRoutingTypes.set(rKey, { color: rColor, label: `Fräskontur: ${tLabel} Ø${contour.toolDiameter.toFixed(1)}` });
+      if (!pdfRoutingTypes.has(rKey)) pdfRoutingTypes.set(rKey, { color: rColor, label: `Fräskontur: ${tLabel} Ø${contour.toolDiameter.toFixed(1)}`, toolDiameter: contour.toolDiameter });
     }
-    Array.from(pdfRoutingTypes.values()).forEach(entry => allPdfEntries.push(entry));
+    Array.from(pdfRoutingTypes.values()).forEach(entry => allPdfEntries.push({ ...entry, symbol: 'routing' }));
 
     if (allPdfEntries.length > 0) {
       const lineH = 5;
@@ -1056,50 +1099,93 @@ export async function generateDimensionDrawing(
       const titleH = 5;
       const legendH = legendPad * 2 + allPdfEntries.length * lineH + titleH;
 
-      const boxWidthPt = legendW * scale;
-      const boxHeightPt = legendH * scale;
+      // Legende: feste Grösse auf dem Papier (unabhängig vom Massstab)
+      // Verwendet MM_TO_PT statt scale, damit Text und Symbole immer lesbar bleiben
+      const legendScale = MM_TO_PT;
+      const boxWidthPt = legendW * legendScale;
+      const boxHeightPt = legendH * legendScale;
       const lx = BORDER_RIGHT - boxWidthPt;
       const boxBottom = TITLE_BLOCK_Y + TITLE_BLOCK_HEIGHT + 8;
       const ly = boxBottom + boxHeightPt;
 
       page.drawRectangle({
         x: lx, y: boxBottom,
-        width: legendW * scale, height: legendH * scale,
+        width: legendW * legendScale, height: legendH * legendScale,
         color: rgb(1, 1, 1), borderColor: rgb(0, 0, 0), borderWidth: 0.5,
       });
 
-      const titleLineY = ly - titleH * scale;
+      const titleLineY = ly - titleH * legendScale;
       page.drawLine({
         start: { x: lx, y: titleLineY },
-        end: { x: lx + legendW * scale, y: titleLineY },
+        end: { x: lx + legendW * legendScale, y: titleLineY },
         color: rgb(0, 0, 0), thickness: 0.5,
       });
 
       page.drawText('Details', {
-        x: lx + legendPad * scale,
-        y: ly - (titleH - 1) * scale,
+        x: lx + legendPad * legendScale,
+        y: ly - (titleH - 1) * legendScale,
         size: 4, font, color: rgb(0, 0, 0),
       });
 
       allPdfEntries.forEach((entry, idx) => {
         const entryTopY = titleH + legendPad + idx * lineH;
-        const lineCenterY = ly - (entryTopY + lineH * 0.5) * scale;
-        page.drawLine({
-          start: { x: lx + legendPad * scale, y: lineCenterY },
-          end: { x: lx + (legendPad + 10) * scale, y: lineCenterY },
-          color: entry.color, thickness: 2,
-        });
+        const lineCenterY = ly - (entryTopY + lineH * 0.5) * legendScale;
+        const symCenterX = lx + (legendPad + 5) * legendScale;
+        const symR = 1.0 * legendScale;
+
+        if (entry.symbol === 'fiducial') {
+          page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 2, borderColor: entry.color, borderWidth: 0.6 });
+          page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 0.8, color: entry.color });
+        } else if (entry.symbol === 'hole') {
+          page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 2, borderColor: entry.color, borderWidth: 0.6 });
+          page.drawLine({ start: { x: symCenterX - symR, y: lineCenterY }, end: { x: symCenterX + symR, y: lineCenterY }, color: entry.color, thickness: 0.5 });
+          page.drawLine({ start: { x: symCenterX, y: lineCenterY - symR }, end: { x: symCenterX, y: lineCenterY + symR }, color: entry.color, thickness: 0.5 });
+        } else if (entry.symbol === 'dashed') {
+          const dashLen = 2.5 * legendScale;
+          const gapLen = 1.5 * legendScale;
+          let dx = lx + legendPad * legendScale;
+          for (let d = 0; d < 3; d++) {
+            page.drawLine({ start: { x: dx, y: lineCenterY }, end: { x: dx + dashLen, y: lineCenterY }, color: entry.color, thickness: 1.2 });
+            dx += dashLen + gapLen;
+          }
+        } else if (entry.symbol === 'routing') {
+          const lineStartX = lx + legendPad * legendScale;
+          const lineEndX = lx + (legendPad + 10) * legendScale;
+          const toolWidthPt = (entry.toolDiameter || 2) * legendScale;
+          page.drawLine({
+            start: { x: lineStartX, y: lineCenterY },
+            end: { x: lineEndX, y: lineCenterY },
+            color: entry.color, thickness: toolWidthPt, opacity: 0.15,
+          });
+          page.drawLine({
+            start: { x: lineStartX, y: lineCenterY },
+            end: { x: lineEndX, y: lineCenterY },
+            color: entry.color, thickness: 0.8,
+          });
+        } else {
+          page.drawLine({
+            start: { x: lx + legendPad * legendScale, y: lineCenterY },
+            end: { x: lx + (legendPad + 10) * legendScale, y: lineCenterY },
+            color: entry.color, thickness: 2,
+          });
+        }
+
+        const fontSize = 3.5;
         page.drawText(entry.label, {
-          x: lx + (legendPad + 12) * scale,
-          y: lineCenterY - 1.2 * scale,
-          size: 3.5, font, color: rgb(0, 0, 0),
+          x: lx + (legendPad + 12) * legendScale,
+          y: lineCenterY - fontSize * 0.35,
+          size: fontSize, font, color: entry.color,
         });
       });
     }
   }
 
-  // (Detail-Tabelle, Notizen, Element-Beschreibungen, V-Score-Detail, PCB-Dicken-Tabelle
-  //  werden NICHT gerendert — nur was im Canvas sichtbar ist)
+  // ----------------------------------------------------------------
+  // V-Score Querschnittsdetail (links neben Titelblock, wenn V-Scores vorhanden)
+  // ----------------------------------------------------------------
+  if (panel.vscoreLines.length > 0) {
+    drawVScoreDetail(page, font, fontBold, panel);
+  }
 
   // ----------------------------------------------------------------
   // 16. ISO-Titelblock (unten rechts) mit Logo
@@ -1267,6 +1353,155 @@ function drawBorderWithGrid(
       page.drawLine({ start: { x: BORDER_RIGHT + INNER_MARGIN, y: y + triSize }, end: { x: BORDER_RIGHT, y }, color: COLORS.black, thickness: 0.3 });
     }
   }
+}
+
+// ============================================================================
+// V-Score Querschnittsdetail (links neben Titelblock)
+// ============================================================================
+
+/**
+ * Zeichnet eine technische Querschnittsdarstellung des V-Score-Einschnitts.
+ * Zeigt PCB-Querschnitt mit V-förmigem Einschnitt von oben und unten,
+ * bemaßt mit Tiefe (%), Winkel (°) und Restmaterialstärke.
+ */
+function drawVScoreDetail(
+  page: PDFPage,
+  font: PDFFont,
+  fontBold: PDFFont,
+  panel: Panel
+) {
+  const vs = panel.vscoreLines[0];
+  const depth = vs.depth;       // z.B. 70 (%)
+  const angle = vs.angle;       // z.B. 30 (°)
+
+  // Box-Position: links neben dem Titelblock
+  const boxW = 130;
+  const boxH = 100;
+  const boxX = TITLE_BLOCK_X - boxW - 10;
+  const boxY = TITLE_BLOCK_Y;
+
+  // Rahmen
+  page.drawRectangle({
+    x: boxX, y: boxY, width: boxW, height: boxH,
+    borderColor: COLORS.black, borderWidth: 0.5,
+  });
+
+  // Titel
+  page.drawText('V-Score Detail', {
+    x: boxX + 4, y: boxY + boxH - 10,
+    size: 6, font: fontBold, color: COLORS.black,
+  });
+
+  // Trennlinie unter Titel
+  page.drawLine({
+    start: { x: boxX, y: boxY + boxH - 14 },
+    end: { x: boxX + boxW, y: boxY + boxH - 14 },
+    color: COLORS.black, thickness: 0.5,
+  });
+
+  // --- Querschnittsdarstellung ---
+  // Zeichnungsbereich innerhalb der Box (rechts genug Platz für Bemaßung lassen)
+  const drawAreaX = boxX + 10;
+  const drawAreaY = boxY + 10;
+  const drawAreaH = boxH - 30;
+
+  // PCB-Querschnitt: Rechteck (Platine) — rechts 40pt Platz für Maßlinien
+  const pcbW = boxW - 55;
+  const pcbH = drawAreaH * 0.45;
+  const pcbX = drawAreaX;
+  const pcbY = drawAreaY + (drawAreaH - pcbH) / 2;
+
+  // PCB-Körper (hellgrau gefüllt)
+  page.drawRectangle({
+    x: pcbX, y: pcbY, width: pcbW, height: pcbH,
+    color: rgb(0.92, 0.92, 0.88),
+    borderColor: COLORS.black, borderWidth: 0.8,
+  });
+
+  // V-Einschnitt-Geometrie berechnen
+  const halfAngleRad = (angle / 2) * Math.PI / 180;
+  const depthFraction = depth / 100;
+  // Jede Seite wird um depth% eingeschnitten (z.B. 33% von oben + 33% von unten)
+  const cutDepthTop = pcbH * depthFraction;     // Einschnitt von oben
+  const cutDepthBottom = pcbH * depthFraction;  // Einschnitt von unten
+  const centerX = pcbX + pcbW / 2;
+
+  // Breite des V-Einschnitts an der Oberfläche (berechnet aus Tiefe und Winkel)
+  const topCutWidth = cutDepthTop * Math.tan(halfAngleRad);
+  const bottomCutWidth = cutDepthBottom * Math.tan(halfAngleRad);
+
+  // V-Einschnitt von OBEN (Spitze zeigt nach unten)
+  const topY = pcbY + pcbH; // Oberkante PCB
+  const topTipY = topY - cutDepthTop;
+  page.drawLine({
+    start: { x: centerX - topCutWidth, y: topY },
+    end: { x: centerX, y: topTipY },
+    color: COLORS.vscore, thickness: 1.2,
+  });
+  page.drawLine({
+    start: { x: centerX + topCutWidth, y: topY },
+    end: { x: centerX, y: topTipY },
+    color: COLORS.vscore, thickness: 1.2,
+  });
+
+  // V-Einschnitt von UNTEN (Spitze zeigt nach oben)
+  const bottomY = pcbY; // Unterkante PCB
+  const bottomTipY = bottomY + cutDepthBottom;
+  page.drawLine({
+    start: { x: centerX - bottomCutWidth, y: bottomY },
+    end: { x: centerX, y: bottomTipY },
+    color: COLORS.vscore, thickness: 1.2,
+  });
+  page.drawLine({
+    start: { x: centerX + bottomCutWidth, y: bottomY },
+    end: { x: centerX, y: bottomTipY },
+    color: COLORS.vscore, thickness: 1.2,
+  });
+
+  // --- Bemaßungen ---
+
+  // Winkel-Bogen oben (kleiner Bogen am V-Einschnitt)
+  const arcR = 12;
+  // Winkel-Annotation: "30°" neben dem V
+  page.drawText(`${angle}°`, {
+    x: centerX + topCutWidth + 4, y: topY - cutDepthTop / 2 - 2,
+    size: 5, font, color: COLORS.vscore,
+  });
+
+  // Tiefe-Annotation rechts
+  const dimX = pcbX + pcbW + 5;
+
+  // Gesamthöhe = PCB
+  // Pfeil oben
+  page.drawLine({
+    start: { x: dimX, y: pcbY },
+    end: { x: dimX, y: pcbY + pcbH },
+    color: COLORS.vscore, thickness: 0.4,
+  });
+  // Hilfslinie oben
+  page.drawLine({
+    start: { x: pcbX + pcbW, y: pcbY + pcbH },
+    end: { x: dimX + 3, y: pcbY + pcbH },
+    color: COLORS.vscore, thickness: 0.3,
+  });
+  // Hilfslinie unten
+  page.drawLine({
+    start: { x: pcbX + pcbW, y: pcbY },
+    end: { x: dimX + 3, y: pcbY },
+    color: COLORS.vscore, thickness: 0.3,
+  });
+
+  // Tiefe-Text rechts
+  page.drawText(`${depth}%`, {
+    x: dimX + 2, y: pcbY + pcbH / 2 - 2,
+    size: 5, font: fontBold, color: COLORS.vscore,
+  });
+
+  // Label "Tiefe" und "Winkel" unten
+  page.drawText(`Tiefe: ${depth}%  |  Winkel: ${angle}°`, {
+    x: boxX + 4, y: boxY + 3,
+    size: 4.5, font, color: COLORS.vscore,
+  });
 }
 
 // ============================================================================
@@ -1714,143 +1949,6 @@ function drawElementDescriptions(
   });
 }
 
-// ============================================================================
-// V-Score Detail-Ansicht (unten Mitte)
-// ============================================================================
-
-function drawVScoreDetail(
-  page: PDFPage,
-  font: PDFFont,
-  fontBold: PDFFont,
-  panel: Panel,
-  options: DrawingOptions
-) {
-  // Position: Unten in der Mitte (zwischen PCB-Tabelle und Titelblock)
-  const detailX = BORDER_LEFT + 200;
-  const detailY = BORDER_BOTTOM + 12;
-  const detailW = 120;
-  const detailH = 90;
-
-  // Überschrift
-  page.drawText('DETAIL - V-Scoring', {
-    x: detailX + detailW / 2 - 35,
-    y: detailY + detailH - 5,
-    size: 6,
-    font: fontBold,
-    color: COLORS.black,
-  });
-
-  // V-Score Parameter aus dem ersten V-Score holen
-  const vs0 = panel.vscoreLines[0];
-  const angle = vs0.angle || 30;
-  const depth = vs0.depth || 33;
-
-  // PCB-Querschnitt zeichnen (zwei Trapez-Formen mit V-Kerbe)
-  const pcbY = detailY + 25;
-  const pcbH = 25;
-  const pcbW = 90;
-  const pcbX = detailX + 15;
-
-  // PCB-Körper links (Querschnitt)
-  page.drawRectangle({
-    x: pcbX,
-    y: pcbY,
-    width: pcbW / 2 - 8,
-    height: pcbH,
-    borderColor: COLORS.black,
-    borderWidth: 0.8,
-    color: COLORS.veryLightGray,
-  });
-
-  // PCB-Körper rechts (Querschnitt)
-  page.drawRectangle({
-    x: pcbX + pcbW / 2 + 8,
-    y: pcbY,
-    width: pcbW / 2 - 8,
-    height: pcbH,
-    borderColor: COLORS.black,
-    borderWidth: 0.8,
-    color: COLORS.veryLightGray,
-  });
-
-  // V-Kerbe (Dreieck von oben)
-  const vNotchTop = pcbY + pcbH;
-  const vNotchBottom = pcbY + pcbH * (1 - depth / 100);
-  const vNotchCenter = pcbX + pcbW / 2;
-
-  // Obere V-Kerbe
-  page.drawLine({
-    start: { x: vNotchCenter - 15, y: vNotchTop },
-    end: { x: vNotchCenter, y: vNotchBottom + 5 },
-    color: COLORS.black, thickness: 1,
-  });
-  page.drawLine({
-    start: { x: vNotchCenter + 15, y: vNotchTop },
-    end: { x: vNotchCenter, y: vNotchBottom + 5 },
-    color: COLORS.black, thickness: 1,
-  });
-
-  // Untere V-Kerbe (von unten)
-  page.drawLine({
-    start: { x: vNotchCenter - 15, y: pcbY },
-    end: { x: vNotchCenter, y: pcbY + pcbH * (depth / 100) - 5 },
-    color: COLORS.black, thickness: 1,
-  });
-  page.drawLine({
-    start: { x: vNotchCenter + 15, y: pcbY },
-    end: { x: vNotchCenter, y: pcbY + pcbH * (depth / 100) - 5 },
-    color: COLORS.black, thickness: 1,
-  });
-
-  // Winkel-Beschriftung (oben)
-  page.drawText(`${angle.toFixed(1)}°`, {
-    x: vNotchCenter + 15,
-    y: vNotchTop - 10,
-    size: 6,
-    font: fontBold,
-    color: COLORS.black,
-  });
-
-  // Winkel-Bogen andeuten (einfache Linie)
-  page.drawLine({
-    start: { x: vNotchCenter + 8, y: vNotchTop - 3 },
-    end: { x: vNotchCenter + 15, y: vNotchTop - 8 },
-    color: COLORS.black, thickness: 0.3,
-  });
-
-  // Restdicke-Bemaßung (horizontale Linie in der Mitte)
-  const restY = (vNotchBottom + 5 + pcbY + pcbH * (depth / 100) - 5) / 2;
-  drawDashedLine(page, vNotchCenter - 25, restY, vNotchCenter + 25, restY, {
-    color: COLORS.dimGray, thickness: 0.3, dashLength: 2, gapLength: 1,
-  });
-
-  // Restdicke-Wert
-  const pcbThick = parseFloat(options.pcbThickness || '1.6') || 1.6;
-  const restThick = pcbThick * (1 - depth * 2 / 100);
-  page.drawText(`${Math.max(0.05, restThick).toFixed(1)}`, {
-    x: vNotchCenter + 22,
-    y: restY - 3,
-    size: 5,
-    font,
-    color: COLORS.black,
-  });
-
-  // Legende-Text unter dem Diagramm
-  page.drawText(`PCB Thickness: ${pcbThick.toFixed(1)} mm`, {
-    x: pcbX,
-    y: pcbY - 10,
-    size: 4.5,
-    font,
-    color: COLORS.black,
-  });
-  page.drawText(`V-Score Angle: ${angle.toFixed(1)}°, Depth: ${depth}%`, {
-    x: pcbX,
-    y: pcbY - 19,
-    size: 4.5,
-    font,
-    color: COLORS.black,
-  });
-}
 
 // ============================================================================
 // PCB-Dicken-Tabelle (unten links)
@@ -2072,7 +2170,7 @@ function drawDetailTable(
   // --- V-Score Linien ---
   if (panel.vscoreLines.length > 0 && y > TITLE_BLOCK_Y + TITLE_BLOCK_HEIGHT + 30) {
     page.drawText(`V-Score (${panel.vscoreLines.length})`, {
-      x, y, size: labelSize, font: fontBold, color: COLORS.pink,
+      x, y, size: labelSize, font: fontBold, color: COLORS.vscore,
     });
     y -= lineHeight;
 
@@ -2135,7 +2233,7 @@ function drawDetailTable(
     }
     if (vsCount > 0) {
       page.drawText(`V-Score Tabs: ${vsCount}`, {
-        x: x + 3, y, size: valueSize, font, color: COLORS.pink,
+        x: x + 3, y, size: valueSize, font, color: COLORS.vscore,
       });
       y -= lineHeight;
     }

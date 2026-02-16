@@ -12,7 +12,7 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   ChevronDown,
   ChevronRight,
@@ -27,6 +27,8 @@ import {
   Scissors,
   Eye,
   EyeOff,
+  ArrowLeftRight,
+  Ruler,
 } from 'lucide-react';
 import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
@@ -281,11 +283,14 @@ function NumberInput({
     }
   };
 
-  // Enter-Taste übernimmt auch den Wert
+  // Enter-Taste übernimmt den Wert.
+  // stopPropagation verhindert, dass Delete/Backspace das ausgewählte Element
+  // im Canvas löscht statt nur die Zahl im Eingabefeld zu bearbeiten.
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
       handleBlur();
     }
+    e.stopPropagation();
   };
 
   // Kompakte Variante: Label links inline, kleinere Abstände, gleiche Breite
@@ -1302,6 +1307,8 @@ function RoutingContoursConfig() {
   const clearAllRoutingContours = usePanelStore((state) => state.clearAllRoutingContours);
   const removeRoutingContour = usePanelStore((state) => state.removeRoutingContour);
   const toggleRoutingContourVisibility = usePanelStore((state) => state.toggleRoutingContourVisibility);
+  const toggleRoutingContourFlipOffset = usePanelStore((state) => state.toggleRoutingContourFlipOffset);
+  const toggleRoutingDimensions = usePanelStore((state) => state.toggleRoutingDimensions);
   const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
   const selectedRoutingContourId = useSelectedRoutingContourId();
   const updateRoutingContourEndpoints = usePanelStore((state) => state.updateRoutingContourEndpoints);
@@ -1363,12 +1370,29 @@ function RoutingContoursConfig() {
             <RoutingVisibilityToggle />
             <span>{contourCount} Fräskontur(en)</span>
           </div>
-          <button
-            onClick={clearAllRoutingContours}
-            className="text-red-500 hover:text-red-700"
-          >
-            Alle löschen
-          </button>
+          <div className="flex items-center gap-2">
+            {/* Bemaßung ein-/ausblenden */}
+            <button
+              onClick={(e) => { e.stopPropagation(); toggleRoutingDimensions(); }}
+              className={cn(
+                'p-0.5 rounded transition-colors',
+                panel.dimensionOverrides?.hideRoutingDimensions
+                  ? 'text-gray-300 hover:text-gray-500'
+                  : 'text-cyan-600 hover:text-cyan-800'
+              )}
+              title={panel.dimensionOverrides?.hideRoutingDimensions
+                ? 'Fräskonturen-Bemaßung einblenden'
+                : 'Fräskonturen-Bemaßung ausblenden'}
+            >
+              <Ruler className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={clearAllRoutingContours}
+              className="text-red-500 hover:text-red-700"
+            >
+              Alle löschen
+            </button>
+          </div>
         </div>
       )}
 
@@ -1457,79 +1481,13 @@ function RoutingContoursConfig() {
                 isSelected={contour.id === selectedRoutingContourId}
                 onSelect={() => selectRoutingContour(contour.id)}
                 onToggleVisibility={() => toggleRoutingContourVisibility(contour.id)}
+                onFlipOffset={() => toggleRoutingContourFlipOffset(contour.id)}
                 onRemove={() => removeRoutingContour(contour.id)}
+                onUpdateEndpoints={(start, end) => updateRoutingContourEndpoints(contour.id, start, end)}
               />
             ))}
           </div>
 
-          {/* Koordinaten-Editor für ausgewählte manuelle Kontur */}
-          {(() => {
-            const selectedContour = routingContours.find((c) => c.id === selectedRoutingContourId);
-            if (!selectedContour || selectedContour.creationMethod === 'auto' || selectedContour.isSyncCopy) return null;
-            const firstSeg = selectedContour.segments[0];
-            const lastSeg = selectedContour.segments[selectedContour.segments.length - 1];
-            if (!firstSeg || !lastSeg) return null;
-
-            return (
-              <div className="border-t pt-2 mt-2 space-y-1.5">
-                <span className="text-[11px] font-medium text-gray-700">Endpunkte:</span>
-
-                {/* Startpunkt - kompakt in einer Zeile */}
-                <div className="space-y-0.5">
-                  <span className="text-[10px] text-green-600 font-medium">Start</span>
-                  <div className="flex gap-1.5">
-                    <NumberInput
-                      label="X"
-                      value={firstSeg.start.x}
-                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, { x: v, y: firstSeg.start.y })}
-                      min={0}
-                      max={500}
-                      step={0.01}
-                      decimals={2}
-                      compact
-                    />
-                    <NumberInput
-                      label="Y"
-                      value={firstSeg.start.y}
-                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, { x: firstSeg.start.x, y: v })}
-                      min={0}
-                      max={500}
-                      step={0.01}
-                      decimals={2}
-                      compact
-                    />
-                  </div>
-                </div>
-
-                {/* Endpunkt - kompakt in einer Zeile */}
-                <div className="space-y-0.5">
-                  <span className="text-[10px] text-red-600 font-medium">Ende</span>
-                  <div className="flex gap-1.5">
-                    <NumberInput
-                      label="X"
-                      value={lastSeg.end.x}
-                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, undefined, { x: v, y: lastSeg.end.y })}
-                      min={0}
-                      max={500}
-                      step={0.01}
-                      decimals={2}
-                      compact
-                    />
-                    <NumberInput
-                      label="Y"
-                      value={lastSeg.end.y}
-                      onChange={(v) => updateRoutingContourEndpoints(selectedContour.id, undefined, { x: lastSeg.end.x, y: v })}
-                      min={0}
-                      max={500}
-                      step={0.01}
-                      decimals={2}
-                      compact
-                    />
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
         </div>
       )}
     </div>
@@ -1547,7 +1505,9 @@ interface RoutingContourItemProps {
   isSelected: boolean;
   onSelect: () => void;
   onToggleVisibility: () => void;
+  onFlipOffset: () => void;
   onRemove: () => void;
+  onUpdateEndpoints: (start?: { x: number; y: number }, end?: { x: number; y: number }) => void;
 }
 
 function RoutingContourItem({
@@ -1557,12 +1517,23 @@ function RoutingContourItem({
   isSelected,
   onSelect,
   onToggleVisibility,
+  onFlipOffset,
   onRemove,
+  onUpdateEndpoints,
 }: RoutingContourItemProps) {
   const isBoardOutline = contour.contourType === 'boardOutline';
+  const itemRef = useRef<HTMLDivElement>(null);
+
+  // Auto-Scroll: Wenn im Canvas eine Kontur ausgewählt wird, scrollt die Liste dorthin
+  useEffect(() => {
+    if (isSelected && itemRef.current) {
+      itemRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [isSelected]);
 
   return (
     <div
+      ref={itemRef}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -1626,6 +1597,22 @@ function RoutingContourItem({
               <EyeOff className="w-3.5 h-3.5" />
             )}
           </button>
+          {/* Seite wechseln - nur bei manuellen Konturen (nicht auto, nicht Sync-Kopien) */}
+          {!contour.isSyncCopy && contour.creationMethod !== 'auto' && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onFlipOffset();
+              }}
+              className={cn(
+                "hover:text-blue-600 text-xs",
+                contour.flipOffset ? "text-blue-500" : "text-gray-400"
+              )}
+              title={contour.flipOffset ? 'Offset-Seite zurücksetzen' : 'Offset-Seite wechseln'}
+            >
+              <ArrowLeftRight className="w-3.5 h-3.5" />
+            </button>
+          )}
           {/* Löschen - bei Sync-Kopien ausgeblendet (werden automatisch verwaltet) */}
           {!contour.isSyncCopy && (
             <button
@@ -1648,10 +1635,84 @@ function RoutingContourItem({
         </div>
       )}
 
+      {/* Badge wenn Offset geflippt */}
+      {contour.flipOffset && (
+        <span className="px-1 py-0.5 rounded text-[10px] bg-blue-50 text-blue-600">
+          Geflippt
+        </span>
+      )}
+
       {/* Segment-Anzahl */}
       <div className="text-[10px] text-gray-400">
         {contour.segments.length} Segment(e)
       </div>
+
+      {/* Koordinaten-Editor: Direkt im Item, wenn ausgewählt + manuell + nicht Sync-Kopie */}
+      {isSelected && contour.creationMethod !== 'auto' && !contour.isSyncCopy && (() => {
+        const firstSeg = contour.segments[0];
+        const lastSeg = contour.segments[contour.segments.length - 1];
+        if (!firstSeg || !lastSeg) return null;
+
+        return (
+          <div className="border-t pt-1.5 mt-1.5 space-y-1.5">
+            <span className="text-[10px] font-medium text-gray-600">Endpunkte:</span>
+
+            {/* Startpunkt */}
+            <div className="space-y-0.5">
+              <span className="text-[10px] text-green-600 font-medium">Start</span>
+              <div className="flex gap-1.5">
+                <NumberInput
+                  label="X"
+                  value={firstSeg.start.x}
+                  onChange={(v) => onUpdateEndpoints({ x: v, y: firstSeg.start.y })}
+                  min={0}
+                  max={500}
+                  step={0.01}
+                  decimals={2}
+                  compact
+                />
+                <NumberInput
+                  label="Y"
+                  value={firstSeg.start.y}
+                  onChange={(v) => onUpdateEndpoints({ x: firstSeg.start.x, y: v })}
+                  min={0}
+                  max={500}
+                  step={0.01}
+                  decimals={2}
+                  compact
+                />
+              </div>
+            </div>
+
+            {/* Endpunkt */}
+            <div className="space-y-0.5">
+              <span className="text-[10px] text-red-600 font-medium">Ende</span>
+              <div className="flex gap-1.5">
+                <NumberInput
+                  label="X"
+                  value={lastSeg.end.x}
+                  onChange={(v) => onUpdateEndpoints(undefined, { x: v, y: lastSeg.end.y })}
+                  min={0}
+                  max={500}
+                  step={0.01}
+                  decimals={2}
+                  compact
+                />
+                <NumberInput
+                  label="Y"
+                  value={lastSeg.end.y}
+                  onChange={(v) => onUpdateEndpoints(undefined, { x: lastSeg.end.x, y: v })}
+                  min={0}
+                  max={500}
+                  step={0.01}
+                  decimals={2}
+                  compact
+                />
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

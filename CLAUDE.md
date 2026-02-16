@@ -280,13 +280,47 @@ Der `usePanelStore` enthält:
   - `labelOffsets: Record<string, { dx, dy }>` — Legende-Verschiebung
   - `ordinateAxisOffset: { x: number, y: number }` — Achsen-Abstand zum Panel (Default: 10mm)
   - `hiddenElements: string[]` — ausgeblendete Element-Keys
+  - `hideRoutingDimensions: boolean` — Fräskonturen-Bemaßung ein-/ausblenden
   - `dimLineDistances` — Legacy, nicht mehr aktiv verwendet
+
+### Phase 9 - Erledigt
+
+- [x] **Vollständiges Undo/Redo-System**
+  - Undo-Button und Redo-Button in der Header-Toolbar
+  - **Tastenkürzel**: `Ctrl+Z` (Rückgängig), `Ctrl+Y` / `Ctrl+Shift+Z` (Wiederholen)
+  - **History-Limit**: Max. 50 Schritte, ältere werden automatisch verworfen
+  - Alle wichtigen Aktionen speichern einen Snapshot: Board/Instanz-Änderungen, Panel-Drehung, V-Score, Fiducials, Tooling Holes, Mousebites, Fräskonturen, Bemaßungen
+  - **Drag & Drop**: Bei jedem Drag-Start (Fiducials, Tooling Holes, Tabs, V-Score, Fräskonturen-Handles, Bemaßungs-Labels) wird ein Snapshot gespeichert
+- [x] **Fräskontur: Offset-Seite wechseln (Flip Offset)**
+  - Neues Feld `flipOffset` auf `RoutingContour`
+  - Button (Doppelpfeil-Symbol) pro Kontur in der Seitenleiste
+  - Badge "Geflippt" wird angezeigt wenn aktiv
+  - Geometrische Neuberechnung: Segmente werden um `2 * toolRadius` verschoben, Bogen-Radius angepasst
+  - Flip-Status wird bei Master-Board-Synchronisation korrekt übertragen
+- [x] **Verbesserte Offset-Berechnung (Winding Direction)**
+  - Neue Methode: **Shoelace-Formel** (`computeOutlineWindingSign`) statt Board-Mitte-Heuristik
+  - Funktioniert korrekt bei konkaven Board-Formen und Einbuchtungen
+- [x] **Fräskonturen-Bemaßung ein-/ausblenden**
+  - Neues Feld `hideRoutingDimensions` in `DimensionOverrides`
+  - Lineal-Button in der Fräskonturen-Kopfzeile
+  - Wirkt im Canvas und PDF-Export
+- [x] **PDF-Export: Automatische Massstab-Skalierung**
+  - Maximale Seitengrösse: A3 quer (420 x 297 mm), Minimum: A4 quer
+  - Grosse Panels werden automatisch auf ISO 5455 Standard-Massstäbe skaliert (1:1, 1:1.5, 1:2, 1:2.5, 1:3, 1:4, 1:5, 1:10, 1:20)
+  - **Korrekter Massstab im Titelblock** (z.B. "1:2" statt immer "1:1")
+  - Annotationen (Legende, Nullpunkt, Tick-Marks) bleiben massstabsunabhängig lesbar
+- [x] **UI-Verbesserungen Properties-Panel**
+  - Koordinaten-Editor für Fräskonturen direkt in der Kontur-Karte eingebettet
+  - Auto-Scroll zur ausgewählten Kontur
+  - Tastatur-Fix: `stopPropagation` verhindert Canvas-Löschung bei Eingabe
+- [x] **Canvas-Legende: Typspezifische Symbole**
+  - Durchgezogene/gestrichelte Linien, Fiducial-Ring, Bohrungs-Kreuz, Fräser-Streifen
 
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
 - [x] Projekt speichern/laden (.panelizer.json)
-- [ ] Undo/Redo
+- [x] Undo/Redo (Ctrl+Z / Ctrl+Y, max. 50 Schritte)
 - [ ] Tastenkürzel-Übersicht
 
 ---
@@ -433,18 +467,24 @@ Der `usePanelStore` enthält:
 
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
-2. PDF wird generiert und heruntergeladen (dynamische Seitengröße, mind. A4 quer)
-3. Enthält **identische Ordinatenbemaßung** wie im Canvas:
+2. PDF wird generiert und heruntergeladen
+3. **Automatische Massstab-Skalierung:**
+   - Kleine Panels → A4 quer, Massstab 1:1
+   - Mittlere Panels → A3 quer, Massstab 1:1
+   - Grosse Panels → A3 quer, automatisch skaliert (z.B. 1:2, 1:3 etc.)
+   - ISO 5455 Standard-Massstäbe: 1:1, 1:1.5, 1:2, 1:2.5, 1:3, 1:4, 1:5, 1:10, 1:20
+   - Korrekter Massstab im Titelblock angezeigt
+4. Enthält **identische Ordinatenbemaßung** wie im Canvas:
    - Panel-Umriss mit Board-Umrissen (blau) und sichtbaren Gerber-Layern
    - **V-Score Linien** (gestrichelt pink)
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
    - **Fiducials** und **Tooling Holes** als Symbole
    - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Fräserbreite-Streifen
    - **Ordinatenbemaßung**: X-Achse, Y-Achse, Nullpunkt, Tick-Marks, Hilfslinien
-   - **Detail-Legende** mit Farbcode und Parametern
+   - **Detail-Legende** mit Farbcode und Parametern (feste Grösse, massstabsunabhängig)
    - **Zeichnungsrahmen** mit Gitterreferenz-System (dynamische Spalten/Reihen)
-   - **ISO-Titelblock** mit SMTEC AG Logo
-4. Ausgeblendete Elemente erscheinen nicht im PDF
+   - **ISO-Titelblock** mit SMTEC AG Logo und korrektem Massstab
+5. Ausgeblendete Elemente erscheinen nicht im PDF
 
 ---
 
@@ -488,8 +528,7 @@ npm start
 ## Bekannte Einschränkungen
 
 1. **Gerber-Export** - noch nicht implementiert
-2. **Undo/Redo** - nur Grundgerüst vorhanden
-3. **Mixed Panels** - nur Arrays gleicher Boards (kein Mix verschiedener Boards)
+2. **Mixed Panels** - nur Arrays gleicher Boards (kein Mix verschiedener Boards)
 
 ---
 
