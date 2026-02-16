@@ -30,11 +30,10 @@ import {
   useShowDimensions,
   findNearestArcAtPoint,
   buildOutlineSegments,
-  DEFAULT_DIM_DISTANCES,
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
-import type { BoardInstance, Board, GerberFile, Fiducial, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset, DimensionLineDistances } from '@/types';
+import type { BoardInstance, Board, GerberFile, Fiducial, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset } from '@/types';
 
 // ============================================================================
 // Konstanten
@@ -104,7 +103,7 @@ export function PixiPanelCanvas() {
 
   // Bemaßungs-Overlay Aktionen
   const setDimensionLabelOffset = usePanelStore((state) => state.setDimensionLabelOffset);
-  const setDimLineDistances = usePanelStore((state) => state.setDimLineDistances);
+
   const hideDimensionElement = usePanelStore((state) => state.hideDimensionElement);
 
   // Fräskontur-Aktionen (Free-Draw + Follow-Outline)
@@ -131,13 +130,10 @@ export function PixiPanelCanvas() {
   // Generisch: dragItemType bestimmt ob Fiducial oder Tooling Hole gezogen wird
   const isDraggingItemRef = useRef(false);
   const draggedItemIdRef = useRef<string | null>(null);
-  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | 'dimensionLine' | null>(null);
-  // Für Dimension-Label-Drag: Key des Labels (z.B. "vscore-abc123") und Basis-Position in mm
+  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | null>(null);
+  // Für Dimension-Label-Drag: Key des Labels (z.B. "routing-legend") und Basis-Position in mm
   const dragDimLabelKeyRef = useRef<string | null>(null);
   const dragDimLabelBaseRef = useRef<{ x: number; y: number } | null>(null);
-  // Für Dimension-Line-Drag: Key der Maßlinie (z.B. "dimline-totalWidthBottom") und Drag-Achse
-  const dragDimLineKeyRef = useRef<string | null>(null);
-  const dragDimLineAxisRef = useRef<'x' | 'y' | null>(null); // 'y' = horizontale Linie vertikal verschieben, 'x' = vertikale Linie horizontal verschieben
   // Für V-Score Drag: Orientierung der Linie (horizontal/vertikal)
   const dragVScoreInfoRef = useRef<{ isHorizontal: boolean } | null>(null);
   // Für Tab-Drag: gespeicherte Info über Kante, Board-Instanz und Board-Größe
@@ -183,6 +179,8 @@ export function PixiPanelCanvas() {
     }
   }, [activeTool]);
 
+  // Alignment-Hilfslinien für Dimension-Label Snap (gold gestrichelte Linie zwischen ausgerichteten Labels)
+  const dimAlignGuideRef = useRef<Graphics | null>(null);
   // Snap-Vorschau für Mousebite-Platzierung (zeigt wo die Bohrungen landen würden)
   const snapPreviewRef = useRef<Container | null>(null);
   // Aktuelle Maus-Position in mm (für Snap-Berechnung)
@@ -561,6 +559,11 @@ export function PixiPanelCanvas() {
       app.stage.addChild(snapPreview);
       snapPreviewRef.current = snapPreview;
 
+      // Alignment-Hilfslinien für Dimension-Label Snap (auf stage-Ebene wie snapPreview)
+      const dimAlignGuide = new Graphics();
+      app.stage.addChild(dimAlignGuide);
+      dimAlignGuideRef.current = dimAlignGuide;
+
       setIsReady(true);
       console.log('PixiJS WebGL Canvas initialized');
     };
@@ -588,6 +591,11 @@ export function PixiPanelCanvas() {
     if (snapPreviewRef.current) {
       snapPreviewRef.current.position.set(viewport.offsetX, viewport.offsetY);
       snapPreviewRef.current.scale.set(viewport.scale);
+    }
+    // Alignment-Hilfslinien synchronisieren (liegt ebenfalls auf stage-Ebene)
+    if (dimAlignGuideRef.current) {
+      dimAlignGuideRef.current.position.set(viewport.offsetX, viewport.offsetY);
+      dimAlignGuideRef.current.scale.set(viewport.scale);
     }
   }, [viewport]);
 
@@ -955,25 +963,16 @@ export function PixiPanelCanvas() {
     if (showDimensions) {
       const dimOverlay = createDimensionOverlay(panel, boards, instances);
 
-      // Pointerdown-Handler auf Label-Containern registrieren (für Drag & Drop + Rechtsklick-Löschen)
-      // Rekursive Suche, da dimline-Container als Kinder von drawPixiDimLine-Text-Wrappern existieren
+      // Pointerdown-Handler registrieren: Legende = Drag, Ordinate-Ticks = Rechtsklick ausblenden
       const registerDimHandlers = (parent: Container) => {
         for (const child of parent.children) {
           if (!child.label) continue;
+          const childContainer = child as Container;
 
-          // Element-Labels (V-Score, Fiducial, Tooling Hole, Fräskontur)
-          if (
-            child.label.startsWith('vscore-') ||
-            child.label.startsWith('fiducial-') ||
-            child.label.startsWith('toolinghole-') ||
-            child.label.startsWith('routing-')
-          ) {
+          // Detail-Legende (routing-legend) = Drag & Drop + Rechtsklick ausblenden
+          if (child.label === 'routing-legend') {
             const labelKey = child.label;
-            const childContainer = child as Container;
-
-            // Linksklick = Drag & Drop
             childContainer.on('pointerdown', (event: any) => {
-              // Rechtsklick (button 2) = Element ausblenden
               if (event.button === 2) {
                 event.stopPropagation();
                 hideDimensionElement(labelKey);
@@ -984,56 +983,30 @@ export function PixiPanelCanvas() {
               dragItemTypeRef.current = 'dimensionLabel';
               dragDimLabelKeyRef.current = labelKey;
 
-              // Basis-Position in mm berechnen (Label-Position ohne Offset)
               const overrides = usePanelStore.getState().panel.dimensionOverrides;
               const currentOffset = overrides?.labelOffsets[labelKey] || { dx: 0, dy: 0 };
-
-              // Die aktuelle Label-Position in mm = Container-Position / px
               const currentMmX = childContainer.position.x / PIXELS_PER_MM;
               const currentMmY = childContainer.position.y / PIXELS_PER_MM;
-
-              // Basis = aktuelle Position minus aktuellen Offset
               dragDimLabelBaseRef.current = {
                 x: currentMmX - currentOffset.dx,
                 y: currentMmY - currentOffset.dy,
               };
-
               setCursorStyle('grabbing');
             });
-
-            // Rechtsklick Kontextmenü unterdrücken
-            childContainer.on('rightclick', (event: any) => {
-              event.stopPropagation();
-            });
+            childContainer.on('rightclick', (event: any) => { event.stopPropagation(); });
           }
 
-          // Maßlinien-Labels (dimline-totalWidthBottom, dimline-frameBottom, etc.)
-          if (child.label.startsWith('dimline-')) {
-            const dimKey = child.label.replace('dimline-', '');
-            const fullKey = child.label; // "dimline-totalWidthBottom" etc.
-            const childContainer = child as Container;
-            // Achse bestimmen: horizontale Maßlinien vertikal verschieben (y), vertikale horizontal (x)
-            const isHorizontalLine = childContainer.cursor === 'ns-resize';
-
+          // Ordinate-Ticks (ord-x-* / ord-y-*) = nur Rechtsklick zum Ausblenden
+          if (child.label.startsWith('ord-')) {
+            const tickKey = child.label;
             childContainer.on('pointerdown', (event: any) => {
-              // Rechtsklick (button 2) = Maßlinie ausblenden
               if (event.button === 2) {
                 event.stopPropagation();
-                hideDimensionElement(fullKey);
+                hideDimensionElement(tickKey);
                 return;
               }
-              event.stopPropagation();
-              isDraggingItemRef.current = true;
-              dragItemTypeRef.current = 'dimensionLine';
-              dragDimLineKeyRef.current = dimKey;
-              dragDimLineAxisRef.current = isHorizontalLine ? 'y' : 'x';
-              setCursorStyle(isHorizontalLine ? 'ns-resize' : 'ew-resize');
             });
-
-            // Rechtsklick Kontextmenü unterdrücken
-            childContainer.on('rightclick', (event: any) => {
-              event.stopPropagation();
-            });
+            childContainer.on('rightclick', (event: any) => { event.stopPropagation(); });
           }
         }
       };
@@ -1427,62 +1400,18 @@ export function PixiPanelCanvas() {
       setCursorPosition({ x: mmX, y: mmY });
     }
 
-    // === Dimension-Label Drag: Offset berechnen und im Store setzen ===
+    // === Dimension-Label Drag: Legende verschieben ===
     if (isDraggingItemRef.current && dragItemTypeRef.current === 'dimensionLabel' && dragDimLabelKeyRef.current && dragDimLabelBaseRef.current) {
       const base = dragDimLabelBaseRef.current;
-      // Neuer Offset = aktuelle Mausposition minus Basis-Position
       const newOffset = {
         dx: mmX - base.x,
         dy: mmY - base.y,
       };
       setDimensionLabelOffset(dragDimLabelKeyRef.current, newOffset);
-      return;
-    }
 
-    // === Dimension-Line Drag: Maßlinien-Abstand anpassen ===
-    if (isDraggingItemRef.current && dragItemTypeRef.current === 'dimensionLine' && dragDimLineKeyRef.current && dragDimLineAxisRef.current) {
-      const key = dragDimLineKeyRef.current;
-      const currentPanel = usePanelStore.getState().panel;
-
-      // Je nach Key den Abstand berechnen (immer positiv, mindestens 2mm)
-      let newDist = 2;
-      if (key === 'totalWidthBottom') {
-        newDist = Math.max(2, mmY - currentPanel.height);
-      } else if (key === 'totalHeightRight') {
-        newDist = Math.max(2, mmX - currentPanel.width);
-      } else if (key === 'frameBottom') {
-        newDist = Math.max(2, mmY - currentPanel.height);
-      } else if (key === 'frameRightTop' || key === 'frameRightBottom') {
-        newDist = Math.max(2, mmX - currentPanel.width);
-      } else if (key === 'boardOffsetBottom') {
-        newDist = Math.max(2, mmY - currentPanel.height);
-      } else if (key === 'boardOffsetLeft') {
-        newDist = Math.max(2, -mmX);
-      } else if (key === 'boardDimNearH') {
-        // Board-Breite Maßlinie: Abstand unter dem Board
-        const inst0 = currentPanel.instances[0];
-        const b0 = currentPanel.boards.find(b => b.id === inst0?.boardId);
-        if (inst0 && b0) {
-          const isRot = inst0.rotation === 90 || inst0.rotation === 270;
-          const bH = isRot ? b0.width : b0.height;
-          newDist = Math.max(2, mmY - (inst0.position.y + bH));
-        }
-      } else if (key === 'boardDimNearV') {
-        // Board-Höhe Maßlinie: Abstand links vom Board
-        const inst0 = currentPanel.instances[0];
-        if (inst0) {
-          newDist = Math.max(2, inst0.position.x - mmX);
-        }
-      }
-
-      // Wert auf 0.1mm runden
-      newDist = Math.round(newDist * 10) / 10;
-
-      // Im Store setzen — boardDimNearH und boardDimNearV beide auf boardDimNear mappen
-      if (key === 'boardDimNearH' || key === 'boardDimNearV') {
-        setDimLineDistances({ boardDimNear: newDist });
-      } else {
-        setDimLineDistances({ [key]: newDist } as any);
+      // Alignment-Hilfslinien löschen (nicht mehr benötigt)
+      if (dimAlignGuideRef.current) {
+        dimAlignGuideRef.current.clear();
       }
       return;
     }
@@ -1902,7 +1831,7 @@ export function PixiPanelCanvas() {
 
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
     }
-  }, [setViewport, updateFiducialPosition, updateToolingHolePosition, updateTabPosition, updateVScoreLinePosition, updateRoutingContourEndpoints, replaceRoutingContourSegments, setCursorPosition, setDimensionLabelOffset, setDimLineDistances]);
+  }, [setViewport, updateFiducialPosition, updateToolingHolePosition, updateTabPosition, updateVScoreLinePosition, updateRoutingContourEndpoints, replaceRoutingContourSegments, setCursorPosition, setDimensionLabelOffset]);
 
   const handleMouseUp = useCallback(() => {
     // Item-Drag beenden (Fiducial, Tooling Hole, Tab, V-Score oder Dimension-Label)
@@ -1913,8 +1842,11 @@ export function PixiPanelCanvas() {
     dragOutlineInfoRef.current = null;
     dragDimLabelKeyRef.current = null;
     dragDimLabelBaseRef.current = null;
-    dragDimLineKeyRef.current = null;
-    dragDimLineAxisRef.current = null;
+
+    // Alignment-Hilfslinien entfernen (nach Label-Drag)
+    if (dimAlignGuideRef.current) {
+      dimAlignGuideRef.current.clear();
+    }
 
     // Panning beenden
     isPanningRef.current = false;
@@ -3878,208 +3810,49 @@ function drawPixiDashedLine(
 }
 
 /**
- * Zeichnet eine vollständige Maßlinie mit Endstrichen und zentriertem Text.
- *
- * @param container - PixiJS Container für den Text
- * @param g - PixiJS Graphics für Linien
- * @param x1/y1 - Startpunkt in Pixel
- * @param x2/y2 - Endpunkt in Pixel
- * @param text - Bemaßungstext (z.B. "120.5")
- * @param color - Farbe als Hex-Wert
- * @param orientation - 'horizontal' oder 'vertical'
+ * Ordinate-Position: ein Wert auf einer Achse mit zugehörigem Feature
  */
-function drawPixiDimLine(
-  container: Container,
-  g: Graphics,
-  x1: number, y1: number,
-  x2: number, y2: number,
-  text: string,
-  color: number,
-  orientation: 'horizontal' | 'vertical',
-  dimKey?: string, // Optionaler Key für Drag & Drop der Maßlinie
-  objectEdge?: number // Objekt-Kante: Y bei horizontal, X bei vertikal — für Verlängerungslinien
-): void {
-  const px = PIXELS_PER_MM;
-  const tickSize = 1.5 * px; // Endstriche 1.5mm lang
-  const extOverrun = 1.5 * px; // Verlängerungslinie 1.5mm über die Maßlinie hinaus
+interface OrdinatePosition {
+  /** Koordinate in mm (Ordinate-Wert = Canvas-Wert) */
+  value: number;
+  /** Farbe für Hilfslinie und Text */
+  color: number;
+  /** Feature-Typ */
+  type: string;
+  /** Key für hide/show (z.B. "ord-x-panel-0") */
+  key: string;
+  /** Position des Features im Canvas (für Hilfslinie) */
+  featureCanvasPos: { x: number; y: number };
+}
 
-  // Abstand Text zur Linie
-  const textOffsetH = 2 * px;   // Horizontal: 2mm über der Linie
-  const textOffsetV = 3 * px;   // Vertikal: 3mm neben der Linie (gleicher visueller Abstand)
-
-  if (orientation === 'horizontal') {
-    // Verlängerungslinien vom Objekt bis über die Maßlinie hinaus
-    if (objectEdge !== undefined) {
-      const overDir = y1 > objectEdge ? extOverrun : -extOverrun;
-      g.moveTo(x1, objectEdge).lineTo(x1, y1 + overDir).stroke({ color, width: 0.5 });
-      g.moveTo(x2, objectEdge).lineTo(x2, y2 + overDir).stroke({ color, width: 0.5 });
-    }
-    // Horizontale Maßlinie — durchgehend, Text ÜBER der Linie
-    g.moveTo(x1, y1).lineTo(x2, y2).stroke({ color, width: 0.8 });
-    // Endstriche (vertikal)
-    g.moveTo(x1, y1 - tickSize / 2).lineTo(x1, y1 + tickSize / 2).stroke({ color, width: 0.8 });
-    g.moveTo(x2, y2 - tickSize / 2).lineTo(x2, y2 + tickSize / 2).stroke({ color, width: 0.8 });
-    // Text über der Mitte der Linie
-    const midX = (x1 + x2) / 2;
-    const label = new Text({
-      text,
-      style: new TextStyle({ fontSize: 8, fill: color, fontFamily: 'Arial' }),
-    });
-    label.resolution = 4;
-    label.anchor.set(0.5, 1); // Unterkante des Texts an der Position
-    if (dimKey) {
-      const labelWrap = new Container();
-      labelWrap.label = `dimline-${dimKey}`;
-      labelWrap.position.set(midX, y1 - textOffsetH);
-      labelWrap.addChild(label);
-      labelWrap.eventMode = 'static';
-      labelWrap.cursor = 'ns-resize';
-      container.addChild(labelWrap);
+/**
+ * Stagger-Algorithmus: Weist Positionen Levels zu, damit sich zu nahe Texte nicht überlappen.
+ * Level 0 = nah an der Achse, Level 1 = weiter weg, Level 2 = noch weiter.
+ */
+function assignStaggerLevels(positions: OrdinatePosition[], minSpacingMm: number = 3): number[] {
+  if (positions.length === 0) return [];
+  const levels = new Array(positions.length).fill(0);
+  for (let i = 1; i < positions.length; i++) {
+    const gap = positions[i].value - positions[i - 1].value;
+    if (gap < minSpacingMm) {
+      // Nächstes Level (zyklisch 0 → 1 → 2 → 0)
+      levels[i] = (levels[i - 1] + 1) % 3;
     } else {
-      label.position.set(midX, y1 - textOffsetH);
-      container.addChild(label);
-    }
-  } else {
-    // Verlängerungslinien vom Objekt bis über die Maßlinie hinaus
-    if (objectEdge !== undefined) {
-      const overDir = x1 > objectEdge ? extOverrun : -extOverrun;
-      g.moveTo(objectEdge, y1).lineTo(x1 + overDir, y1).stroke({ color, width: 0.5 });
-      g.moveTo(objectEdge, y2).lineTo(x2 + overDir, y2).stroke({ color, width: 0.5 });
-    }
-    // Vertikale Maßlinie — durchgehend, Text RECHTS NEBEN der Linie
-    g.moveTo(x1, y1).lineTo(x2, y2).stroke({ color, width: 0.8 });
-    // Endstriche (horizontal)
-    g.moveTo(x1 - tickSize / 2, y1).lineTo(x1 + tickSize / 2, y1).stroke({ color, width: 0.8 });
-    g.moveTo(x2 - tickSize / 2, y2).lineTo(x2 + tickSize / 2, y2).stroke({ color, width: 0.8 });
-    // Text rechts neben der Mitte der Linie, rotiert
-    const midY = (y1 + y2) / 2;
-    const label = new Text({
-      text,
-      style: new TextStyle({ fontSize: 8, fill: color, fontFamily: 'Arial' }),
-    });
-    label.resolution = 4;
-    label.anchor.set(0.5, 1); // Nach Rotation: linke Kante des Texts an der Position
-    label.rotation = -Math.PI / 2;
-    if (dimKey) {
-      const labelWrap = new Container();
-      labelWrap.label = `dimline-${dimKey}`;
-      labelWrap.position.set(x1 + textOffsetV, midY);
-      labelWrap.addChild(label);
-      labelWrap.eventMode = 'static';
-      labelWrap.cursor = 'ew-resize';
-      container.addChild(labelWrap);
-    } else {
-      label.position.set(x1 + textOffsetV, midY);
-      container.addChild(label);
+      levels[i] = 0;
     }
   }
+  return levels;
 }
 
 /**
- * Berechnet die Welt-Bounding-Box eines Label-Containers.
- * Nutzt getLocalBounds() und addiert die Container-Position.
- */
-function getLabelWorldBox(container: Container): { x: number; y: number; width: number; height: number } {
-  const lb = container.getLocalBounds();
-  return {
-    x: container.position.x + lb.x,
-    y: container.position.y + lb.y,
-    width: lb.width,
-    height: lb.height,
-  };
-}
-
-/**
- * Zeichnet einen Pfeil von der nächsten Kante der Text-Box zum Zielobjekt.
- * Der Pfeil startet immer am kürzesten Weg — egal ob das Label links, rechts,
- * oben oder unten vom Objekt ist.
- */
-function drawArrowToTarget(
-  g: Graphics,
-  textBox: { x: number; y: number; width: number; height: number },
-  toX: number, toY: number,      // Objekt-Position (Pixel)
-  color: number,
-  minDist: number = 10           // Mindestabstand in Pixel
-): void {
-  // Mittelpunkt der Text-Box
-  const cx = textBox.x + textBox.width / 2;
-  const cy = textBox.y + textBox.height / 2;
-
-  // Richtung vom Box-Mittelpunkt zum Ziel
-  const dirX = toX - cx;
-  const dirY = toY - cy;
-  const dist = Math.sqrt(dirX * dirX + dirY * dirY);
-  if (dist < minDist) return; // Zu nah, kein Pfeil nötig
-
-  // Nächsten Punkt auf der Box-Kante berechnen (Ray-Box-Intersection)
-  const halfW = textBox.width / 2;
-  const halfH = textBox.height / 2;
-
-  let fromX: number, fromY: number;
-
-  if (halfW < 0.1 && halfH < 0.1) {
-    // Kein Text → Punkt verwenden
-    fromX = cx; fromY = cy;
-  } else if (halfW < 0.1) {
-    // Sehr schmale Box → oben oder unten
-    fromX = cx;
-    fromY = dirY > 0 ? cy + halfH : cy - halfH;
-  } else if (halfH < 0.1) {
-    // Sehr flache Box → links oder rechts
-    fromX = dirX > 0 ? cx + halfW : cx - halfW;
-    fromY = cy;
-  } else {
-    // Ray-Box-Intersection: welche Seite wird zuerst getroffen?
-    const tX = halfW / Math.abs(dirX);
-    const tY = halfH / Math.abs(dirY);
-    if (tX < tY) {
-      // Trifft linke oder rechte Seite
-      fromX = cx + Math.sign(dirX) * halfW;
-      fromY = cy + dirY * tX;
-    } else {
-      // Trifft obere oder untere Seite
-      fromX = cx + dirX * tY;
-      fromY = cy + Math.sign(dirY) * halfH;
-    }
-  }
-
-  // Abstand vom Startpunkt zum Ziel prüfen
-  const dx = toX - fromX;
-  const dy = toY - fromY;
-  const len = Math.sqrt(dx * dx + dy * dy);
-  if (len < minDist) return;
-
-  // Richtungsvektor normiert
-  const nx = dx / len;
-  const ny = dy / len;
-
-  // Pfeilspitze: 3mm lang, ~23° Öffnungswinkel
-  const arrowLen = 3 * PIXELS_PER_MM;
-  const arrowAngle = 0.4;
-
-  // Linie zeichnen
-  g.moveTo(fromX, fromY).lineTo(toX, toY).stroke({ color, width: 0.6 });
-
-  // Pfeilspitze (zwei Linien vom Endpunkt zurück)
-  const ax1 = toX - arrowLen * (nx * Math.cos(arrowAngle) - ny * Math.sin(arrowAngle));
-  const ay1 = toY - arrowLen * (ny * Math.cos(arrowAngle) + nx * Math.sin(arrowAngle));
-  const ax2 = toX - arrowLen * (nx * Math.cos(arrowAngle) + ny * Math.sin(arrowAngle));
-  const ay2 = toY - arrowLen * (ny * Math.cos(arrowAngle) - nx * Math.sin(arrowAngle));
-
-  g.moveTo(toX, toY).lineTo(ax1, ay1).stroke({ color, width: 0.8 });
-  g.moveTo(toX, toY).lineTo(ax2, ay2).stroke({ color, width: 0.8 });
-}
-
-/**
- * Erstellt das komplette Bemaßungs-Overlay als PixiJS Container.
+ * Erstellt das komplette Ordinaten-Bemaßungs-Overlay als PixiJS Container.
  *
- * Enthält:
- * - V-Score Labels (pink) mit Position und Detail
- * - Fiducial Labels (grün) mit Hilfslinien
- * - Tooling Hole Labels (rot) mit Hilfslinien
- * - Maßlinien (Gesamtbreite/-höhe, Nutzenrand, Board-Positionen)
- *
- * Jeder Label-Container ist per Drag & Drop verschiebbar.
+ * VSM/ISO 129 Ordinatenbemaßung:
+ * - Nullpunkt (0,0) oben links
+ * - X-Achse (horizontal) unterhalb des Panels mit allen X-Positionen
+ * - Y-Achse (vertikal) links vom Panel mit allen Y-Positionen
+ * - Jede Position = Tick-Mark + Wert + farbige Hilfslinie zum Feature
+ * - Detail-Legende für nicht-positionsbezogene Infos
  */
 function createDimensionOverlay(
   panel: Panel,
@@ -4091,423 +3864,334 @@ function createDimensionOverlay(
   const px = PIXELS_PER_MM;
   const overrides = panel.dimensionOverrides;
   const labelOffsets = overrides?.labelOffsets || {};
-  const dist = overrides?.dimLineDistances || DEFAULT_DIM_DISTANCES;
-  // Ausgeblendete Elemente (per Rechtsklick gelöscht)
   const hidden = new Set(overrides?.hiddenElements || []);
+  const axisOffset = overrides?.ordinateAxisOffset || { x: 10, y: 10 };
 
-  // === Grafik-Container für Linien ===
+  // Grafik-Container
   const lineGraphics = new Graphics();
   overlay.addChild(lineGraphics);
 
-  // === Grafik-Container für Pfeile (Label → Objekt) ===
-  const arrowGraphics = new Graphics();
-  overlay.addChild(arrowGraphics);
+  // === Farben für Feature-Typen ===
+  const COLOR_PANEL  = 0xcccccc; // Weiß/Hellgrau für Panel-Kanten
+  const COLOR_FRAME  = 0x888888; // Grau für Rahmen
+  const COLOR_BOARD  = 0x3b82f6; // Blau für Board-Kanten
+  const COLOR_VSCORE = 0xff69b4; // Pink für V-Scores
+  const COLOR_FID    = 0x00cc66; // Grün für Fiducials
+  const COLOR_HOLE   = 0xff6666; // Rot für Tooling Holes
+  const COLOR_ROUTE_BOARD = 0x00e5ff; // Cyan für Board-Fräskonturen
+  const COLOR_ROUTE_PANEL = 0xff9100; // Orange für Panel-Fräskonturen
 
-  // === V-Score Labels ===
+  // === Positionen sammeln ===
+  const xPositions: OrdinatePosition[] = [];
+  const yPositions: OrdinatePosition[] = [];
+
+  // Deduplizierung: Positionen innerhalb 0.05mm zusammenfassen
+  const addPos = (arr: OrdinatePosition[], pos: OrdinatePosition) => {
+    const existing = arr.find(p => Math.abs(p.value - pos.value) < 0.05);
+    if (!existing) {
+      arr.push(pos);
+    }
+    // Bei Duplikat: dominanter Typ behält Farbe (Panel > Frame > Board > Rest)
+  };
+
+  // 1. Panel-Kanten
+  addPos(xPositions, { value: 0, color: COLOR_PANEL, type: 'panel', key: 'ord-x-panel-0', featureCanvasPos: { x: 0, y: panel.height / 2 } });
+  addPos(xPositions, { value: panel.width, color: COLOR_PANEL, type: 'panel', key: 'ord-x-panel-w', featureCanvasPos: { x: panel.width, y: panel.height / 2 } });
+  addPos(yPositions, { value: 0, color: COLOR_PANEL, type: 'panel', key: 'ord-y-panel-0', featureCanvasPos: { x: panel.width / 2, y: 0 } });
+  addPos(yPositions, { value: panel.height, color: COLOR_PANEL, type: 'panel', key: 'ord-y-panel-h', featureCanvasPos: { x: panel.width / 2, y: panel.height } });
+
+  // 2. Rahmen-Kanten (wenn > 0)
+  if (panel.frame.left > 0) {
+    addPos(xPositions, { value: panel.frame.left, color: COLOR_FRAME, type: 'frame', key: 'ord-x-frame-l', featureCanvasPos: { x: panel.frame.left, y: panel.height / 2 } });
+  }
+  if (panel.frame.right > 0) {
+    addPos(xPositions, { value: panel.width - panel.frame.right, color: COLOR_FRAME, type: 'frame', key: 'ord-x-frame-r', featureCanvasPos: { x: panel.width - panel.frame.right, y: panel.height / 2 } });
+  }
+  if (panel.frame.top > 0) {
+    addPos(yPositions, { value: panel.frame.top, color: COLOR_FRAME, type: 'frame', key: 'ord-y-frame-t', featureCanvasPos: { x: panel.width / 2, y: panel.frame.top } });
+  }
+  if (panel.frame.bottom > 0) {
+    addPos(yPositions, { value: panel.height - panel.frame.bottom, color: COLOR_FRAME, type: 'frame', key: 'ord-y-frame-b', featureCanvasPos: { x: panel.width / 2, y: panel.height - panel.frame.bottom } });
+  }
+
+  // 3. Board-Instanzen
+  for (const inst of instances) {
+    const board = boards.find(b => b.id === inst.boardId);
+    if (!board) continue;
+    const isRotated = inst.rotation === 90 || inst.rotation === 270;
+    const boardW = isRotated ? board.height : board.width;
+    const boardH = isRotated ? board.width : board.height;
+
+    addPos(xPositions, { value: inst.position.x, color: COLOR_BOARD, type: 'board', key: `ord-x-board-${inst.id}-l`, featureCanvasPos: { x: inst.position.x, y: inst.position.y + boardH / 2 } });
+    addPos(xPositions, { value: inst.position.x + boardW, color: COLOR_BOARD, type: 'board', key: `ord-x-board-${inst.id}-r`, featureCanvasPos: { x: inst.position.x + boardW, y: inst.position.y + boardH / 2 } });
+    addPos(yPositions, { value: inst.position.y, color: COLOR_BOARD, type: 'board', key: `ord-y-board-${inst.id}-t`, featureCanvasPos: { x: inst.position.x + boardW / 2, y: inst.position.y } });
+    addPos(yPositions, { value: inst.position.y + boardH, color: COLOR_BOARD, type: 'board', key: `ord-y-board-${inst.id}-b`, featureCanvasPos: { x: inst.position.x + boardW / 2, y: inst.position.y + boardH } });
+  }
+
+  // 4. V-Score Linien
   for (const vscore of panel.vscoreLines) {
-    const key = `vscore-${vscore.id}`;
-    if (hidden.has(key)) continue; // Ausgeblendetes Element überspringen
-    const offset = labelOffsets[key] || { dx: 0, dy: 0 };
     const isHorizontal = Math.abs(vscore.end.y - vscore.start.y) < 0.1;
-
-    const labelContainer = new Container();
-    labelContainer.label = key;
-
     if (isHorizontal) {
-      // Horizontale V-Score: Label rechts vom Panel
-      const baseX = panel.width + 1;
-      const baseY = vscore.start.y;
-      labelContainer.position.set(
-        (baseX + offset.dx) * px,
-        (baseY + offset.dy) * px
-      );
-
-      const posText = new Text({
-        text: `Y=${vscore.start.y.toFixed(1)}`,
-        style: new TextStyle({ fontSize: 8, fill: 0xff69b4, fontFamily: 'Arial' }),
-      });
-      posText.resolution = 4;
-      posText.position.set(0, -5);
-      labelContainer.addChild(posText);
-
-      const detailText = new Text({
-        text: `${vscore.depth}% / ${vscore.angle}°`,
-        style: new TextStyle({ fontSize: 7, fill: 0xff69b4, fontFamily: 'Arial' }),
-      });
-      detailText.resolution = 4;
-      detailText.position.set(0, 5);
-      labelContainer.addChild(detailText);
+      addPos(yPositions, { value: vscore.start.y, color: COLOR_VSCORE, type: 'vscore', key: `ord-y-vs-${vscore.id}`, featureCanvasPos: { x: panel.width / 2, y: vscore.start.y } });
     } else {
-      // Vertikale V-Score: Label unter dem Panel
-      const baseX = vscore.start.x;
-      const baseY = panel.height + 1;
-      labelContainer.position.set(
-        (baseX + offset.dx) * px,
-        (baseY + offset.dy) * px
-      );
-
-      const posText = new Text({
-        text: `X=${vscore.start.x.toFixed(1)}`,
-        style: new TextStyle({ fontSize: 8, fill: 0xff69b4, fontFamily: 'Arial' }),
-      });
-      posText.resolution = 4;
-      posText.anchor.set(0.5, 0);
-      posText.position.set(0, 0);
-      labelContainer.addChild(posText);
-
-      const detailText = new Text({
-        text: `${vscore.depth}% / ${vscore.angle}°`,
-        style: new TextStyle({ fontSize: 7, fill: 0xff69b4, fontFamily: 'Arial' }),
-      });
-      detailText.resolution = 4;
-      detailText.anchor.set(0.5, 0);
-      detailText.position.set(0, 10);
-      labelContainer.addChild(detailText);
-    }
-
-    // Interaktiv für Drag & Drop
-    labelContainer.eventMode = 'static';
-    labelContainer.cursor = 'grab';
-    overlay.addChild(labelContainer);
-
-    // Pfeil vom Label zum V-Score-Objekt (nächster Punkt auf der Text-Box)
-    const vsLabelBox = getLabelWorldBox(labelContainer);
-    if (isHorizontal) {
-      const targetX = panel.width * px;
-      const targetY = vscore.start.y * px;
-      drawArrowToTarget(arrowGraphics, vsLabelBox, targetX, targetY, 0xff69b4);
-    } else {
-      const targetX = vscore.start.x * px;
-      const targetY = panel.height * px;
-      drawArrowToTarget(arrowGraphics, vsLabelBox, targetX, targetY, 0xff69b4);
+      addPos(xPositions, { value: vscore.start.x, color: COLOR_VSCORE, type: 'vscore', key: `ord-x-vs-${vscore.id}`, featureCanvasPos: { x: vscore.start.x, y: panel.height / 2 } });
     }
   }
 
-  // === Fiducial Labels ===
+  // 5. Fiducials
   for (const fid of panel.fiducials) {
-    const key = `fiducial-${fid.id}`;
-    if (hidden.has(key)) continue; // Ausgeblendetes Element überspringen
-    const offset = labelOffsets[key] || { dx: 0, dy: 0 };
-    const maskRadius = fid.maskDiameter / 2;
-
-    const labelContainer = new Container();
-    labelContainer.label = key;
-
-    // Basis-Position: rechts neben dem Symbol
-    const baseX = fid.position.x + maskRadius + 1;
-    const baseY = fid.position.y;
-    labelContainer.position.set(
-      (baseX + offset.dx) * px,
-      (baseY + offset.dy) * px
-    );
-
-    const fidText = new Text({
-      text: `FID (${fid.position.x.toFixed(1)}/${fid.position.y.toFixed(1)}) Ø${fid.padDiameter}/${fid.maskDiameter}`,
-      style: new TextStyle({ fontSize: 7, fill: 0x00cc66, fontFamily: 'Arial' }),
-    });
-    fidText.resolution = 4;
-    fidText.anchor.set(0, 0.5);
-    labelContainer.addChild(fidText);
-
-    // Gestrichelte Hilfslinien zum Panel-Rand (0,0)
-    const fidG = new Graphics();
-    // Horizontale Linie: von (0, fid.y) bis (fid.x, fid.y)
-    drawPixiDashedLine(fidG,
-      0, fid.position.y * px,
-      fid.position.x * px, fid.position.y * px,
-      0x00cc66, 0.5, 3, 3
-    );
-    // Vertikale Linie: von (fid.x, 0) bis (fid.x, fid.y)
-    drawPixiDashedLine(fidG,
-      fid.position.x * px, 0,
-      fid.position.x * px, fid.position.y * px,
-      0x00cc66, 0.5, 3, 3
-    );
-    overlay.addChild(fidG);
-
-    // Interaktiv für Drag & Drop
-    labelContainer.eventMode = 'static';
-    labelContainer.cursor = 'grab';
-    overlay.addChild(labelContainer);
-
-    // Pfeil vom Label zum Fiducial-Mittelpunkt (nächster Punkt auf der Text-Box)
-    const fidLabelBox = getLabelWorldBox(labelContainer);
-    const fidTargetX = fid.position.x * px;
-    const fidTargetY = fid.position.y * px;
-    drawArrowToTarget(arrowGraphics, fidLabelBox, fidTargetX, fidTargetY, 0x00cc66);
+    addPos(xPositions, { value: fid.position.x, color: COLOR_FID, type: 'fiducial', key: `ord-x-fid-${fid.id}`, featureCanvasPos: { x: fid.position.x, y: fid.position.y } });
+    addPos(yPositions, { value: fid.position.y, color: COLOR_FID, type: 'fiducial', key: `ord-y-fid-${fid.id}`, featureCanvasPos: { x: fid.position.x, y: fid.position.y } });
   }
 
-  // === Tooling Hole Labels ===
+  // 6. Tooling Holes
   for (const hole of panel.toolingHoles) {
-    const key = `toolinghole-${hole.id}`;
-    if (hidden.has(key)) continue; // Ausgeblendetes Element überspringen
-    const offset = labelOffsets[key] || { dx: 0, dy: 0 };
-    const radius = hole.diameter / 2;
-    const holeType = hole.plated ? 'PTH' : 'NPTH';
-
-    const labelContainer = new Container();
-    labelContainer.label = key;
-
-    // Basis-Position: rechts neben dem Symbol
-    const baseX = hole.position.x + radius + 1;
-    const baseY = hole.position.y;
-    labelContainer.position.set(
-      (baseX + offset.dx) * px,
-      (baseY + offset.dy) * px
-    );
-
-    const holeText = new Text({
-      text: `Ø${hole.diameter.toFixed(1)} ${holeType} (${hole.position.x.toFixed(1)}/${hole.position.y.toFixed(1)})`,
-      style: new TextStyle({ fontSize: 7, fill: 0xff6666, fontFamily: 'Arial' }),
-    });
-    holeText.resolution = 4;
-    holeText.anchor.set(0, 0.5);
-    labelContainer.addChild(holeText);
-
-    // Gestrichelte Hilfslinien zum Panel-Rand
-    const holeG = new Graphics();
-    drawPixiDashedLine(holeG,
-      0, hole.position.y * px,
-      hole.position.x * px, hole.position.y * px,
-      0xff6666, 0.5, 3, 3
-    );
-    drawPixiDashedLine(holeG,
-      hole.position.x * px, 0,
-      hole.position.x * px, hole.position.y * px,
-      0xff6666, 0.5, 3, 3
-    );
-    overlay.addChild(holeG);
-
-    // Interaktiv für Drag & Drop
-    labelContainer.eventMode = 'static';
-    labelContainer.cursor = 'grab';
-    overlay.addChild(labelContainer);
-
-    // Pfeil vom Label zum Tooling-Hole-Mittelpunkt (nächster Punkt auf der Text-Box)
-    const holeLabelBox = getLabelWorldBox(labelContainer);
-    const holeTargetX = hole.position.x * px;
-    const holeTargetY = hole.position.y * px;
-    drawArrowToTarget(arrowGraphics, holeLabelBox, holeTargetX, holeTargetY, 0xff6666);
+    addPos(xPositions, { value: hole.position.x, color: COLOR_HOLE, type: 'toolinghole', key: `ord-x-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
+    addPos(yPositions, { value: hole.position.y, color: COLOR_HOLE, type: 'toolinghole', key: `ord-y-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
   }
 
-  // === Fräskontur Labels (Cyan=Board, Orange=Panel) ===
+  // 7. Fräskonturen (nicht-auto, nicht-Kopie)
   for (const contour of panel.routingContours) {
-    // Nur sichtbare, nicht-Sync-Kopien beschriften (Kopien wären zu viel Clutter)
-    if (!contour.visible) continue;
-    if (contour.isSyncCopy) continue;
+    if (!contour.visible || contour.isSyncCopy || contour.creationMethod === 'auto') continue;
+    if (contour.segments.length === 0) continue;
+    const routeColor = contour.contourType === 'boardOutline' ? COLOR_ROUTE_BOARD : COLOR_ROUTE_PANEL;
+    const startPt = contour.segments[0].start;
+    const endPt = contour.segments[contour.segments.length - 1].end;
+    addPos(xPositions, { value: startPt.x, color: routeColor, type: 'routing', key: `ord-x-rt-${contour.id}-s`, featureCanvasPos: { x: startPt.x, y: startPt.y } });
+    addPos(xPositions, { value: endPt.x, color: routeColor, type: 'routing', key: `ord-x-rt-${contour.id}-e`, featureCanvasPos: { x: endPt.x, y: endPt.y } });
+    addPos(yPositions, { value: startPt.y, color: routeColor, type: 'routing', key: `ord-y-rt-${contour.id}-s`, featureCanvasPos: { x: startPt.x, y: startPt.y } });
+    addPos(yPositions, { value: endPt.y, color: routeColor, type: 'routing', key: `ord-y-rt-${contour.id}-e`, featureCanvasPos: { x: endPt.x, y: endPt.y } });
+  }
 
-    const key = `routing-${contour.id}`;
-    if (hidden.has(key)) continue;
-    const offset = labelOffsets[key] || { dx: 0, dy: 0 };
+  // Sortieren
+  xPositions.sort((a, b) => a.value - b.value);
+  yPositions.sort((a, b) => a.value - b.value);
 
-    // Farbe je nach Kontur-Typ (wie im Canvas-Rendering)
-    const contourColor = contour.contourType === 'boardOutline' ? 0x00e5ff : 0xff9100;
+  // Stagger-Levels berechnen
+  const xLevels = assignStaggerLevels(xPositions);
+  const yLevels = assignStaggerLevels(yPositions);
 
-    // Mittelpunkt der Kontur berechnen
-    const segments = contour.segments;
-    if (segments.length === 0) continue;
-    const midSegIdx = Math.floor(segments.length / 2);
-    const midSeg = segments[midSegIdx];
-    let targetMmX: number, targetMmY: number;
-    if (midSeg.arc) {
-      // Bogen-Mittelpunkt: Punkt auf halber Strecke des Bogens
-      const midAngle = (midSeg.arc.startAngle + midSeg.arc.endAngle) / 2;
-      targetMmX = midSeg.arc.center.x + Math.cos(midAngle) * midSeg.arc.radius;
-      targetMmY = midSeg.arc.center.y + Math.sin(midAngle) * midSeg.arc.radius;
-    } else {
-      // Gerade: Mittelpunkt des Segments
-      targetMmX = (midSeg.start.x + midSeg.end.x) / 2;
-      targetMmY = (midSeg.start.y + midSeg.end.y) / 2;
-    }
+  // === Achsen-Positionen (in mm) ===
+  const xAxisY = panel.height + axisOffset.y;  // X-Achse unterhalb des Panels
+  const yAxisX = -axisOffset.x;                // Y-Achse links vom Panel
+  const tickLen = 1.5;  // Tick-Mark Länge in mm
+  const staggerStep = 5; // mm pro Stagger-Level
 
-    // Label-Container erstellen
-    const labelContainer = new Container();
-    labelContainer.label = key;
+  // === 1. Nullpunkt-Marker ===
+  const nullRadius = 1.5 * px;
+  lineGraphics.circle(0, 0, nullRadius);
+  lineGraphics.stroke({ color: 0xffffff, width: 1.5 });
+  // Kleines Kreuz im Nullpunkt
+  lineGraphics.moveTo(-nullRadius * 0.5, 0).lineTo(nullRadius * 0.5, 0).stroke({ color: 0xffffff, width: 0.8 });
+  lineGraphics.moveTo(0, -nullRadius * 0.5).lineTo(0, nullRadius * 0.5).stroke({ color: 0xffffff, width: 0.8 });
 
-    // Basis-Position: 3mm nach rechts vom Kontur-Mittelpunkt versetzt
-    const baseX = targetMmX + 3;
-    const baseY = targetMmY;
-    labelContainer.position.set(
-      (baseX + offset.dx) * px,
-      (baseY + offset.dy) * px
+  // === 2. X-Achse (horizontal, unterhalb des Panels) ===
+  // Achsen-Basislinie
+  lineGraphics.moveTo(0, xAxisY * px).lineTo(panel.width * px, xAxisY * px).stroke({ color: 0x666666, width: 1.2 });
+
+  for (let i = 0; i < xPositions.length; i++) {
+    const pos = xPositions[i];
+    if (hidden.has(pos.key)) continue;
+    const level = xLevels[i];
+    const staggerOffset = level * staggerStep;
+    const tickBaseY = xAxisY; // Basis = Achse
+    const tickEndY = tickBaseY + tickLen + staggerOffset; // Tick geht nach unten
+    const textY = tickEndY + 0.5; // Text leicht unter dem Tick
+
+    // Vertikale Hilfslinie vom Feature bis zur Achse (dünn, farbig)
+    drawPixiDashedLine(lineGraphics,
+      pos.value * px, pos.featureCanvasPos.y * px,
+      pos.value * px, xAxisY * px,
+      pos.color, 0.3, 4, 3
     );
 
-    // Label-Text: Typ + Fräser-Durchmesser
-    const typeLabel = contour.contourType === 'boardOutline' ? 'Board' : 'Panel';
-    const routeText = new Text({
-      text: `${typeLabel} Ø${contour.toolDiameter.toFixed(1)}`,
-      style: new TextStyle({ fontSize: 7, fill: contourColor, fontFamily: 'Arial' }),
+    // Tick-Mark (kurzer vertikaler Strich an der Achse)
+    lineGraphics.moveTo(pos.value * px, tickBaseY * px);
+    lineGraphics.lineTo(pos.value * px, (tickBaseY + tickLen) * px);
+    lineGraphics.stroke({ color: pos.color, width: 1 });
+
+    // Führungslinie bei Stagger (abgewinkelt zurück zum Tick-Punkt)
+    if (level > 0) {
+      lineGraphics.moveTo(pos.value * px, (tickBaseY + tickLen) * px);
+      lineGraphics.lineTo(pos.value * px, tickEndY * px);
+      lineGraphics.stroke({ color: pos.color, width: 0.5 });
+    }
+
+    // Wert-Text (rotiert -90°, unter dem Tick)
+    const tickContainer = new Container();
+    tickContainer.label = pos.key;
+    const valueText = new Text({
+      text: pos.value.toFixed(1),
+      style: new TextStyle({ fontSize: 7, fill: pos.color, fontFamily: 'Arial' }),
     });
-    routeText.resolution = 4;
-    routeText.anchor.set(0, 0.5);
-    labelContainer.addChild(routeText);
-
-    // Interaktiv für Drag & Drop
-    labelContainer.eventMode = 'static';
-    labelContainer.cursor = 'grab';
-    overlay.addChild(labelContainer);
-
-    // Pfeil vom Label zum Kontur-Mittelpunkt
-    const routeLabelBox = getLabelWorldBox(labelContainer);
-    drawArrowToTarget(arrowGraphics, routeLabelBox, targetMmX * px, targetMmY * px, contourColor);
+    valueText.resolution = 4;
+    valueText.anchor.set(1, 0.5); // Rechts-Mitte (nach Rotation: oben-mitte)
+    valueText.rotation = -Math.PI / 2;
+    tickContainer.position.set(pos.value * px, textY * px);
+    tickContainer.addChild(valueText);
+    tickContainer.eventMode = 'static';
+    overlay.addChild(tickContainer);
   }
 
-  // === Maßlinien (ausgeblendete werden übersprungen) ===
+  // === 3. Y-Achse (vertikal, links vom Panel) ===
+  // Achsen-Basislinie
+  lineGraphics.moveTo(yAxisX * px, 0).lineTo(yAxisX * px, panel.height * px).stroke({ color: 0x666666, width: 1.2 });
 
-  // Objekt-Kanten für Verlängerungslinien (in Pixel)
-  const panelBottomPx = panel.height * px;
-  const panelRightPx = panel.width * px;
+  for (let i = 0; i < yPositions.length; i++) {
+    const pos = yPositions[i];
+    if (hidden.has(pos.key)) continue;
+    const level = yLevels[i];
+    const staggerOffset = level * staggerStep;
+    const tickBaseX = yAxisX; // Basis = Achse
+    const tickEndX = tickBaseX - tickLen - staggerOffset; // Tick geht nach links
+    const textX = tickEndX - 0.5; // Text leicht links vom Tick
 
-  // Gesamtbreite (weiß, unter dem Panel) — vertikal verschiebbar
-  if (!hidden.has('dimline-totalWidthBottom')) {
-    const totalWidthY = (panel.height + dist.totalWidthBottom) * px;
-    drawPixiDimLine(overlay, lineGraphics,
-      0, totalWidthY,
-      panel.width * px, totalWidthY,
-      `${panel.width.toFixed(1)}`, 0xffffff, 'horizontal', 'totalWidthBottom', panelBottomPx
+    // Horizontale Hilfslinie vom Feature bis zur Achse (dünn, farbig)
+    drawPixiDashedLine(lineGraphics,
+      pos.featureCanvasPos.x * px, pos.value * px,
+      yAxisX * px, pos.value * px,
+      pos.color, 0.3, 4, 3
     );
-  }
 
-  // Gesamthöhe (weiß, rechts vom Panel) — horizontal verschiebbar
-  if (!hidden.has('dimline-totalHeightRight')) {
-    const totalHeightX = (panel.width + dist.totalHeightRight) * px;
-    drawPixiDimLine(overlay, lineGraphics,
-      totalHeightX, 0,
-      totalHeightX, panel.height * px,
-      `${panel.height.toFixed(1)}`, 0xffffff, 'vertical', 'totalHeightRight', panelRightPx
-    );
-  }
+    // Tick-Mark (kurzer horizontaler Strich an der Achse)
+    lineGraphics.moveTo(tickBaseX * px, pos.value * px);
+    lineGraphics.lineTo((tickBaseX - tickLen) * px, pos.value * px);
+    lineGraphics.stroke({ color: pos.color, width: 1 });
 
-  // Nutzenrand unten: links + rechts (grau) — vertikal verschiebbar
-  if (!hidden.has('dimline-frameBottom')) {
-    if (panel.frame.left > 0) {
-      const frameY = (panel.height + dist.frameBottom) * px;
-      drawPixiDimLine(overlay, lineGraphics,
-        0, frameY,
-        panel.frame.left * px, frameY,
-        `${panel.frame.left.toFixed(1)}`, 0xaaaaaa, 'horizontal', 'frameBottom', panelBottomPx
-      );
+    // Führungslinie bei Stagger
+    if (level > 0) {
+      lineGraphics.moveTo((tickBaseX - tickLen) * px, pos.value * px);
+      lineGraphics.lineTo(tickEndX * px, pos.value * px);
+      lineGraphics.stroke({ color: pos.color, width: 0.5 });
     }
-    if (panel.frame.right > 0) {
-      const frameY = (panel.height + dist.frameBottom) * px;
-      drawPixiDimLine(overlay, lineGraphics,
-        (panel.width - panel.frame.right) * px, frameY,
-        panel.width * px, frameY,
-        `${panel.frame.right.toFixed(1)}`, 0xaaaaaa, 'horizontal', 'frameBottom', panelBottomPx
-      );
-    }
+
+    // Wert-Text (horizontal, links vom Tick)
+    const tickContainer = new Container();
+    tickContainer.label = pos.key;
+    const valueText = new Text({
+      text: pos.value.toFixed(1),
+      style: new TextStyle({ fontSize: 7, fill: pos.color, fontFamily: 'Arial' }),
+    });
+    valueText.resolution = 4;
+    valueText.anchor.set(1, 0.5); // Rechts-Mitte (Text endet am Tick)
+    tickContainer.position.set(textX * px, pos.value * px);
+    tickContainer.addChild(valueText);
+    tickContainer.eventMode = 'static';
+    overlay.addChild(tickContainer);
   }
 
-  // Nutzenrand rechts: oben + unten (grau, vertikal) — horizontal verschiebbar
-  if (!hidden.has('dimline-frameRightTop') && panel.frame.top > 0) {
-    const frameX = (panel.width + dist.frameRightTop) * px;
-    drawPixiDimLine(overlay, lineGraphics,
-      frameX, 0,
-      frameX, panel.frame.top * px,
-      `${panel.frame.top.toFixed(1)}`, 0xaaaaaa, 'vertical', 'frameRightTop', panelRightPx
-    );
-  }
-  if (!hidden.has('dimline-frameRightBottom') && panel.frame.bottom > 0) {
-    const frameX = (panel.width + dist.frameRightBottom) * px;
-    drawPixiDimLine(overlay, lineGraphics,
-      frameX, (panel.height - panel.frame.bottom) * px,
-      frameX, panel.height * px,
-      `${panel.frame.bottom.toFixed(1)}`, 0xaaaaaa, 'vertical', 'frameRightBottom', panelRightPx
-    );
-  }
+  // === 4. Detail-Legende (rechts neben dem Panel) ===
+  {
+    const legendKey = 'routing-legend';
+    if (!hidden.has(legendKey)) {
+      const legendOffset = labelOffsets[legendKey] || { dx: 0, dy: 0 };
+      const allEntries: Array<{ color: number; label: string }> = [];
 
-  // Board-Positionen und -Maße (blau)
-  if (instances.length > 0) {
-    const firstInst = instances[0];
-    const firstBoard = boards.find(b => b.id === firstInst.boardId);
-    if (firstBoard) {
-      const isRotated = firstInst.rotation === 90 || firstInst.rotation === 270;
-      const boardW = isRotated ? firstBoard.height : firstBoard.width;
-      const boardH = isRotated ? firstBoard.width : firstBoard.height;
-
-      // Objekt-Kanten für Board-Maßlinien
-      const boardBottomPx = (firstInst.position.y + boardH) * px;
-      const boardLeftPx = firstInst.position.x * px;
-
-      // Board X-Offset (unter dem Panel) — vertikal verschiebbar
-      if (!hidden.has('dimline-boardOffsetBottom') && firstInst.position.x > 0.1) {
-        const offsetY = (panel.height + dist.boardOffsetBottom) * px;
-        drawPixiDimLine(overlay, lineGraphics,
-          0, offsetY,
-          firstInst.position.x * px, offsetY,
-          `${firstInst.position.x.toFixed(1)}`, 0x60a5fa, 'horizontal', 'boardOffsetBottom', panelBottomPx
-        );
+      // Farbcode-Erklärungen (immer anzeigen)
+      allEntries.push({ color: COLOR_PANEL, label: 'Panel-Kanten' });
+      if (panel.frame.left > 0 || panel.frame.right > 0 || panel.frame.top > 0 || panel.frame.bottom > 0) {
+        allEntries.push({ color: COLOR_FRAME, label: 'Nutzenrand' });
+      }
+      if (instances.length > 0) {
+        allEntries.push({ color: COLOR_BOARD, label: 'Board-Kanten' });
       }
 
-      // Board Y-Offset (links vom Panel) — horizontal verschiebbar
-      if (!hidden.has('dimline-boardOffsetLeft') && firstInst.position.y > 0.1) {
-        const offsetX = -dist.boardOffsetLeft * px;
-        drawPixiDimLine(overlay, lineGraphics,
-          offsetX, 0,
-          offsetX, firstInst.position.y * px,
-          `${firstInst.position.y.toFixed(1)}`, 0x60a5fa, 'vertical', 'boardOffsetLeft', 0
-        );
+      // V-Score Detail (einmalig, wenn vorhanden)
+      if (panel.vscoreLines.length > 0) {
+        const vs = panel.vscoreLines[0];
+        allEntries.push({ color: COLOR_VSCORE, label: `V-Score: ${vs.depth}% / ${vs.angle}°` });
       }
-
-      // Board-Breite (nah am Board) — vertikal verschiebbar
-      const boardDimY = (firstInst.position.y + boardH + dist.boardDimNear) * px;
-      if (!hidden.has('dimline-boardDimNearH')) {
-        drawPixiDimLine(overlay, lineGraphics,
-          firstInst.position.x * px, boardDimY,
-          (firstInst.position.x + boardW) * px, boardDimY,
-          `${boardW.toFixed(1)}`, 0x60a5fa, 'horizontal', 'boardDimNearH', boardBottomPx
-        );
+      // Fiducial Detail (einmalig, wenn vorhanden)
+      if (panel.fiducials.length > 0) {
+        const f = panel.fiducials[0];
+        allEntries.push({ color: COLOR_FID, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}` });
       }
-
-      // Board-Höhe (nah am Board, links) — horizontal verschiebbar
-      const boardDimX = (firstInst.position.x - dist.boardDimNear) * px;
-      if (!hidden.has('dimline-boardDimNearV')) {
-        drawPixiDimLine(overlay, lineGraphics,
-          boardDimX, firstInst.position.y * px,
-          boardDimX, (firstInst.position.y + boardH) * px,
-          `${boardH.toFixed(1)}`, 0x60a5fa, 'vertical', 'boardDimNearV', boardLeftPx
-        );
-      }
-
-      // Gaps zwischen Boards (gleiche Ebene wie Board-Maße, nicht separat verschiebbar)
-      if (instances.length > 1) {
-        const sortedByX = [...instances].sort((a, b) => a.position.x - b.position.x || a.position.y - b.position.y);
-        for (let i = 1; i < sortedByX.length; i++) {
-          const prevInst = sortedByX[i - 1];
-          const currInst = sortedByX[i];
-          const prevBoard = boards.find(b => b.id === prevInst.boardId);
-          if (!prevBoard) continue;
-          const prevRotated = prevInst.rotation === 90 || prevInst.rotation === 270;
-          const prevW = prevRotated ? prevBoard.height : prevBoard.width;
-          const gapX = currInst.position.x - (prevInst.position.x + prevW);
-          if (gapX > 0.1 && Math.abs(currInst.position.y - prevInst.position.y) < 0.1) {
-            drawPixiDimLine(overlay, lineGraphics,
-              (prevInst.position.x + prevW) * px, boardDimY,
-              currInst.position.x * px, boardDimY,
-              `${gapX.toFixed(1)}`, 0x999999, 'horizontal', undefined, boardBottomPx
-            );
-            break;
-          }
+      // Tooling Holes Detail (unique Kombinationen)
+      const holeTypes = new Map<string, string>();
+      for (const h of panel.toolingHoles) {
+        const k = `${h.diameter.toFixed(1)}-${h.plated}`;
+        if (!holeTypes.has(k)) {
+          holeTypes.set(k, `Bohrung: Ø${h.diameter.toFixed(1)} ${h.plated ? 'PTH' : 'NPTH'}`);
         }
-
-        const sortedByY = [...instances].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
-        for (let i = 1; i < sortedByY.length; i++) {
-          const prevInst = sortedByY[i - 1];
-          const currInst = sortedByY[i];
-          const prevBoard = boards.find(b => b.id === prevInst.boardId);
-          if (!prevBoard) continue;
-          const prevRotated = prevInst.rotation === 90 || prevInst.rotation === 270;
-          const prevH = prevRotated ? prevBoard.width : prevBoard.height;
-          const gapY = currInst.position.y - (prevInst.position.y + prevH);
-          if (gapY > 0.1 && Math.abs(currInst.position.x - prevInst.position.x) < 0.1) {
-            drawPixiDimLine(overlay, lineGraphics,
-              boardDimX, (prevInst.position.y + prevH) * px,
-              boardDimX, currInst.position.y * px,
-              `${gapY.toFixed(1)}`, 0x999999, 'vertical', undefined, boardLeftPx
-            );
-            break;
-          }
+      }
+      Array.from(holeTypes.values()).forEach(label => {
+        allEntries.push({ color: COLOR_HOLE, label });
+      });
+      // Fräskonturen (unique Typen)
+      const routingTypes = new Map<string, { color: number; label: string }>();
+      for (const contour of panel.routingContours) {
+        if (!contour.visible || contour.isSyncCopy) continue;
+        const color = contour.contourType === 'boardOutline' ? COLOR_ROUTE_BOARD : COLOR_ROUTE_PANEL;
+        const typeLabel = contour.contourType === 'boardOutline' ? 'Board' : 'Panel';
+        const key = `${typeLabel}-${contour.toolDiameter.toFixed(1)}`;
+        if (!routingTypes.has(key)) {
+          routingTypes.set(key, { color, label: `Fräskontur: ${typeLabel} Ø${contour.toolDiameter.toFixed(1)}` });
         }
+      }
+      Array.from(routingTypes.values()).forEach(entry => {
+        allEntries.push(entry);
+      });
+
+      if (allEntries.length > 0) {
+        const lineH = 4;
+        const pad = 2;
+        const legendW = 40;
+        const titleH = 5;
+        const legendH = pad * 2 + allEntries.length * lineH + titleH;
+
+        // Standard-Position: rechts neben dem Panel
+        const legendX = (panel.width + 10 + legendOffset.dx) * px;
+        const legendY = (0 + legendOffset.dy) * px;
+
+        const legendContainer = new Container();
+        legendContainer.label = legendKey;
+        legendContainer.position.set(legendX, legendY);
+
+        // Hintergrund
+        const bg = new Graphics();
+        bg.roundRect(0, 0, legendW * px, legendH * px, 2);
+        bg.fill({ color: 0x1a1a1a, alpha: 0.9 });
+        bg.stroke({ color: 0x555555, width: 1 });
+        legendContainer.addChild(bg);
+
+        // Titel
+        const titleText = new Text({
+          text: 'Details',
+          style: new TextStyle({ fontSize: 7, fill: 0xffffff, fontFamily: 'Arial', fontWeight: 'bold' }),
+        });
+        titleText.resolution = 4;
+        titleText.position.set(pad * px, pad * px);
+        legendContainer.addChild(titleText);
+
+        // Trennlinie
+        const sep = new Graphics();
+        sep.moveTo(0, titleH * px);
+        sep.lineTo(legendW * px, titleH * px);
+        sep.stroke({ color: 0x555555, width: 1 });
+        legendContainer.addChild(sep);
+
+        // Einträge
+        allEntries.forEach((entry, idx) => {
+          const entryY = (titleH + pad + idx * lineH) * px;
+          // Farb-Linie
+          const line = new Graphics();
+          line.moveTo(pad * px, entryY + lineH * px * 0.5);
+          line.lineTo((pad + 6) * px, entryY + lineH * px * 0.5);
+          line.stroke({ color: entry.color, width: 2 });
+          legendContainer.addChild(line);
+          // Text
+          const txt = new Text({
+            text: entry.label,
+            style: new TextStyle({ fontSize: 5, fill: entry.color, fontFamily: 'Arial' }),
+          });
+          txt.resolution = 4;
+          txt.position.set((pad + 7) * px, entryY + 1);
+          legendContainer.addChild(txt);
+        });
+
+        legendContainer.eventMode = 'static';
+        legendContainer.cursor = 'grab';
+        overlay.addChild(legendContainer);
       }
     }
   }

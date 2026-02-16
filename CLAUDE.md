@@ -256,44 +256,31 @@ Der `usePanelStore` enthält:
 
 ### Phase 8 - Erledigt
 
-- [x] **Interaktives Bemaßungs-Overlay im Canvas**
+- [x] **Ordinatenbemaßung (VSM/ISO 129) im Canvas und PDF**
   - Toggle-Button "Maße" (Ruler-Icon) in der Toolbar
-  - Alle Bemaßungen direkt im PixiJS-Canvas sichtbar
-  - **V-Score Labels** (pink): Position + Tiefe/Winkel, mit Pfeil zum V-Score
-  - **Fiducial Labels** (grün): Koordinaten + Pad/Mask-Durchmesser, gestrichelte Hilfslinien, Pfeil
-  - **Tooling Hole Labels** (rot): Durchmesser + PTH/NPTH + Koordinaten, Hilfslinien, Pfeil
-  - **Fräskontur Labels** (cyan/orange): Typ + Fräser-Ø, Pfeil zum Kontur-Mittelpunkt
-  - **Maßlinien**: Gesamtbreite/-höhe, Nutzenrand, Board-Positionen, Gaps
-- [x] **Drag & Drop für alle Labels** — Positionen per Maus anpassbar
-  - Label-Offsets werden in `panel.dimensionOverrides.labelOffsets` gespeichert
-  - Offsets bleiben beim Projekt-Speichern erhalten
-- [x] **Drag für Maßlinien** — Abstände per Maus anpassbar
-  - Maßlinien-Abstände werden in `panel.dimensionOverrides.dimLineDistances` gespeichert
-  - Horizontale Maßlinien: vertikal verschiebbar (ns-resize Cursor)
-  - Vertikale Maßlinien: horizontal verschiebbar (ew-resize Cursor)
-- [x] **Rechtsklick zum Ausblenden** — Einzelne Labels/Maßlinien per Rechtsklick entfernen
+  - **Nullpunkt-Marker** bei (0,0) — Kreis mit Kreuz
+  - **X-Achse** (horizontal, unterhalb Panel): alle X-Positionen als farbige Tick-Marks + Werte
+  - **Y-Achse** (vertikal, links vom Panel): alle Y-Positionen als farbige Tick-Marks + Werte
+  - **Farbige Hilfslinien** (gestrichelt) von jedem Feature zum Achsen-Tick
+  - **Stagger-Algorithmus**: zu nahe Werte werden auf verschiedene Ebenen versetzt (3 Level)
+  - **Farbcode**: Weiß=Panel, Grau=Rahmen, Blau=Board, Pink=V-Score, Grün=Fiducial, Rot=Bohrung, Cyan/Orange=Fräskontur
+  - **Deduplizierung**: Positionen innerhalb 0.05mm werden zusammengefasst
+- [x] **Detail-Legende** (rechts neben Panel)
+  - Farbcode-Erklärung + Detailparameter (V-Score Tiefe/Winkel, Fiducial Ø, Bohrung Ø, Fräser Ø)
+  - Per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
+  - Offset in `panel.dimensionOverrides.labelOffsets["routing-legend"]` gespeichert
+- [x] **Rechtsklick zum Ausblenden** — Einzelne Tick-Marks oder Legende per Rechtsklick entfernen
   - Ausgeblendete Elemente in `panel.dimensionOverrides.hiddenElements` gespeichert
-- [x] **Pfeile mit kürzestem Weg** (Ray-Box-Intersection)
-  - Pfeil startet immer am nächsten Punkt der Text-Box-Kante zum Zielobjekt
-  - Funktioniert korrekt wenn Label auf die andere Seite gezogen wird
-- [x] **Verlängerungslinien** an Maßlinien
-  - Dünne Linien (0.5px) vom gemessenen Objekt bis zur Maßlinie + 1.5mm Überstand
-  - Korrekte Richtung: immer vom Objekt weg
-- [x] **PDF-Export exakt wie Canvas**
-  - Alle Bemaßungen, Labels, Pfeile, Verlängerungslinien identisch positioniert
-  - Verschobene Label-Positionen werden aus dem Store übernommen
+  - Keys: `ord-x-*` für X-Achse, `ord-y-*` für Y-Achse, `routing-legend` für Legende
+- [x] **PDF-Export identisch zum Canvas**
+  - Gleiche Ordinate-Achsen, Tick-Marks, Hilfslinien, Detail-Legende
   - Ausgeblendete Elemente werden übersprungen
-  - Nur sichtbare Canvas-Inhalte im PDF (keine Extra-Tabellen)
   - Sichtbare Gerber-Layer werden gerendert
-- [x] **Fräskontur-Bemaßung** — Labels mit Typ + Fräser-Ø
-  - Cyan für Board-Konturen, Orange für Panel-Konturen
-  - Pfeil vom Label zum Kontur-Mittelpunkt (auch bei Bögen korrekt)
-  - Sync-Kopien erhalten kein Label (vermeidet Clutter)
-  - Auto-Cleanup beim Löschen von Konturen
 - [x] **DimensionOverrides** Datenmodell auf Panel-Ebene
-  - `labelOffsets: Record<string, { dx, dy }>` — Label-Verschiebungen
-  - `dimLineDistances: DimensionLineDistances` — Maßlinien-Abstände (8 konfigurierbare Werte)
+  - `labelOffsets: Record<string, { dx, dy }>` — Legende-Verschiebung
+  - `ordinateAxisOffset: { x: number, y: number }` — Achsen-Abstand zum Panel (Default: 10mm)
   - `hiddenElements: string[]` — ausgeblendete Element-Keys
+  - `dimLineDistances` — Legacy, nicht mehr aktiv verwendet
 
 ### Noch offen
 
@@ -429,36 +416,35 @@ Der `usePanelStore` enthält:
 3. **"Tabs automatisch verteilen"** klicken
 4. Mousebites an Rundungen: Klick auf Bogen-Konturen oder automatisch generieren
 
-### Bemaßungs-Overlay (Canvas)
+### Bemaßungs-Overlay (Canvas) — Ordinatenbemaßung (VSM/ISO 129)
 1. **"Maße"**-Button in der Toolbar klicken (Ruler-Icon)
-2. Bemaßungen erscheinen im Canvas:
-   - **V-Score Labels** (pink): Position + Tiefe/Winkel, Pfeil zum V-Score
-   - **Fiducial Labels** (grün): Koordinaten + Durchmesser, Hilfslinien + Pfeil
-   - **Tooling Hole Labels** (rot): Ø + PTH/NPTH + Koordinaten, Hilfslinien + Pfeil
-   - **Fräskontur Labels** (cyan/orange): Typ + Fräser-Ø, Pfeil zur Kontur
-   - **Maßlinien**: Gesamtbreite/-höhe, Nutzenrand, Board-Position, Gaps
-3. **Labels verschieben**: Per Drag & Drop an gewünschte Position ziehen
-4. **Maßlinien verschieben**: Maßlinien-Texte per Drag anpassen
-5. **Ausblenden**: Rechtsklick auf Label oder Maßlinie → Element wird ausgeblendet
+2. **Ordinatenbemaßung** erscheint im Canvas:
+   - **Nullpunkt-Marker** bei (0,0) — kleiner Kreis mit Kreuz
+   - **X-Achse** (horizontal, unterhalb des Panels) mit allen X-Positionen als farbige Tick-Marks
+   - **Y-Achse** (vertikal, links vom Panel) mit allen Y-Positionen als farbige Tick-Marks
+   - **Farbige Hilfslinien** von jedem Feature zum Achsen-Tick (gestrichelt)
+   - **Detail-Legende** (rechts neben dem Panel): Farbcode-Erklärung + Detailparameter
+   - **Stagger**: Zu nahe Werte werden auf verschiedene Ebenen versetzt
+3. **Farben**: Weiß=Panel, Grau=Rahmen, Blau=Board, Pink=V-Score, Grün=Fiducial, Rot=Bohrung, Cyan/Orange=Fräskontur
+4. **Legende verschieben**: Per Drag & Drop an gewünschte Position ziehen
+5. **Ausblenden**: Rechtsklick auf Tick-Mark oder Legende → Element wird ausgeblendet
 6. Alle Positionen werden automatisch im Projekt gespeichert
 7. Erneut klicken = Overlay ausschalten
 
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
 2. PDF wird generiert und heruntergeladen (dynamische Seitengröße, mind. A4 quer)
-3. Enthält **exakt das, was im Canvas sichtbar ist**:
+3. Enthält **identische Ordinatenbemaßung** wie im Canvas:
    - Panel-Umriss mit Board-Umrissen (blau) und sichtbaren Gerber-Layern
-   - **V-Score Linien** (gestrichelt pink) mit Labels + Pfeile
+   - **V-Score Linien** (gestrichelt pink)
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
-   - **Fiducials** mit Label + Hilfslinien + Pfeil
-   - **Tooling Holes** mit Label + Hilfslinien + Pfeil
-   - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Labels + Pfeil
-   - **Fräskonturen-Visualisierung**: Fräserbreite-Streifen, Tab-Übergangskreise
-   - **Maßlinien** mit Verlängerungslinien: Gesamtbreite/-höhe, Nutzenrand, Board-Positionen, Gaps
+   - **Fiducials** und **Tooling Holes** als Symbole
+   - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Fräserbreite-Streifen
+   - **Ordinatenbemaßung**: X-Achse, Y-Achse, Nullpunkt, Tick-Marks, Hilfslinien
+   - **Detail-Legende** mit Farbcode und Parametern
    - **Zeichnungsrahmen** mit Gitterreferenz-System (dynamische Spalten/Reihen)
    - **ISO-Titelblock** mit SMTEC AG Logo
-4. Label-Positionen aus dem Canvas-Overlay werden 1:1 übernommen
-5. Ausgeblendete Elemente erscheinen nicht im PDF
+4. Ausgeblendete Elemente erscheinen nicht im PDF
 
 ---
 
@@ -522,11 +508,12 @@ npm start
 - **Tabs** (farbcodiert nach Typ)
 - **V-Score Linien** (gestrichelt pink)
 - **Fräskonturen** (Segmente mit Tabs, Sync-Kopien halbtransparent alpha 0.5)
-- **Bemaßungs-Overlay** (optional, Toggle "Maße"):
-  - V-Score Labels (pink) + Fiducial Labels (grün) + Tooling Hole Labels (rot) + Fräskontur Labels (cyan/orange)
-  - Maßlinien mit Verlängerungslinien und Endstrichen
-  - Pfeile von Labels zu Objekten (Ray-Box-Intersection)
-  - Alle Labels per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
+- **Bemaßungs-Overlay** (optional, Toggle "Maße") — Ordinatenbemaßung (VSM/ISO 129):
+  - Nullpunkt-Marker bei (0,0)
+  - X-Achse (unterhalb) und Y-Achse (links) mit farbigen Tick-Marks + Werten
+  - Farbige Hilfslinien (gestrichelt) von Features zu Achsen-Ticks
+  - Detail-Legende per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
+  - Stagger-Algorithmus für zu nahe Werte (3 Ebenen)
 - **Mess-Overlay** (gestrichelte Linie, Marker, Koordinaten, Distanz)
 
 ### Mess-Overlay
@@ -663,43 +650,50 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 - Löschen-Button bei Kopien ausgeblendet
 - Endpunkt-Editor bei Kopien ausgeblendet
 
-### Bemaßungs-Overlay Architektur (`pixi-panel-canvas.tsx` + `dimension-drawing.ts`)
+### Bemaßungs-Overlay Architektur — Ordinatenbemaßung (`pixi-panel-canvas.tsx` + `dimension-drawing.ts`)
+
+**Konzept:** Ordinatenbemaßung nach VSM/ISO 129 — ein Nullpunkt (0,0) oben links, X-Achse unterhalb und Y-Achse links vom Panel, alle Feature-Positionen als farbige Tick-Marks mit Hilfslinien.
 
 **Canvas-Overlay (`createDimensionOverlay`):**
 - Erzeugt einen PixiJS Container mit allen Bemaßungs-Elementen
 - Wird im Haupt-`useEffect` nach allen anderen Render-Schritten hinzugefügt wenn `showDimensions === true`
+- `OrdinatePosition`-Interface: `{ value, color, type, key, featureCanvasPos }`
+- `assignStaggerLevels()`: Versetzt zu nahe Werte auf verschiedene Ebenen (3 Level, 5mm Abstand)
 - Hilfsfunktionen:
   - `drawPixiDashedLine(g, x1, y1, x2, y2, color, width, dash, gap)` — Gestrichelte Linie
-  - `drawPixiDimLine(container, g, x1, y1, x2, y2, text, color, orientation, dimKey?, objectEdge?)` — Maßlinie mit Endstrichen, Text, Verlängerungslinien
-  - `getLabelWorldBox(container)` — Berechnet Welt-Bounding-Box eines Label-Containers
-  - `drawArrowToTarget(g, textBox, toX, toY, color, minDist)` — Ray-Box-Intersection Pfeil
 
-**Label-Keys für Offsets/Hidden:**
-- V-Score: `vscore-{id}`
-- Fiducial: `fiducial-{id}`
-- Tooling Hole: `toolinghole-{id}`
-- Fräskontur: `routing-{id}`
-- Maßlinie: `dimline-{key}` (z.B. `dimline-totalWidthBottom`, `dimline-boardDimNearH`)
+**Positions-Sammlung (X und Y getrennt):**
+- Panel-Kanten (weiß 0xcccccc)
+- Rahmen-Kanten (grau 0x888888)
+- Board-Kanten (blau 0x3b82f6) — dedupliziert
+- V-Score-Positionen (pink 0xff69b4) — vertikal→X, horizontal→Y
+- Fiducial-Positionen (grün 0x00cc66)
+- Tooling-Hole-Positionen (rot 0xff6666)
+- Fräskontur Start/End (cyan 0x00e5ff / orange 0xff9100)
+- Deduplizierung: Positionen innerhalb 0.05mm werden zusammengefasst
+
+**Element-Keys für Hidden:**
+- X-Achse: `ord-x-{type}-{index/id}` (z.B. `ord-x-panel-0`, `ord-x-fid-abc123`)
+- Y-Achse: `ord-y-{type}-{index/id}` (z.B. `ord-y-board-0`, `ord-y-vscore-xyz`)
+- Legende: `routing-legend`
 
 **Drag-Logik:**
-- `dragItemTypeRef = 'dimensionLabel'` für Element-Labels (V-Score, Fiducial, Tooling Hole, Fräskontur)
-- `dragItemTypeRef = 'dimensionLine'` für Maßlinien-Texte
-- Basis-Position wird beim Drag-Start berechnet: `currentPosition - currentOffset`
-- Neuer Offset = `mousePosition - basePosition`
+- `dragItemTypeRef = 'dimensionLabel'` — nur für die Detail-Legende
+- Keine Drag-Möglichkeit für Ordinate-Tick-Marks (fixierte Positionen)
+- Rechtsklick auf Tick-Mark → `hideDimensionElement(key)` → wird in `hiddenElements` gespeichert
 
 **PDF-Export (`dimension-drawing.ts`):**
-- Liest `panel.dimensionOverrides` für Offsets, Abstände und ausgeblendete Elemente
-- Verwendet exakt gleiche Formeln wie Canvas (mm → PDF-Punkte statt mm → Pixel)
+- Liest `panel.dimensionOverrides` für Offsets und ausgeblendete Elemente
+- Gleiche Positions-Sammellogik wie Canvas (mm → PDF-Punkte statt mm → Pixel)
 - Koordinaten-Mapping: `toX(mm) = offsetX + mm * scale`, `toY(mm) = offsetY + panelHeightPx - mm * scale`
 - Canvas `PIXELS_PER_MM = 4` ↔ PDF `MM_TO_PT ≈ 2.8346`
-- `drawPdfArrowToTarget` — Gleiche Ray-Box-Intersection wie Canvas
+- `PdfOrdinatePosition`-Interface analog zu Canvas
 
-**Auto-Cleanup:**
-- `removeFiducial` → entfernt `fiducial-{id}` Offset
-- `removeToolingHole` → entfernt `toolinghole-{id}` Offset
-- `removeVScoreLine` → entfernt `vscore-{id}` Offset
-- `removeRoutingContour` → entfernt `routing-{id}` Offset
-- `clearAllRoutingContours` → entfernt alle `routing-*` Offsets und Hidden-Elements
+**Store-Actions:**
+- `setOrdinateAxisOffset(axis, value)` — Setzt Achsen-Abstand (min 5mm)
+- `setDimensionLabelOffset(key, dx, dy)` — Für Legende-Position
+- `hideDimensionElement(key)` / `showDimensionElement(key)` — Tick-Marks/Legende ein-/ausblenden
+- Auto-Cleanup: `removeFiducial`, `removeToolingHole`, `removeVScoreLine`, `removeRoutingContour`, `clearAllRoutingContours` entfernen zugehörige Offsets/Hidden-Einträge
 
 ---
 

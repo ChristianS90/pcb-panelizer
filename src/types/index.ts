@@ -493,6 +493,12 @@ export interface Panel {
   routingConfig: RoutingConfig;
   /** Bemaßungs-Überschreibungen (Label-Positionen, Maßlinien-Abstände) */
   dimensionOverrides?: DimensionOverrides;
+  /** Zeichnungsnummer für PDF-Titelblock */
+  drawingNumber?: string;
+  /** Gezeichnet von (Name/Kürzel) */
+  drawnBy?: string;
+  /** Freigegeben von (Name/Kürzel) */
+  approvedBy?: string;
   /** Erstellungsdatum */
   createdAt: Date;
   /** Letzte Änderung */
@@ -585,12 +591,14 @@ export interface DimensionLineDistances {
  * Wird im Panel gespeichert und für Canvas-Overlay und PDF-Export verwendet.
  */
 export interface DimensionOverrides {
-  /** Label-Verschiebungen pro Element (Key = "vscore-{id}", "fiducial-{id}", "toolinghole-{id}") */
+  /** Label-Verschiebungen pro Element (Key = "routing-legend" für Legende) */
   labelOffsets: Record<string, DimensionLabelOffset>;
-  /** Optionale Überschreibung der Maßlinien-Abstände */
+  /** Optionale Überschreibung der Maßlinien-Abstände (Legacy, nicht mehr aktiv verwendet) */
   dimLineDistances?: DimensionLineDistances;
-  /** Ausgeblendete Bemaßungs-Elemente (Keys wie "dimline-totalWidthBottom", "vscore-{id}", etc.) */
+  /** Ausgeblendete Bemaßungs-Elemente (Keys wie "ord-x-panel-0", "ord-y-fid-abc123", "routing-legend") */
   hiddenElements?: string[];
+  /** Abstand der Ordinate-Achsen vom Panel-Rand in mm (Default: { x: 10, y: 10 }) */
+  ordinateAxisOffset?: { x: number; y: number };
 }
 
 // ============================================================================

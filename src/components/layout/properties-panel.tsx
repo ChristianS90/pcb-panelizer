@@ -2189,6 +2189,9 @@ function DimensionsInfo() {
   const setUnit = usePanelStore((state) => state.setUnit);
   const setGrid = usePanelStore((state) => state.setGrid);
   const setPanelSize = usePanelStore((state) => state.setPanelSize);
+  const setDrawingNumber = usePanelStore((state) => state.setDrawingNumber);
+  const setDrawnBy = usePanelStore((state) => state.setDrawnBy);
+  const setApprovedBy = usePanelStore((state) => state.setApprovedBy);
 
   // Berechne Statistiken
   const boardCount = panel.instances.length;
@@ -2225,6 +2228,46 @@ function DimensionsInfo() {
         <div className="bg-gray-50 rounded p-2">
           <div className="text-lg font-semibold text-gray-800">{uniqueBoards}</div>
           <div className="text-xs text-gray-500">Designs</div>
+        </div>
+      </div>
+
+      {/* Zeichnungskopf-Felder für PDF */}
+      <div className="space-y-2 pt-1 border-t border-gray-200">
+        <div className="text-xs text-gray-500 font-medium">Zeichnungskopf (PDF)</div>
+        <div>
+          <label className="text-xs text-gray-600 block mb-1">Zeichnungsnummer</label>
+          <input
+            type="text"
+            value={panel.drawingNumber || ''}
+            onChange={(e) => setDrawingNumber(e.target.value)}
+            placeholder="z.B. 12345.0120-NZ"
+            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                       focus:outline-none focus:ring-1 focus:ring-primary-500"
+          />
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div>
+            <label className="text-xs text-gray-600 block mb-1">Gezeichnet von</label>
+            <input
+              type="text"
+              value={panel.drawnBy || ''}
+              onChange={(e) => setDrawnBy(e.target.value)}
+              placeholder="Kürzel"
+              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                         focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+          </div>
+          <div>
+            <label className="text-xs text-gray-600 block mb-1">Freigegeben von</label>
+            <input
+              type="text"
+              value={panel.approvedBy || ''}
+              onChange={(e) => setApprovedBy(e.target.value)}
+              placeholder="Kürzel"
+              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                         focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+          </div>
         </div>
       </div>
 

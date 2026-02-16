@@ -201,6 +201,13 @@ interface PanelStore {
   /** Setzt den Panel-Namen */
   setPanelName: (name: string) => void;
 
+  /** Setzt die Zeichnungsnummer für den PDF-Titelblock */
+  setDrawingNumber: (drawingNumber: string) => void;
+  /** Setzt "Gezeichnet von" für den PDF-Titelblock */
+  setDrawnBy: (drawnBy: string) => void;
+  /** Setzt "Freigegeben von" für den PDF-Titelblock */
+  setApprovedBy: (approvedBy: string) => void;
+
   /** Aktualisiert die Panel-Größe basierend auf Inhalt */
   updatePanelSize: () => void;
 
@@ -385,6 +392,9 @@ interface PanelStore {
 
   /** Zeigt alle ausgeblendeten Bemaßungs-Elemente wieder an */
   showAllDimensionElements: () => void;
+
+  /** Setzt den Abstand einer Ordinate-Achse vom Panel (x = links, y = unten, min 5mm) */
+  setOrdinateAxisOffset: (axis: 'x' | 'y', value: number) => void;
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
@@ -2017,6 +2027,33 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
       },
     })),
 
+  setDrawingNumber: (drawingNumber) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        drawingNumber,
+        modifiedAt: new Date(),
+      },
+    })),
+
+  setDrawnBy: (drawnBy) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        drawnBy,
+        modifiedAt: new Date(),
+      },
+    })),
+
+  setApprovedBy: (approvedBy) =>
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        approvedBy,
+        modifiedAt: new Date(),
+      },
+    })),
+
   updatePanelSize: () =>
     set((state) => {
       const { instances, boards, frame } = state.panel;
@@ -2701,15 +2738,25 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
         (c) => c.id !== contourId && c.masterContourId !== contourId
       );
 
-      // Auto-Cleanup: Verwaisten Label-Offset entfernen
+      // Auto-Cleanup: Verwaiste Label-Offsets und Hidden-Elements entfernen
       const overrides = state.panel.dimensionOverrides;
       let cleanedOverrides = overrides;
       if (overrides) {
-        const key = `routing-${contourId}`;
-        if (overrides.labelOffsets[key]) {
-          const { [key]: _, ...rest } = overrides.labelOffsets;
-          cleanedOverrides = { ...overrides, labelOffsets: rest };
+        const keysToRemove = [
+          `routing-${contourId}`,
+          `routing-start-${contourId}`,
+          `routing-end-${contourId}`,
+        ];
+        // Label-Offsets bereinigen
+        const cleanedOffsets = { ...overrides.labelOffsets };
+        for (const k of keysToRemove) {
+          delete cleanedOffsets[k];
         }
+        // Hidden-Elements bereinigen
+        const cleanedHidden = (overrides.hiddenElements || []).filter(
+          (h: string) => !keysToRemove.includes(h)
+        );
+        cleanedOverrides = { ...overrides, labelOffsets: cleanedOffsets, hiddenElements: cleanedHidden };
       }
 
       const updatedPanel = {
@@ -3337,6 +3384,26 @@ export const usePanelStore = create<PanelStore>((set, get) => ({
           dimensionOverrides: {
             ...existing,
             hiddenElements: [],
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    }),
+
+  // Setzt den Abstand einer Ordinate-Achse vom Panel (min 5mm)
+  setOrdinateAxisOffset: (axis, value) =>
+    set((state) => {
+      const existing = state.panel.dimensionOverrides || { labelOffsets: {} };
+      const currentOffset = existing.ordinateAxisOffset || { x: 10, y: 10 };
+      return {
+        panel: {
+          ...state.panel,
+          dimensionOverrides: {
+            ...existing,
+            ordinateAxisOffset: {
+              ...currentOffset,
+              [axis]: Math.max(5, Math.round(value * 10) / 10),
+            },
           },
           modifiedAt: new Date(),
         },

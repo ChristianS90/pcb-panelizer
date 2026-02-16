@@ -62,11 +62,11 @@ export function Header() {
 
   // Logo beim ersten Rendern laden (einmalig)
   useEffect(() => {
-    fetch('/logo-smtec.png')
+    fetch('/logo-smtec-full.jpg')
       .then(res => res.arrayBuffer())
       .then(buf => {
         logoBytes.current = new Uint8Array(buf);
-        console.log('SMTEC Logo geladen für PDF-Export');
+        console.log('SMTEC Logo (vollständig) geladen für PDF-Export');
       })
       .catch(err => {
         console.warn('Logo konnte nicht geladen werden:', err);
@@ -183,9 +183,10 @@ export function Header() {
           date: new Date().toLocaleDateString('de-CH'),
           revision: '1.0',
           // ISO-Titelblock Felder
-          drawnBy: 'PCB',
+          drawnBy: panel.drawnBy || '',
+          approvedBy: panel.approvedBy || '',
           issueNumber: '01',
-          drawingNumber: 'XXXXX.0120-NZ',
+          drawingNumber: panel.drawingNumber || '',
           // Logo als PNG-Bytes (beim Start geladen)
           logoImageBytes: logoBytes.current || undefined,
           // PCB-Spezifikationen (Standardwerte)
