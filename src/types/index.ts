@@ -196,6 +196,9 @@ export interface Board {
   /** Größe in mm */
   width: number;
   height: number;
+  /** Render-Offset in mm: Verschiebung der Gerber-Daten damit sichtbarer Inhalt bei (0,0) startet */
+  renderOffsetX?: number;
+  renderOffsetY?: number;
   /** Rotation der Gerber-Layer um den Nullpunkt in Grad (0, 90, 180, 270) */
   layerRotation: 0 | 90 | 180 | 270;
   /** Gerber-Layer an X-Achse spiegeln (horizontal) */
@@ -308,6 +311,34 @@ export interface Fiducial {
   type: 'panel' | 'board';
   /** Falls Board-Fiducial: Referenz zur Board-Instanz */
   boardInstanceId?: string;
+}
+
+/**
+ * Badmark (Bad-Board-Markierung)
+ *
+ * Kupfer-Pads auf dem Nutzenrand neben jeder Leiterplatte.
+ * Die Pick & Place Maschine erkennt anhand dieser Marken,
+ * welche Boards defekt sind und übersprungen werden sollen.
+ *
+ * Zwei Typen:
+ * - Board-Badmark: Wird beim ersten Board platziert und automatisch auf alle anderen synchronisiert
+ * - Master-Badmark: Referenzmarke auf der kurzen Nutzenrandseite (Auto-Platzierung)
+ */
+export interface Badmark {
+  /** Eindeutige ID */
+  id: string;
+  /** Position im Panel (mm) */
+  position: Point;
+  /** Seitenlänge des Quadrats in mm (Standard: 1mm) */
+  size: number;
+  /** Zugehörige Board-Instanz (leer bei Master-Badmark) */
+  boardInstanceId: string;
+  /** true = Panel-Master-Badmark (auf kurzer Seite) */
+  isMasterBadmark?: boolean;
+  /** true = automatisch kopiert vom Master-Board */
+  isSyncCopy?: boolean;
+  /** ID der Original-Badmark (bei Sync-Kopien) */
+  masterBadmarkId?: string;
 }
 
 /**
@@ -483,6 +514,8 @@ export interface Panel {
   tabs: Tab[];
   /** Alle Fiducials */
   fiducials: Fiducial[];
+  /** Alle Badmarks (Bad-Board-Markierungen) */
+  badmarks: Badmark[];
   /** Alle Tooling-Bohrungen */
   toolingHoles: ToolingHole[];
   /** V-Score Linien */
@@ -531,6 +564,7 @@ export type Tool =
   | 'pan' // Canvas verschieben
   | 'place-tab' // Tab platzieren
   | 'place-fiducial' // Fiducial platzieren
+  | 'place-badmark' // Badmark platzieren
   | 'place-hole' // Tooling-Bohrung platzieren
   | 'place-vscore' // V-Score Linie zeichnen
   | 'place-mousebite' // Mousebite an Bogen-Kontur platzieren

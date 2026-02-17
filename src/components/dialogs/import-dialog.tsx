@@ -187,8 +187,9 @@ export function ImportDialog({ isOpen, onClose }: ImportDialogProps) {
   // ----------------------------------------------------------------
 
   const handleImport = () => {
-    // Bounding Box berechnen
-    const bbox = calculateCombinedBoundingBox(gerberFiles);
+    // Bounding Box nur aus sichtbaren Layern berechnen (für korrekte Board-Größe)
+    const visibleFiles = gerberFiles.filter((f) => f.visible);
+    const bbox = calculateCombinedBoundingBox(visibleFiles.length > 0 ? visibleFiles : gerberFiles);
 
     // Outline extrahieren
     const outline = extractBoardOutline(gerberFiles);
@@ -202,6 +203,8 @@ export function ImportDialog({ isOpen, onClose }: ImportDialogProps) {
       boundingBox: bbox,
       width: bbox.maxX - bbox.minX,
       height: bbox.maxY - bbox.minY,
+      renderOffsetX: bbox.minX,
+      renderOffsetY: bbox.minY,
       layerRotation: 0,
       mirrorX: false,
       mirrorY: false,

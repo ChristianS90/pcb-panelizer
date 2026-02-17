@@ -14,6 +14,7 @@ import {
   parseGerberFile,
   normalizeGerberLayers,
   extractBoardOutline,
+  calculateCombinedBoundingBox,
 } from '@/lib/gerber/parser';
 
 // Aktuelle Version des Dateiformats (für zukünftige Kompatibilität)
@@ -51,8 +52,15 @@ export function serializeProject(
       layers: board.layers.map((layer) => ({
         ...layer,
         // parsedData enthält Map<string, Aperture> → nicht JSON-fähig
-        // Wird beim Laden aus rawContent rekonstruiert
-        parsedData: null,
+        // Wird beim Laden aus rawContent rekonstruiert.
+        // AUSNAHME: Synthetische Layer (z.B. manueller Outline) haben kein rawContent.
+        // Für diese Layer müssen wir parsedData direkt serialisieren,
+        // wobei die Apertures-Map in ein JSON-kompatibles Object umgewandelt wird.
+        parsedData: !layer.rawContent && layer.parsedData ? {
+          ...layer.parsedData,
+          // Map → Object für JSON-Serialisierung (wird beim Laden zurückkonvertiert)
+          apertures: Object.fromEntries(layer.parsedData.apertures) as any,
+        } : null,
       })),
     })),
   };
@@ -120,8 +128,11 @@ export async function deserializeProject(
     const parsedLayers = await Promise.all(
       board.layers.map(async (layer) => {
         if (!layer.rawContent) {
-          // Kein Inhalt vorhanden → Layer bleibt ohne parsedData
-          console.warn(`Layer "${layer.filename}" hat keinen rawContent, überspringe.`);
+          // Synthetischer Layer (z.B. manueller Outline): parsedData wurde direkt
+          // serialisiert, Apertures müssen von Object zurück zu Map konvertiert werden
+          if (layer.parsedData && layer.parsedData.apertures && !(layer.parsedData.apertures instanceof Map)) {
+            layer.parsedData.apertures = new Map(Object.entries(layer.parsedData.apertures));
+          }
           return layer;
         }
 
@@ -146,6 +157,17 @@ export async function deserializeProject(
     // Aktualisierte Layer und Outline zurückschreiben
     board.layers = normalizedLayers;
     board.outline = outline;
+
+    // Board-Dimensionen aus sichtbaren Layern neu berechnen
+    const visibleLayers = normalizedLayers.filter((l) => l.visible);
+    if (visibleLayers.length > 0) {
+      const visBbox = calculateCombinedBoundingBox(visibleLayers);
+      board.width = visBbox.maxX - visBbox.minX;
+      board.height = visBbox.maxY - visBbox.minY;
+      board.boundingBox = visBbox;
+      board.renderOffsetX = visBbox.minX;
+      board.renderOffsetY = visBbox.minY;
+    }
   }
 
   // 6. Migration: creationMethod für ältere Projekte setzen
@@ -157,6 +179,11 @@ export async function deserializeProject(
         (contour as any).creationMethod = 'auto';
       }
     }
+  }
+
+  // 6b. Migration: badmarks-Array für ältere Projekte setzen
+  if (!(panel as any).badmarks) {
+    (panel as any).badmarks = [];
   }
 
   // 7. Date-Strings zurück zu Date-Objekten konvertieren

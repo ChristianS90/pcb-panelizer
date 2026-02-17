@@ -95,6 +95,10 @@ pcb-panelizer/
    - `masterContourId` - Bei Sync-Kopien: ID der Original-Kontur auf dem Master-Board
    - `isSyncCopy` - true bei automatisch synchronisierten Kopien (schreibgeschützt)
 9. **FreeMousebite** - Mousebite an Bogen-Konturen (Board-Rundungen, Panel-Ecken)
+10. **Badmark** - Bad-Board-Markierung für Pick & Place (Quadrat, Amber-Farbe)
+    - `boardInstanceId` - Zugehörige Board-Instanz (leer bei Master-Badmark)
+    - `isMasterBadmark` - Panel-weite Referenzmarke auf kurzer Seite
+    - `isSyncCopy` / `masterBadmarkId` - Automatisch synchronisierte Kopien (schreibgeschützt)
 
 ### Koordinatensystem
 
@@ -113,6 +117,7 @@ Der `usePanelStore` enthält:
 - `activeTool` - Ausgewähltes Werkzeug
 - `selectedInstances` - Ausgewählte Board-Instanzen
 - `selectedFiducialId` - Ausgewähltes Fiducial (für Bearbeitung)
+- `selectedBadmarkId` - Ausgewählte Badmark (für Bearbeitung)
 - `selectedToolingHoleId` - Ausgewählte Tooling-Bohrung (für Bearbeitung)
 - `selectedVScoreLineId` - Ausgewählte V-Score-Linie
 - `selectedRoutingContourId` - Ausgewählte Fräskontur
@@ -262,8 +267,8 @@ Der `usePanelStore` enthält:
   - **X-Achse** (horizontal, unterhalb Panel): alle X-Positionen als farbige Tick-Marks + Werte
   - **Y-Achse** (vertikal, links vom Panel): alle Y-Positionen als farbige Tick-Marks + Werte
   - **Farbige Hilfslinien** (gestrichelt) von jedem Feature zum Achsen-Tick
-  - **Stagger-Algorithmus**: zu nahe Werte werden auf verschiedene Ebenen versetzt (3 Level)
-  - **Farbcode**: Weiß=Panel, Grau=Rahmen, Blau=Board, Pink=V-Score, Grün=Fiducial, Rot=Bohrung, Cyan/Orange=Fräskontur
+  - **Diagonal-Jog**: zu nahe Werte werden entlang der Achse auseinandergeschoben mit schräger Verbindungslinie (ISO 129)
+  - **Farbcode**: Weiß=Panel, Grau=Rahmen, Blau=Board, Pink=V-Score, Grün=Fiducial, Amber=Badmark, Rot=Bohrung, Cyan/Orange=Fräskontur
   - **Deduplizierung**: Positionen innerhalb 0.05mm werden zusammengefasst
 - [x] **Detail-Legende** (rechts neben Panel)
   - Farbcode-Erklärung + Detailparameter (V-Score Tiefe/Winkel, Fiducial Ø, Bohrung Ø, Fräser Ø)
@@ -316,6 +321,50 @@ Der `usePanelStore` enthält:
 - [x] **Canvas-Legende: Typspezifische Symbole**
   - Durchgezogene/gestrichelte Linien, Fiducial-Ring, Bohrungs-Kreuz, Fräser-Streifen
 
+### Phase 10 - Erledigt
+
+- [x] **Badmark-System (Bad-Board-Markierungen)**
+  - **Board-Badmarks**: Per Klick-Tool auf dem Nutzenrand beim ersten Board platziert
+  - **Master-Badmark**: Referenzmarke auf der kurzen Nutzenrandseite (Auto-Platzierung per Button)
+  - **Automatische Synchronisation**: Board-Badmarks auf dem Master-Board werden auf alle anderen Instanzen kopiert
+  - **Form**: Quadrat (■), klar unterscheidbar von runden Fiducials
+  - **Farbe**: Amber/Gelb (0xFFC107)
+  - **Drag & Drop** im Canvas (Sync-Kopien schreibgeschützt)
+  - **Properties Panel**: Badmark-Größe (0.5–3mm), Master-Badmark-Button, Liste mit Koordinaten
+  - **Ordinate-Bemaßung**: Badmark-Positionen als amber Tick-Marks im Canvas und PDF
+  - **PDF-Export**: Badmarks als gefüllte Quadrate, Master-Badmark mit Ring
+  - **Marker-Dropdown** in der Toolbar: Fiducial und Badmark als Sub-Tools
+  - **Projekt-Migration**: `badmarks: []` für ältere Projekte automatisch gesetzt
+  - **Undo/Redo**: Alle Badmark-Aktionen speichern History-Snapshots
+
+### Phase 11 - Erledigt
+
+- [x] **Outline manuell definieren** (Linien aus Layern auswählen)
+  - Neuer Modus "Outline definieren" in der Layer-Sidebar
+  - Einzelne Linien/Bögen im Canvas per Klick an-/abwählen (orange Hervorhebung)
+  - "Alle auswählen" Checkbox pro Layer (Layer-weise Massenauswahl)
+  - Zähler zeigt Anzahl ausgewählter Linien/Bögen
+  - "Übernehmen" erstellt neuen synthetischen Outline-Layer
+  - Bestehender Outline-Layer wird automatisch auf 'mechanical' zurückgesetzt
+  - Board-Outline wird automatisch neu berechnet
+  - Board-Dimensionen werden nach Outline-Definition neu berechnet
+  - Vollständiges Undo/Redo (History-Snapshot vor Anwendung)
+  - Mathematische Klick-Erkennung (Punkt-zu-Linie/Bogen Distanz, keine Hit-Areas)
+  - **Rubber-Band-Selektion**: Auswahlfenster über Linien/Bögen ziehen → alle im Fenster werden ausgewählt
+  - Liang-Barsky Algorithmus für Linie-Rechteck-Intersection, Bogen-Sampling für Bogenerkennung
+  - Koordinaten-Transformation: Screen → World → Board-lokal → Gerber (wiederverwendbare `worldToGerber` Funktion)
+  - Layer-Rotation + Spiegelung korrekt rückgerechnet
+  - **"Kontur folgen" kompatibel** mit manuell erstellten Outline-Layern
+  - **Projekt speichern/laden**: Synthetische Outline-Layer bleiben erhalten (parsedData wird direkt serialisiert, Map↔Object Konvertierung für Apertures)
+- [x] **Board-Dimensionen nur aus sichtbaren Layern**
+  - Import, Layer-Sichtbarkeit-Toggle und Projekt-Laden berechnen `board.width`/`board.height` nur aus eingeblendeten Layern
+  - `renderOffsetX`/`renderOffsetY` auf Board-Ebene für korrekte Gerber-Positionierung
+  - Offset-Container in PixiJS-Rendering verschiebt Gerber-Daten damit sichtbarer Inhalt bei (0,0) startet
+  - `transformPointToPanel()` berücksichtigt Render-Offset für korrekte Gerber→Panel-Transformation
+  - `worldToGerber()` berücksichtigt Render-Offset für korrekte Panel→Gerber-Rücktransformation
+- [x] **Board-Hintergrund und Beschriftung standardmäßig ausgeblendet**
+  - `showBoardBackground` und `showBoardLabels` sind standardmäßig `false`
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
@@ -331,7 +380,7 @@ Der `usePanelStore` enthält:
 |----------|-------|-------------|
 | Auswählen | - | Boards auswählen und verschieben (normaler Cursor) |
 | Messen | M (Modus) | Abstände und Koordinaten messen |
-| Fiducial | - | Fiducial-Marker per Klick platzieren |
+| Marker | - | Dropdown: Fiducial oder Badmark platzieren |
 | Bohrung | - | Tooling-Bohrung per Klick platzieren |
 | V-Score | - | V-Score Linie zeichnen |
 | Tab/Mousebite | - | Dropdown: Tab oder Mousebite platzieren |
@@ -458,7 +507,7 @@ Der `usePanelStore` enthält:
    - **Y-Achse** (vertikal, links vom Panel) mit allen Y-Positionen als farbige Tick-Marks
    - **Farbige Hilfslinien** von jedem Feature zum Achsen-Tick (gestrichelt)
    - **Detail-Legende** (rechts neben dem Panel): Farbcode-Erklärung + Detailparameter
-   - **Stagger**: Zu nahe Werte werden auf verschiedene Ebenen versetzt
+   - **Diagonal-Jog**: Zu nahe Werte werden entlang der Achse auseinandergeschoben (schräge Verbindungslinie)
 3. **Farben**: Weiß=Panel, Grau=Rahmen, Blau=Board, Pink=V-Score, Grün=Fiducial, Rot=Bohrung, Cyan/Orange=Fräskontur
 4. **Legende verschieben**: Per Drag & Drop an gewünschte Position ziehen
 5. **Ausblenden**: Rechtsklick auf Tick-Mark oder Legende → Element wird ausgeblendet
@@ -490,7 +539,7 @@ Der `usePanelStore` enthält:
 
 ## Properties Panel (rechte Sidebar)
 
-8 Sektionen, alle standardmäßig eingeklappt. Klappen automatisch auf wenn passendes Werkzeug gewählt wird.
+9 Sektionen, alle standardmäßig eingeklappt. Klappen automatisch auf wenn passendes Werkzeug gewählt wird.
 
 | Sektion | Inhalt |
 |---------|--------|
@@ -500,6 +549,7 @@ Der `usePanelStore` enthält:
 | **V-Score** | Tiefe %, Winkel °, Auto-Generierung, manuelle H/V-Linien, editierbare Positionen |
 | **Fräskonturen** | Fräser-Ø, Sicherheitsabstand, Board-/Panel-Konturen, Gap-Warnung |
 | **Fiducials** | Pad-Ø, Mask-Ø, 3/4 Stirnseiten-Platzierung, Drag&Drop, Koordinaten |
+| **Badmarks** | Badmark-Größe (0.5–3mm), Master-Badmark-Button, Board-Badmark-Liste, Kopien-Badges |
 | **Tooling** | Durchmesser, PTH/NPTH, 4 Eck-Bohrungen, Durchmesser nachträglich editierbar |
 | **Dimensionen** | Panel-Größe, Grid, Einheit, Statistiken |
 
@@ -543,6 +593,7 @@ npm start
 - **Fadenkreuz** am Nullpunkt (rot)
 - **Boards** mit Gerber-Layern (Rotation + Spiegelung pro Board, Instance-Rotation für Panel-Drehung)
 - **Fiducials** (grün, ausgewählt: gold mit orange Glow, **Drag & Drop**)
+- **Badmarks** (amber Quadrat ■, Master mit Ring, Sync-Kopien halbtransparent, **Drag & Drop**)
 - **Tooling Holes** (mit Kupferring wenn plated, ausgewählt: orange Glow, **Drag & Drop**)
 - **Tabs** (farbcodiert nach Typ)
 - **V-Score Linien** (gestrichelt pink)
@@ -552,7 +603,7 @@ npm start
   - X-Achse (unterhalb) und Y-Achse (links) mit farbigen Tick-Marks + Werten
   - Farbige Hilfslinien (gestrichelt) von Features zu Achsen-Ticks
   - Detail-Legende per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
-  - Stagger-Algorithmus für zu nahe Werte (3 Ebenen)
+  - Diagonal-Jog für zu nahe Werte (Text entlang Achse verschoben, schräge Verbindungslinie)
 - **Mess-Overlay** (gestrichelte Linie, Marker, Koordinaten, Distanz)
 
 ### Mess-Overlay
@@ -570,12 +621,15 @@ boardContainer (position + instance.rotation mit Offset-Korrektur)
 ├── [mirrorContainer] (optional, scale -1 für Spiegelung)
 │   └── gerberContainer (Y-Flip: position.y = localH, scale.y = -1)
 │       └── rotationContainer (layerRotation CCW + Offset)
-│           └── layerGraphics (Gerber-Daten)
+│           └── offsetContainer (position: -renderOffsetX, -renderOffsetY)
+│               └── layerGraphics (Gerber-Daten)
 ├── nameText
 └── sizeText
 ```
 
 **Wichtig:** Alle lokalen Zeichnungen verwenden `effectiveW × effectiveH` (OHNE Instance-Rotation-Swap). Die PixiJS-Container-Rotation dreht alles zusammen. Ein Positions-Offset kompensiert die Rotation um (0,0).
+
+**Render-Offset:** Wenn nur bestimmte Layer sichtbar sind, startet deren Bounding-Box nicht unbedingt bei (0,0) im normalisierten Gerber-Raum. `renderOffsetX`/`renderOffsetY` (auf `Board`) speichern diesen Offset. Der `offsetContainer` verschiebt die Gerber-Daten um `(-renderOffsetX * PIXELS_PER_MM, -renderOffsetY * PIXELS_PER_MM)` damit der sichtbare Inhalt bei (0,0) des Board-Containers startet. Entsprechend berücksichtigen `transformPointToPanel()` und `worldToGerber()` den Offset bei Koordinaten-Transformationen.
 
 ### Farben
 ```javascript
@@ -697,7 +751,7 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 - Erzeugt einen PixiJS Container mit allen Bemaßungs-Elementen
 - Wird im Haupt-`useEffect` nach allen anderen Render-Schritten hinzugefügt wenn `showDimensions === true`
 - `OrdinatePosition`-Interface: `{ value, color, type, key, featureCanvasPos }`
-- `assignStaggerLevels()`: Versetzt zu nahe Werte auf verschiedene Ebenen (3 Level, 5mm Abstand)
+- `computeSpreadPositions()`: Schiebt Text-Positionen entlang der Achse auseinander (min. 3mm Abstand), Diagonal-Jog verbindet Tick mit verschobenem Text
 - Hilfsfunktionen:
   - `drawPixiDashedLine(g, x1, y1, x2, y2, color, width, dash, gap)` — Gestrichelte Linie
 

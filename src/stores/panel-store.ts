@@ -14,6 +14,7 @@
 
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
+import { extractBoardOutline, calculateCombinedBoundingBox } from '@/lib/gerber';
 import type {
   Board,
   BoardInstance,
@@ -21,6 +22,7 @@ import type {
   PanelFrame,
   Tab,
   Fiducial,
+  Badmark,
   ToolingHole,
   VScoreLine,
   FreeMousebite,
@@ -88,6 +90,9 @@ interface PanelStore {
   /** Board-Beschriftung (blauer Rahmen, Name, Größe) anzeigen oder ausblenden */
   showBoardLabels: boolean;
 
+  /** Aktuell ausgewählte Badmark (für Bearbeitung im Properties Panel und Canvas-Glow) */
+  selectedBadmarkId: string | null;
+
   /** Aktuell ausgewählte freie Mousebite (für Bearbeitung und Canvas-Glow) */
   selectedFreeMousebiteId: string | null;
 
@@ -108,6 +113,15 @@ interface PanelStore {
     boardInstanceId: string | null;
     selectedSegmentIndices: number[];       // Frei wählbare Segment-Indizes
     outlineSegments: OutlinePathSegment[];  // Gecachte Outline-Segmente
+  };
+
+  /** State für "Outline definieren" Modus (manuelle Outline-Auswahl aus Layern) */
+  outlineDefineState: {
+    active: boolean;                    // Ist der Modus aktiv?
+    sourceBoardId: string | null;       // Welches Board wird bearbeitet
+    selectedCommands: string[];         // Ausgewählte Commands als "layerId:cmdIndex"
+    prevShowBackground: boolean;        // Gespeicherter Wert vor Modus-Aktivierung
+    prevShowLabels: boolean;            // Gespeicherter Wert vor Modus-Aktivierung
   };
 
   /** V-Score Linien im Canvas ein-/ausblenden */
@@ -143,6 +157,28 @@ interface PanelStore {
 
   /** Ändert den Typ eines Layers */
   setLayerType: (boardId: string, layerId: string, newType: string, newColor: string) => void;
+
+  // --------------------------------------------------------------------------
+  // Outline-Definitions-Modus (manuelle Auswahl von Linien/Bögen aus Layern)
+  // --------------------------------------------------------------------------
+
+  /** Aktiviert den "Outline definieren"-Modus für ein Board */
+  enterOutlineDefineMode: (boardId: string) => void;
+
+  /** Beendet den "Outline definieren"-Modus und setzt den State zurück */
+  exitOutlineDefineMode: () => void;
+
+  /** Wählt einen Command an/ab (key = "layerId:cmdIndex") */
+  toggleOutlineCommand: (key: string) => void;
+
+  /** Wählt alle Linien/Bögen eines Layers auf einmal aus */
+  selectAllLayerCommands: (boardId: string, layerId: string) => void;
+
+  /** Wählt alle Commands eines Layers ab */
+  deselectAllLayerCommands: (layerId: string) => void;
+
+  /** Erstellt einen neuen Outline-Layer aus den ausgewählten Commands */
+  applyOutlineDefinition: () => void;
 
   /** Dreht die Gerber-Layer eines Boards um 90° gegen den Uhrzeigersinn */
   rotateBoardLayers: (boardId: string) => void;
@@ -253,6 +289,24 @@ interface PanelStore {
 
   /** Wählt ein Fiducial aus */
   selectFiducial: (fiducialId: string | null) => void;
+
+  /** Fügt eine Badmark hinzu und synchronisiert auf andere Boards */
+  addBadmark: (badmark: Omit<Badmark, 'id'>) => void;
+
+  /** Entfernt eine Badmark (inkl. aller Kopien) */
+  removeBadmark: (badmarkId: string) => void;
+
+  /** Entfernt alle Badmarks */
+  clearAllBadmarks: () => void;
+
+  /** Aktualisiert die Position einer Badmark (für Drag, OHNE History) */
+  updateBadmarkPosition: (badmarkId: string, position: Point) => void;
+
+  /** Wählt eine Badmark aus */
+  selectBadmark: (badmarkId: string | null) => void;
+
+  /** Platziert die Master-Badmark automatisch auf der kurzen Seite */
+  addMasterBadmark: () => void;
 
   /** Fügt eine Tooling-Bohrung hinzu */
   addToolingHole: (hole: Omit<ToolingHole, 'id'>) => void;
@@ -511,6 +565,7 @@ function createEmptyPanel(): Panel {
     height: 100,
     tabs: [],
     fiducials: [],
+    badmarks: [],
     toolingHoles: [],
     vscoreLines: [],
     freeMousebites: [],
@@ -764,6 +819,83 @@ function syncMasterContours(panel: Panel): RoutingContour[] {
   }
 
   return [...nonCopyContours, ...newCopies];
+}
+
+/**
+ * Synchronisiert Board-Badmarks vom Master-Board auf alle anderen Board-Instanzen
+ * gleichen Typs (gleiche boardId).
+ *
+ * Ablauf:
+ * 1. Master-Instanz ermitteln (nächste zu 0,0)
+ * 2. Board-Badmarks auf dem Master finden (nicht isSyncCopy, nicht isMasterBadmark)
+ * 3. Für jede Nicht-Master-Instanz gleicher boardId:
+ *    - Badmark um Delta (target.position - master.position) verschieben
+ *    - Bestehende Kopien aktualisieren (stabile IDs)
+ *    - Verwaiste Kopien entfernen
+ *
+ * @param panel - Der aktuelle Panel-Zustand
+ * @returns Neues badmarks-Array mit synchronisierten Kopien
+ */
+function syncMasterBadmarks(panel: Panel): Badmark[] {
+  const { instances, badmarks } = panel;
+  if (instances.length <= 1) {
+    // Nur 1 oder 0 Instanzen → verwaiste Kopien entfernen
+    return badmarks.filter(b => !b.isSyncCopy);
+  }
+
+  const master = getMasterInstance(instances);
+  if (!master) return badmarks;
+
+  // Board-Badmarks auf dem Master finden (nicht Sync-Kopie, nicht Master-Badmark)
+  const masterBadmarks = badmarks.filter(b =>
+    b.boardInstanceId === master.id &&
+    !b.isSyncCopy &&
+    !b.isMasterBadmark
+  );
+
+  // Alle Nicht-Master-Instanzen mit gleicher boardId
+  const targetInstances = instances.filter(inst =>
+    inst.id !== master.id && inst.boardId === master.boardId
+  );
+
+  // Bestehende Sync-Kopien für schnelles Lookup
+  const existingCopies = new Map<string, Badmark>();
+  for (const b of badmarks) {
+    if (b.isSyncCopy && b.masterBadmarkId) {
+      existingCopies.set(`${b.masterBadmarkId}:${b.boardInstanceId}`, b);
+    }
+  }
+
+  // Alle Badmarks behalten, die KEINE Sync-Kopien sind
+  const nonCopyBadmarks = badmarks.filter(b => !b.isSyncCopy);
+
+  // Neue Sync-Kopien erstellen/aktualisieren
+  const newCopies: Badmark[] = [];
+
+  for (const masterBadmark of masterBadmarks) {
+    for (const target of targetInstances) {
+      const dx = target.position.x - master.position.x;
+      const dy = target.position.y - master.position.y;
+
+      // Bestehende Kopie-ID wiederverwenden (stabile IDs)
+      const copyKey = `${masterBadmark.id}:${target.id}`;
+      const existing = existingCopies.get(copyKey);
+
+      newCopies.push({
+        id: existing?.id ?? uuidv4(),
+        position: {
+          x: masterBadmark.position.x + dx,
+          y: masterBadmark.position.y + dy,
+        },
+        size: masterBadmark.size,
+        boardInstanceId: target.id,
+        isSyncCopy: true,
+        masterBadmarkId: masterBadmark.id,
+      });
+    }
+  }
+
+  return [...nonCopyBadmarks, ...newCopies];
 }
 
 // ============================================================================
@@ -1409,8 +1541,13 @@ function transformPointToPanel(
   board: Board,
   instance: BoardInstance
 ): Point {
-  let x = p.x;
-  let y = p.y;
+  // Render-Offset abziehen: Die Gerber-Koordinaten beziehen sich auf den
+  // normalisierten Gesamtraum aller Layer. Wenn nur sichtbare Layer für
+  // board.width/height verwendet werden, startet deren Bounding-Box erst
+  // bei (renderOffsetX, renderOffsetY). Wir verschieben die Koordinaten
+  // damit sie relativ zum sichtbaren Bereich sind.
+  let x = p.x - (board.renderOffsetX || 0);
+  let y = p.y - (board.renderOffsetY || 0);
 
   // Schritt 1: Layer-Rotation anwenden (CCW um Nullpunkt, mit Offset-Korrektur)
   const layerRot = board.layerRotation || 0;
@@ -1637,18 +1774,20 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   unit: 'mm',
   selectedInstances: [],
   selectedFiducialId: null,
+  selectedBadmarkId: null,
   selectedToolingHoleId: null,
   selectedTabId: null,
   selectedVScoreLineId: null,
   selectedRoutingContourId: null,
-  showBoardBackground: true,
-  showBoardLabels: true,
+  showBoardBackground: false,
+  showBoardLabels: false,
   cursorPosition: { x: 0, y: 0 },
   toolingHoleConfig: { diameter: 3.0, plated: false },
   selectedFreeMousebiteId: null,
   mousebiteConfig: { arcLength: 5, holeDiameter: 0.5, holeSpacing: 0.8 },
   routeFreeDrawState: { points: [] },
   routeSegmentSelectState: { boardInstanceId: null, selectedSegmentIndices: [], outlineSegments: [] },
+  outlineDefineState: { active: false, sourceBoardId: null, selectedCommands: [], prevShowBackground: true, prevShowLabels: true },
   showVScoreLines: true,
   showRoutingContours: true,
   showDimensions: false,
@@ -1692,16 +1831,25 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         ...state.panel,
         boards: state.panel.boards.map((board) => {
           if (board.id !== boardId) return board;
-          return {
-            ...board,
-            layers: board.layers.map((layer) => {
-              if (layer.id !== layerId) return layer;
-              return {
-                ...layer,
-                visible: !layer.visible,
-              };
-            }),
-          };
+          const updatedLayers = board.layers.map((layer) => {
+            if (layer.id !== layerId) return layer;
+            return { ...layer, visible: !layer.visible };
+          });
+          // Board-Dimensionen aus sichtbaren Layern neu berechnen
+          const visibleLayers = updatedLayers.filter((l) => l.visible);
+          if (visibleLayers.length > 0) {
+            const bbox = calculateCombinedBoundingBox(visibleLayers);
+            return {
+              ...board,
+              layers: updatedLayers,
+              width: bbox.maxX - bbox.minX,
+              height: bbox.maxY - bbox.minY,
+              boundingBox: bbox,
+              renderOffsetX: bbox.minX,
+              renderOffsetY: bbox.minY,
+            };
+          }
+          return { ...board, layers: updatedLayers };
         }),
         modifiedAt: new Date(),
       },
@@ -1713,13 +1861,25 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         ...state.panel,
         boards: state.panel.boards.map((board) => {
           if (board.id !== boardId) return board;
-          return {
-            ...board,
-            layers: board.layers.map((layer) => ({
-              ...layer,
-              visible,
-            })),
-          };
+          const updatedLayers = board.layers.map((layer) => ({
+            ...layer,
+            visible,
+          }));
+          // Board-Dimensionen aus sichtbaren Layern neu berechnen
+          const visibleLayers = updatedLayers.filter((l) => l.visible);
+          if (visibleLayers.length > 0) {
+            const bbox = calculateCombinedBoundingBox(visibleLayers);
+            return {
+              ...board,
+              layers: updatedLayers,
+              width: bbox.maxX - bbox.minX,
+              height: bbox.maxY - bbox.minY,
+              boundingBox: bbox,
+              renderOffsetX: bbox.minX,
+              renderOffsetY: bbox.minY,
+            };
+          }
+          return { ...board, layers: updatedLayers };
         }),
         modifiedAt: new Date(),
       },
@@ -1746,6 +1906,253 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         modifiedAt: new Date(),
       },
     })),
+
+  // --------------------------------------------------------------------------
+  // Outline-Definitions-Modus
+  // --------------------------------------------------------------------------
+
+  enterOutlineDefineMode: (boardId) => {
+    const state = get();
+    set({
+      outlineDefineState: {
+        active: true,
+        sourceBoardId: boardId,
+        selectedCommands: [],
+        prevShowBackground: state.showBoardBackground,  // Bisherigen Wert merken
+        prevShowLabels: state.showBoardLabels,           // Bisherigen Wert merken
+      },
+      activeTool: 'select',          // Werkzeug auf "Auswählen" setzen
+      showBoardBackground: false,    // Hintergrund ausblenden
+      showBoardLabels: false,        // Beschriftung ausblenden
+    });
+  },
+
+  exitOutlineDefineMode: () => {
+    const state = get();
+    set({
+      outlineDefineState: {
+        active: false,
+        sourceBoardId: null,
+        selectedCommands: [],
+        prevShowBackground: true,
+        prevShowLabels: true,
+      },
+      showBoardBackground: state.outlineDefineState.prevShowBackground,  // Vorherigen Wert wiederherstellen
+      showBoardLabels: state.outlineDefineState.prevShowLabels,          // Vorherigen Wert wiederherstellen
+    });
+  },
+
+  toggleOutlineCommand: (key) => {
+    set((state) => {
+      const current = state.outlineDefineState.selectedCommands;
+      const isSelected = current.includes(key);
+      return {
+        outlineDefineState: {
+          ...state.outlineDefineState,
+          selectedCommands: isSelected
+            ? current.filter((k) => k !== key)     // Abwählen
+            : [...current, key],                     // Auswählen
+        },
+      };
+    });
+  },
+
+  selectAllLayerCommands: (boardId, layerId) => {
+    const state = get();
+    const board = state.panel.boards.find((b) => b.id === boardId);
+    if (!board) return;
+    const layer = board.layers.find((l) => l.id === layerId);
+    if (!layer?.parsedData) return;
+
+    // Alle line/arc Command-Keys dieses Layers sammeln
+    const newKeys: string[] = [];
+    layer.parsedData.commands.forEach((cmd, idx) => {
+      if (cmd.type === 'line' || cmd.type === 'arc') {
+        newKeys.push(`${layerId}:${idx}`);
+      }
+    });
+
+    // Bestehende Auswahl beibehalten, neue Keys hinzufügen (ohne Duplikate)
+    set((s) => {
+      const existing = new Set(s.outlineDefineState.selectedCommands);
+      for (const k of newKeys) existing.add(k);
+      return {
+        outlineDefineState: {
+          ...s.outlineDefineState,
+          selectedCommands: Array.from(existing),
+        },
+      };
+    });
+  },
+
+  deselectAllLayerCommands: (layerId) => {
+    set((state) => ({
+      outlineDefineState: {
+        ...state.outlineDefineState,
+        selectedCommands: state.outlineDefineState.selectedCommands.filter(
+          (key) => !key.startsWith(`${layerId}:`)
+        ),
+      },
+    }));
+  },
+
+  applyOutlineDefinition: () => {
+    const state = get();
+    const { sourceBoardId, selectedCommands } = state.outlineDefineState;
+    if (!sourceBoardId || selectedCommands.length === 0) return;
+
+    const board = state.panel.boards.find((b) => b.id === sourceBoardId);
+    if (!board) return;
+
+    // Undo-Snapshot erstellen
+    saveHistory();
+
+    // Ausgewählte Commands aus den Original-Layern sammeln
+    const collectedCommands: GerberCommand[] = [];
+    // Apertures und Format aus dem ersten verfügbaren Layer kopieren
+    let sourceApertures: Map<string, any> = new Map();
+    let sourceFormat = { units: 'mm' as const, coordinateFormat: [4, 6] as [number, number] };
+
+    // Commands nach layerId gruppieren, um eine stabile Reihenfolge zu haben
+    const grouped = new Map<string, number[]>();
+    for (const key of selectedCommands) {
+      const [layerId, idxStr] = key.split(':');
+      const idx = parseInt(idxStr, 10);
+      if (!grouped.has(layerId)) grouped.set(layerId, []);
+      grouped.get(layerId)!.push(idx);
+    }
+
+    const groupedEntries = Array.from(grouped.entries());
+    for (const [layerId, indices] of groupedEntries) {
+      const layer = board.layers.find((l) => l.id === layerId);
+      if (!layer?.parsedData) continue;
+
+      // Format und Apertures vom ersten verfügbaren Layer übernehmen
+      if (sourceApertures.size === 0) {
+        sourceApertures = new Map(layer.parsedData.apertures);
+        sourceFormat = { units: layer.parsedData.format.units as 'mm', coordinateFormat: [...layer.parsedData.format.coordinateFormat] as [number, number] };
+      }
+
+      // Indices sortieren für konsistente Reihenfolge
+      indices.sort((a: number, b: number) => a - b);
+
+      for (const idx of indices) {
+        const cmd = layer.parsedData.commands[idx];
+        if (!cmd || (cmd.type !== 'line' && cmd.type !== 'arc')) continue;
+
+        // Move-Command vor jeder Linie/Bogen einfügen (damit der Zeichenpfad korrekt ist)
+        if (cmd.startPoint) {
+          collectedCommands.push({
+            type: 'move',
+            endPoint: { ...cmd.startPoint },
+          });
+        }
+
+        // Command kopieren (Deep Copy der Punkte)
+        const copiedCmd: GerberCommand = {
+          type: cmd.type,
+          startPoint: cmd.startPoint ? { ...cmd.startPoint } : undefined,
+          endPoint: cmd.endPoint ? { ...cmd.endPoint } : undefined,
+          centerPoint: cmd.centerPoint ? { ...cmd.centerPoint } : undefined,
+          clockwise: cmd.clockwise,
+          apertureId: cmd.apertureId,
+        };
+        collectedCommands.push(copiedCmd);
+      }
+    }
+
+    if (collectedCommands.length === 0) return;
+
+    // Bounding Box für den neuen Layer berechnen
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const cmd of collectedCommands) {
+      for (const p of [cmd.startPoint, cmd.endPoint]) {
+        if (p) {
+          minX = Math.min(minX, p.x);
+          minY = Math.min(minY, p.y);
+          maxX = Math.max(maxX, p.x);
+          maxY = Math.max(maxY, p.y);
+        }
+      }
+    }
+
+    // Neuen Outline-Layer erstellen
+    const newLayer = {
+      id: uuidv4(),
+      filename: 'Outline (manuell)',
+      type: 'outline' as any,
+      color: '#FFFF00',  // Gelb — Standard Outline-Farbe
+      visible: true,
+      rawContent: '',    // Kein Original-Gerber-Inhalt
+      parsedData: {
+        commands: collectedCommands,
+        apertures: sourceApertures,
+        format: sourceFormat,
+        boundingBox: { minX, minY, maxX, maxY },
+      },
+    };
+
+    // Bestehenden Outline-Layer auf 'mechanical' zurücksetzen (falls vorhanden)
+    const updatedLayers = board.layers.map((layer) => {
+      if (layer.type === 'outline') {
+        return { ...layer, type: 'mechanical' as any, color: '#808080' };
+      }
+      return layer;
+    });
+
+    // Neuen Layer hinzufügen
+    updatedLayers.push(newLayer);
+
+    // Board-Outline neu berechnen
+    const newOutline = extractBoardOutline(updatedLayers);
+
+    // Board-Dimensionen aus sichtbaren Layern neu berechnen
+    // (der neue Outline-Layer ist sichtbar und beeinflusst die Bounding Box)
+    const visibleLayers = updatedLayers.filter((l) => l.visible);
+    let newWidth = board.width;
+    let newHeight = board.height;
+    let newBBox = board.boundingBox;
+    let newRenderOffsetX = board.renderOffsetX || 0;
+    let newRenderOffsetY = board.renderOffsetY || 0;
+    if (visibleLayers.length > 0) {
+      const visBbox = calculateCombinedBoundingBox(visibleLayers);
+      newWidth = visBbox.maxX - visBbox.minX;
+      newHeight = visBbox.maxY - visBbox.minY;
+      newBBox = visBbox;
+      newRenderOffsetX = visBbox.minX;
+      newRenderOffsetY = visBbox.minY;
+    }
+
+    // Board aktualisieren + Modus beenden + Sichtbarkeit wiederherstellen
+    set((s) => ({
+      panel: {
+        ...s.panel,
+        boards: s.panel.boards.map((b) => {
+          if (b.id !== sourceBoardId) return b;
+          return {
+            ...b,
+            layers: updatedLayers,
+            outline: newOutline,
+            width: newWidth,
+            height: newHeight,
+            boundingBox: newBBox,
+            renderOffsetX: newRenderOffsetX,
+            renderOffsetY: newRenderOffsetY,
+          };
+        }),
+        modifiedAt: new Date(),
+      },
+      outlineDefineState: {
+        active: false,
+        sourceBoardId: null,
+        selectedCommands: [],
+        prevShowBackground: true,
+        prevShowLabels: true,
+      },
+      showBoardBackground: s.outlineDefineState.prevShowBackground,
+      showBoardLabels: s.outlineDefineState.prevShowLabels,
+    }));
+  },
 
   rotateBoardLayers: (boardId) => {
     saveHistory();
@@ -2442,6 +2849,118 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     set(() => ({
       selectedFiducialId: fiducialId,
     })),
+
+  // --- Badmark-Aktionen ---
+
+  addBadmark: (badmark) => {
+    saveHistory();
+    set((state) => {
+      const newBadmark: Badmark = { ...badmark, id: uuidv4() };
+      const updatedBadmarks = [...state.panel.badmarks, newBadmark];
+      const updatedPanel = {
+        ...state.panel,
+        badmarks: updatedBadmarks,
+        modifiedAt: new Date(),
+      };
+      // Sync: Board-Badmarks auf andere Instanzen kopieren
+      updatedPanel.badmarks = syncMasterBadmarks(updatedPanel);
+      return { panel: updatedPanel };
+    });
+  },
+
+  removeBadmark: (badmarkId) => {
+    saveHistory();
+    set((state) => {
+      // Auch alle Kopien entfernen, die von dieser Badmark stammen
+      const updatedBadmarks = state.panel.badmarks.filter(
+        (b) => b.id !== badmarkId && b.masterBadmarkId !== badmarkId
+      );
+      // Auto-Cleanup: Dimension-Overrides für diese Badmark entfernen
+      const overrides = state.panel.dimensionOverrides;
+      let cleanedOverrides = overrides;
+      if (overrides) {
+        const hiddenElements = overrides.hiddenElements?.filter(
+          (key) => !key.includes(badmarkId)
+        );
+        cleanedOverrides = { ...overrides, hiddenElements };
+      }
+      return {
+        panel: {
+          ...state.panel,
+          badmarks: updatedBadmarks,
+          dimensionOverrides: cleanedOverrides,
+          modifiedAt: new Date(),
+        },
+        selectedBadmarkId: state.selectedBadmarkId === badmarkId ? null : state.selectedBadmarkId,
+      };
+    });
+  },
+
+  clearAllBadmarks: () => {
+    saveHistory();
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        badmarks: [],
+        modifiedAt: new Date(),
+      },
+      selectedBadmarkId: null,
+    }));
+  },
+
+  updateBadmarkPosition: (badmarkId, position) =>
+    set((state) => {
+      const updatedBadmarks = state.panel.badmarks.map((b) =>
+        b.id === badmarkId ? { ...b, position } : b
+      );
+      const updatedPanel = {
+        ...state.panel,
+        badmarks: updatedBadmarks,
+        modifiedAt: new Date(),
+      };
+      // Sync nach Position-Update
+      updatedPanel.badmarks = syncMasterBadmarks(updatedPanel);
+      return { panel: updatedPanel };
+    }),
+
+  selectBadmark: (badmarkId) =>
+    set(() => ({
+      selectedBadmarkId: badmarkId,
+    })),
+
+  addMasterBadmark: () => {
+    saveHistory();
+    set((state) => {
+      const panel = state.panel;
+      // Kurze Seite ermitteln und Position berechnen
+      let x: number, y: number;
+      if (panel.width >= panel.height) {
+        // Querformat: kurze Seiten = links/rechts → Master auf linker Seite
+        x = panel.width * 0.20;
+        y = panel.frame.top / 2; // Mitte des oberen Nutzenrands
+      } else {
+        // Hochformat: kurze Seiten = oben/unten → Master auf oberer Seite
+        x = panel.frame.left / 2; // Mitte des linken Nutzenrands
+        y = panel.height * 0.20;
+      }
+
+      const masterBadmark: Badmark = {
+        id: uuidv4(),
+        position: { x, y },
+        size: 1.0,
+        boardInstanceId: '', // Panel-weit, nicht board-spezifisch
+        isMasterBadmark: true,
+      };
+
+      return {
+        panel: {
+          ...panel,
+          badmarks: [...panel.badmarks, masterBadmark],
+          modifiedAt: new Date(),
+        },
+      };
+    });
+  },
 
   addToolingHole: (hole) => {
     saveHistory();
@@ -3821,6 +4340,11 @@ export const useGrid = () => usePanelStore((state) => state.grid);
 export const useSelectedFiducialId = () => usePanelStore((state) => state.selectedFiducialId);
 
 /**
+ * Gibt die ausgewählte Badmark zurück
+ */
+export const useSelectedBadmarkId = () => usePanelStore((state) => state.selectedBadmarkId);
+
+/**
  * Gibt die ausgewählte Tooling-Bohrung zurück
  */
 export const useSelectedToolingHoleId = () => usePanelStore((state) => state.selectedToolingHoleId);
@@ -3870,3 +4394,6 @@ export const useShowRoutingContours = () => usePanelStore((state) => state.showR
 
 /** Hook: Bemaßungs-Overlay ein-/ausblenden */
 export const useShowDimensions = () => usePanelStore((state) => state.showDimensions);
+
+/** Hook: Outline-Definitions-Modus State */
+export const useOutlineDefineState = () => usePanelStore((state) => state.outlineDefineState);

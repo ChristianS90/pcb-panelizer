@@ -19,6 +19,7 @@ import {
   ChevronRight,
   CircleDot,
   Circle,
+  Square,
   MousePointer,
   Minus,
   RotateCcw,
@@ -31,10 +32,11 @@ import {
   Pencil,
   RotateCw,
 } from 'lucide-react';
-import { usePanelStore, useBoards, useActiveTool, useShowDimensions } from '@/stores/panel-store';
+import { usePanelStore, useBoards, useActiveTool, useShowDimensions, useOutlineDefineState } from '@/stores/panel-store';
 import { cn } from '@/lib/utils';
 import { getAllLayerTypes, getLayerColor } from '@/lib/gerber';
 import type { Tool, GerberLayerType } from '@/types';
+import { Target, X, Check } from 'lucide-react';
 
 // ============================================================================
 // Haupt-Sidebar Komponente
@@ -139,6 +141,12 @@ function LayerPanel() {
   const toggleLayerVisibility = usePanelStore((state) => state.toggleLayerVisibility);
   const setAllLayersVisibility = usePanelStore((state) => state.setAllLayersVisibility);
   const setLayerType = usePanelStore((state) => state.setLayerType);
+  const outlineDefineState = useOutlineDefineState();
+  const enterOutlineDefineMode = usePanelStore((state) => state.enterOutlineDefineMode);
+  const exitOutlineDefineMode = usePanelStore((state) => state.exitOutlineDefineMode);
+  const selectAllLayerCommands = usePanelStore((state) => state.selectAllLayerCommands);
+  const deselectAllLayerCommands = usePanelStore((state) => state.deselectAllLayerCommands);
+  const applyOutlineDefinition = usePanelStore((state) => state.applyOutlineDefinition);
 
   // Alle verfügbaren Layer-Typen für das Dropdown
   const layerTypes = getAllLayerTypes();
@@ -155,6 +163,142 @@ function LayerPanel() {
 
   // Alle Layer aus allen Boards sammeln
   const firstBoard = boards[0];
+
+  // ================================================================
+  // Outline-Define-Modus: Aktionspanel anzeigen
+  // ================================================================
+  if (outlineDefineState.active && outlineDefineState.sourceBoardId) {
+    const sourceBoard = boards.find((b) => b.id === outlineDefineState.sourceBoardId);
+    if (!sourceBoard) return null;
+
+    // Zähler: Wie viele Linien/Bögen sind ausgewählt?
+    const selectedCount = outlineDefineState.selectedCommands.length;
+
+    // Layer mit line/arc Commands ermitteln
+    const layersWithGeometry = sourceBoard.layers.filter((layer) => {
+      if (!layer.parsedData) return false;
+      return layer.parsedData.commands.some((cmd) => cmd.type === 'line' || cmd.type === 'arc');
+    });
+
+    return (
+      <div className="space-y-3">
+        {/* Header mit Abbrechen-Button */}
+        <div className="flex items-center justify-between pb-2 border-b border-orange-300">
+          <div className="flex items-center gap-2">
+            <Target className="w-4 h-4 text-orange-500" />
+            <span className="text-sm font-medium text-orange-700">Outline definieren</span>
+          </div>
+          <button
+            onClick={exitOutlineDefineMode}
+            className="p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-100"
+            title="Abbrechen"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Info-Text */}
+        <div className="bg-orange-50 border border-orange-200 rounded-lg p-2 text-xs text-orange-700">
+          Klicken Sie im Canvas auf Linien und Bögen, die zur Board-Outline gehören.
+        </div>
+
+        {/* Zähler */}
+        <div className="text-center py-1">
+          <span className="text-lg font-bold text-orange-600">{selectedCount}</span>
+          <span className="text-xs text-gray-500 ml-1">Linien/Bögen ausgewählt</span>
+        </div>
+
+        {/* Layer-Liste mit "Alle auswählen" Checkboxen */}
+        <div className="space-y-1">
+          <div className="text-xs font-medium text-gray-500 pb-1 border-b border-gray-100">
+            Layer
+          </div>
+          {layersWithGeometry.map((layer) => {
+            // Zählen wie viele Commands dieses Layers ausgewählt sind
+            const layerCmdCount = layer.parsedData!.commands.filter(
+              (cmd) => cmd.type === 'line' || cmd.type === 'arc'
+            ).length;
+            const layerSelectedCount = outlineDefineState.selectedCommands.filter(
+              (key) => key.startsWith(`${layer.id}:`)
+            ).length;
+            const allSelected = layerCmdCount > 0 && layerSelectedCount === layerCmdCount;
+            const someSelected = layerSelectedCount > 0 && !allSelected;
+
+            return (
+              <div
+                key={layer.id}
+                className="flex items-center gap-2 py-1 px-2 hover:bg-gray-50 rounded"
+              >
+                {/* Farbindikator */}
+                <div
+                  className="w-3 h-3 rounded-full border border-gray-300 shrink-0"
+                  style={{ backgroundColor: layer.color }}
+                />
+
+                {/* Layer-Name */}
+                <span className="flex-1 text-xs truncate" title={layer.filename}>
+                  {layer.filename}
+                </span>
+
+                {/* Anzahl ausgewählt / gesamt */}
+                <span className="text-xs text-gray-400 shrink-0">
+                  {layerSelectedCount}/{layerCmdCount}
+                </span>
+
+                {/* Checkbox für "Alle auswählen" */}
+                <button
+                  onClick={() => {
+                    if (allSelected) {
+                      deselectAllLayerCommands(layer.id);
+                    } else {
+                      selectAllLayerCommands(sourceBoard.id, layer.id);
+                    }
+                  }}
+                  className={cn(
+                    'w-5 h-5 rounded border flex items-center justify-center shrink-0 transition-colors',
+                    allSelected
+                      ? 'bg-orange-500 border-orange-500 text-white'
+                      : someSelected
+                        ? 'bg-orange-100 border-orange-400 text-orange-500'
+                        : 'border-gray-300 hover:border-orange-400'
+                  )}
+                  title={allSelected ? 'Alle abwählen' : 'Alle auswählen'}
+                >
+                  {(allSelected || someSelected) && <Check className="w-3 h-3" />}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Aktions-Buttons */}
+        <div className="flex gap-2 pt-2 border-t border-gray-200">
+          <button
+            onClick={exitOutlineDefineMode}
+            className="flex-1 text-xs px-3 py-2 rounded bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
+          >
+            Abbrechen
+          </button>
+          <button
+            onClick={applyOutlineDefinition}
+            disabled={selectedCount === 0}
+            className={cn(
+              'flex-1 text-xs px-3 py-2 rounded font-medium transition-colors',
+              selectedCount > 0
+                ? 'bg-green-600 text-white hover:bg-green-700'
+                : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+            )}
+          >
+            Übernehmen
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ================================================================
+  // Normale Layer-Ansicht
+  // ================================================================
 
   // Prüfen ob alle Layer sichtbar sind
   const allVisible = firstBoard.layers.every((l) => l.visible);
@@ -273,6 +417,17 @@ function LayerPanel() {
           </div>
         </div>
       ))}
+
+      {/* Button: Outline definieren */}
+      <div className="pt-2 border-t border-gray-200">
+        <button
+          onClick={() => enterOutlineDefineMode(firstBoard.id)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs rounded bg-orange-50 text-orange-700 border border-orange-200 hover:bg-orange-100 transition-colors"
+        >
+          <Target className="w-4 h-4" />
+          Outline definieren
+        </button>
+      </div>
     </div>
   );
 }
@@ -433,12 +588,6 @@ const simpleTools: { id: Tool; label: string; icon: React.ReactNode; description
     description: 'Abstände und Koordinaten messen',
   },
   {
-    id: 'place-fiducial',
-    label: 'Fiducial',
-    icon: <CircleDot className="w-4 h-4" />,
-    description: 'Fiducial-Marker platzieren',
-  },
-  {
     id: 'place-hole',
     label: 'Bohrung',
     icon: <Circle className="w-4 h-4" />,
@@ -449,6 +598,24 @@ const simpleTools: { id: Tool; label: string; icon: React.ReactNode; description
     label: 'V-Score',
     icon: <Minus className="w-4 h-4 rotate-45" />,
     description: 'V-Score Linie zeichnen',
+  },
+];
+
+/**
+ * Untereinträge im Marker-Dropdown (Fiducial + Badmark)
+ */
+const markerSubTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
+  {
+    id: 'place-fiducial',
+    label: 'Fiducial',
+    icon: <CircleDot className="w-4 h-4" />,
+    description: 'Fiducial-Marker platzieren',
+  },
+  {
+    id: 'place-badmark',
+    label: 'Badmark',
+    icon: <Square className="w-4 h-4" />,
+    description: 'Badmark platzieren',
   },
 ];
 
@@ -484,7 +651,7 @@ const routeSubTools: { id: Tool; label: string; icon: React.ReactNode; descripti
   },
   {
     id: 'route-free-draw',
-    label: 'Frei zeichnen',
+    label: 'Freie Fräskontur',
     icon: <Pencil className="w-4 h-4" />,
     description: 'Freien Fräspfad zeichnen',
   },
@@ -503,6 +670,10 @@ export function Toolbar() {
   const activeTool = useActiveTool();
   const setActiveTool = usePanelStore((state) => state.setActiveTool);
 
+  // Dropdown-Status für Marker (Fiducial/Badmark)
+  const [markerDropdownOpen, setMarkerDropdownOpen] = useState(false);
+  const markerDropdownRef = useRef<HTMLDivElement>(null);
+
   // Dropdown-Status für Tab/Mousebite
   const [tabDropdownOpen, setTabDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -511,6 +682,9 @@ export function Toolbar() {
   const [routeDropdownOpen, setRouteDropdownOpen] = useState(false);
   const routeDropdownRef = useRef<HTMLDivElement>(null);
 
+  // Aktuell gewähltes Marker-Sub-Tool merken
+  const [selectedMarkerSubTool, setSelectedMarkerSubTool] = useState<Tool>('place-fiducial');
+
   // Aktuell gewähltes Sub-Tool merken (Tab oder Mousebite)
   const [selectedTabSubTool, setSelectedTabSubTool] = useState<Tool>('place-tab');
 
@@ -518,16 +692,21 @@ export function Toolbar() {
   const [selectedRouteSubTool, setSelectedRouteSubTool] = useState<Tool>('route-free-draw');
 
   // Das aktive Sub-Tool-Objekt finden (für Icon + Label im Button)
+  const activeMarkerSubTool = markerSubTools.find((t) => t.id === selectedMarkerSubTool) || markerSubTools[0];
   const activeSubTool = tabSubTools.find((t) => t.id === selectedTabSubTool) || tabSubTools[0];
   const activeRouteSubTool = routeSubTools.find((t) => t.id === selectedRouteSubTool) || routeSubTools[0];
 
   // Ist eines der Sub-Tools gerade aktiv?
+  const isMarkerGroupActive = activeTool === 'place-fiducial' || activeTool === 'place-badmark';
   const isTabGroupActive = activeTool === 'place-tab' || activeTool === 'place-mousebite';
   const isRouteGroupActive = activeTool === 'route-follow-outline' || activeTool === 'route-free-draw';
 
   // Dropdown schliessen wenn man ausserhalb klickt
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
+      if (markerDropdownRef.current && !markerDropdownRef.current.contains(e.target as Node)) {
+        setMarkerDropdownOpen(false);
+      }
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setTabDropdownOpen(false);
       }
@@ -535,11 +714,11 @@ export function Toolbar() {
         setRouteDropdownOpen(false);
       }
     };
-    if (tabDropdownOpen || routeDropdownOpen) {
+    if (markerDropdownOpen || tabDropdownOpen || routeDropdownOpen) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
-  }, [tabDropdownOpen, routeDropdownOpen]);
+  }, [markerDropdownOpen, tabDropdownOpen, routeDropdownOpen]);
 
   return (
     <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-1">
@@ -567,6 +746,85 @@ export function Toolbar() {
           {tool.label}
         </button>
       ))}
+
+      {/* Marker (Fiducial / Badmark) - Dropdown-Button */}
+      <div className="relative" ref={markerDropdownRef}>
+        <div className="flex items-center">
+          {/* Hauptbutton: Aktiviert das zuletzt gewählte Marker-Sub-Tool */}
+          <button
+            onClick={() => {
+              setActiveTool(selectedMarkerSubTool);
+              setMarkerDropdownOpen(false);
+            }}
+            className={cn(
+              'flex items-center gap-2 px-3 py-1.5 rounded-l-lg transition-colors text-sm font-medium',
+              isMarkerGroupActive
+                ? 'bg-green-100 text-green-700'
+                : 'hover:bg-gray-100 text-gray-600'
+            )}
+            title={activeMarkerSubTool.description}
+          >
+            <div
+              className={cn(
+                'p-1 rounded',
+                isMarkerGroupActive ? 'bg-green-200' : 'bg-gray-100'
+              )}
+            >
+              {activeMarkerSubTool.icon}
+            </div>
+            {activeMarkerSubTool.label}
+          </button>
+
+          {/* Dropdown-Pfeil */}
+          <button
+            onClick={() => setMarkerDropdownOpen(!markerDropdownOpen)}
+            className={cn(
+              'px-1.5 py-1.5 rounded-r-lg border-l transition-colors',
+              isMarkerGroupActive
+                ? 'bg-green-100 text-green-700 border-green-200'
+                : 'hover:bg-gray-100 text-gray-600 border-gray-200'
+            )}
+            title="Marker-Typ wählen"
+          >
+            <ChevronDown className="w-3 h-3" />
+          </button>
+        </div>
+
+        {/* Dropdown-Menü */}
+        {markerDropdownOpen && (
+          <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 min-w-[200px]">
+            {markerSubTools.map((sub) => (
+              <button
+                key={sub.id}
+                onClick={() => {
+                  setSelectedMarkerSubTool(sub.id);
+                  setActiveTool(sub.id);
+                  setMarkerDropdownOpen(false);
+                }}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3 py-2 text-sm transition-colors text-left',
+                  activeTool === sub.id
+                    ? 'bg-green-50 text-green-700'
+                    : 'hover:bg-gray-50 text-gray-700'
+                )}
+              >
+                <div
+                  className={cn(
+                    'p-1 rounded',
+                    activeTool === sub.id ? 'bg-green-200' : 'bg-gray-100'
+                  )}
+                >
+                  {sub.icon}
+                </div>
+                <div>
+                  <div className="font-medium">{sub.label}</div>
+                  <div className="text-xs text-gray-400">{sub.description}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Tab / Mousebite - Dropdown-Button */}
       <div className="relative" ref={dropdownRef}>

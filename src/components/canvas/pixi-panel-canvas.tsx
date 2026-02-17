@@ -18,6 +18,7 @@ import {
   useInstances,
   useActiveTool,
   useSelectedFiducialId,
+  useSelectedBadmarkId,
   useSelectedToolingHoleId,
   useSelectedTabId,
   useSelectedVScoreLineId,
@@ -28,13 +29,14 @@ import {
   useShowVScoreLines,
   useShowRoutingContours,
   useShowDimensions,
+  useOutlineDefineState,
   findNearestArcAtPoint,
   buildOutlineSegments,
   computeOutlineWindingSign,
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
-import type { BoardInstance, Board, GerberFile, Fiducial, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset } from '@/types';
+import type { BoardInstance, Board, GerberFile, Fiducial, Badmark, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset } from '@/types';
 
 // ============================================================================
 // Konstanten
@@ -66,6 +68,7 @@ export function PixiPanelCanvas() {
   const boards = useBoards();
   const instances = useInstances();
   const selectedFiducialId = useSelectedFiducialId();
+  const selectedBadmarkId = useSelectedBadmarkId();
   const selectedToolingHoleId = useSelectedToolingHoleId();
   const selectedTabId = useSelectedTabId();
   const selectedVScoreLineId = useSelectedVScoreLineId();
@@ -76,6 +79,7 @@ export function PixiPanelCanvas() {
   const showVScoreLines = useShowVScoreLines();
   const showRoutingContours = useShowRoutingContours();
   const showDimensions = useShowDimensions();
+  const outlineDefineState = useOutlineDefineState();
 
   // Aktives Werkzeug (z.B. 'select', 'place-fiducial', 'place-hole', 'place-vscore', 'place-tab')
   const activeTool = useActiveTool();
@@ -85,6 +89,8 @@ export function PixiPanelCanvas() {
   const setActiveTool = usePanelStore((state) => state.setActiveTool);
   const selectFiducial = usePanelStore((state) => state.selectFiducial);
   const updateFiducialPosition = usePanelStore((state) => state.updateFiducialPosition);
+  const selectBadmark = usePanelStore((state) => state.selectBadmark);
+  const updateBadmarkPosition = usePanelStore((state) => state.updateBadmarkPosition);
   const selectToolingHole = usePanelStore((state) => state.selectToolingHole);
   const updateToolingHolePosition = usePanelStore((state) => state.updateToolingHolePosition);
   const selectTab = usePanelStore((state) => state.selectTab);
@@ -97,6 +103,7 @@ export function PixiPanelCanvas() {
 
   // Store-Aktionen zum Hinzufügen neuer Elemente (für die Werkzeuge)
   const addFiducial = usePanelStore((state) => state.addFiducial);
+  const addBadmark = usePanelStore((state) => state.addBadmark);
   const addToolingHole = usePanelStore((state) => state.addToolingHole);
   const addVScoreLine = usePanelStore((state) => state.addVScoreLine);
   const addTab = usePanelStore((state) => state.addTab);
@@ -117,6 +124,7 @@ export function PixiPanelCanvas() {
   const setRouteSegmentSelectState = usePanelStore((state) => state.setRouteSegmentSelectState);
   const toggleSegmentSelection = usePanelStore((state) => state.toggleSegmentSelection);
   const clearSegmentSelectState = usePanelStore((state) => state.clearSegmentSelectState);
+  const toggleOutlineCommand = usePanelStore((state) => state.toggleOutlineCommand);
 
   // Lokaler State
   const [isReady, setIsReady] = useState(false);
@@ -131,7 +139,7 @@ export function PixiPanelCanvas() {
   // Generisch: dragItemType bestimmt ob Fiducial oder Tooling Hole gezogen wird
   const isDraggingItemRef = useRef(false);
   const draggedItemIdRef = useRef<string | null>(null);
-  const dragItemTypeRef = useRef<'fiducial' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | null>(null);
+  const dragItemTypeRef = useRef<'fiducial' | 'badmark' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | null>(null);
   // Für Dimension-Label-Drag: Key des Labels (z.B. "routing-legend") und Basis-Position in mm
   const dragDimLabelKeyRef = useRef<string | null>(null);
   const dragDimLabelBaseRef = useRef<{ x: number; y: number } | null>(null);
@@ -147,6 +155,14 @@ export function PixiPanelCanvas() {
     boardHeight: number;
   } | null>(null);
   const dragOffsetRef = useRef({ x: 0, y: 0 });
+  // Für Outline-Define-Modus: Rubber-Band-Selektion (Auswahlfenster)
+  const outlineRubberBandRef = useRef<{
+    startScreenX: number;  // Screen-Pixel Startposition
+    startScreenY: number;
+    active: boolean;       // Wird gerade ein Auswahlfenster gezogen?
+  } | null>(null);
+  const outlineRubberBandGraphicsRef = useRef<Graphics | null>(null);
+
   // Für Follow-Outline Drag: gespeicherte Outline-Info für lokale Suche
   const dragOutlineInfoRef = useRef<{
     outlineSegs: OutlinePathSegment[];
@@ -424,6 +440,18 @@ export function PixiPanelCanvas() {
           e.preventDefault();
           return;
         }
+        // Badmark löschen (inkl. Sync-Kopien: Master-Badmark entfernen → alle Kopien verschwinden)
+        if (state.selectedBadmarkId) {
+          const badmark = state.panel.badmarks.find(b => b.id === state.selectedBadmarkId);
+          if (badmark) {
+            const idToRemove = badmark.isSyncCopy && badmark.masterBadmarkId
+              ? badmark.masterBadmarkId
+              : badmark.id;
+            state.removeBadmark(idToRemove);
+          }
+          e.preventDefault();
+          return;
+        }
         return;
       }
 
@@ -677,12 +705,99 @@ export function PixiPanelCanvas() {
     container.addChild(crosshairGraphics);
 
     // Boards rendern
+    const isOutlineDefineActive = outlineDefineState.active;
     for (const instance of instances) {
       const board = boards.find((b) => b.id === instance.boardId);
       if (!board) continue;
 
       const boardContainer = createBoardGraphics(board, instance, showBoardBackground, showBoardLabels);
+
+      // Im Outline-Define-Modus: Normale Layer-Grafiken dimmen
+      if (isOutlineDefineActive && board.id === outlineDefineState.sourceBoardId) {
+        boardContainer.alpha = 0.15;
+      }
+
       container.addChild(boardContainer);
+    }
+
+    // Outline-Define-Modus: Overlay mit ausgewählten/nicht-ausgewählten Commands
+    if (isOutlineDefineActive && outlineDefineState.sourceBoardId) {
+      const sourceBoard = boards.find((b) => b.id === outlineDefineState.sourceBoardId);
+      if (sourceBoard) {
+        const selectedSet = new Set(outlineDefineState.selectedCommands);
+        const overlayGraphics = createOutlineDefineGraphics(sourceBoard, selectedSet);
+
+        // Overlay braucht die gleiche Container-Hierarchie wie die Board-Layer:
+        // Board-Container → [Mirror] → Gerber-Container (Y-Flip) → Rotation-Container → Graphics
+        for (const instance of instances) {
+          if (instance.boardId !== outlineDefineState.sourceBoardId) continue;
+
+          const overlayContainer = new Container();
+          const layerRotation = sourceBoard.layerRotation || 0;
+          const mirrorX = sourceBoard.mirrorX || false;
+          const mirrorY = sourceBoard.mirrorY || false;
+          const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+          const effectiveW = isLayerRotated ? sourceBoard.height : sourceBoard.width;
+          const effectiveH = isLayerRotated ? sourceBoard.width : sourceBoard.height;
+          const localW = effectiveW * PIXELS_PER_MM;
+          const localH = effectiveH * PIXELS_PER_MM;
+
+          // Position + Rotation (gleich wie bei createBoardGraphics)
+          const posX = instance.position.x * PIXELS_PER_MM;
+          const posY = instance.position.y * PIXELS_PER_MM;
+          switch (instance.rotation) {
+            case 0: overlayContainer.position.set(posX, posY); break;
+            case 90: overlayContainer.position.set(posX + localH, posY); break;
+            case 180: overlayContainer.position.set(posX + localW, posY + localH); break;
+            case 270: overlayContainer.position.set(posX, posY + localW); break;
+            default: overlayContainer.position.set(posX, posY);
+          }
+          overlayContainer.rotation = (instance.rotation * Math.PI) / 180;
+
+          // Gerber Y-Flip Container
+          const gerberC = new Container();
+          gerberC.position.set(0, localH);
+          gerberC.scale.set(1, -1);
+
+          // Rotations-Container
+          const rotC = new Container();
+          if (layerRotation) {
+            rotC.rotation = -(layerRotation * Math.PI) / 180;
+            const origW = sourceBoard.width * PIXELS_PER_MM;
+            const origH = sourceBoard.height * PIXELS_PER_MM;
+            switch (layerRotation) {
+              case 90: rotC.position.set(0, origW); break;
+              case 180: rotC.position.set(origW, origH); break;
+              case 270: rotC.position.set(origH, 0); break;
+            }
+          }
+
+          // Offset-Container (gleich wie bei createBoardGraphics)
+          const offC = new Container();
+          const overlayOffX = sourceBoard.renderOffsetX || 0;
+          const overlayOffY = sourceBoard.renderOffsetY || 0;
+          offC.position.set(-overlayOffX * PIXELS_PER_MM, -overlayOffY * PIXELS_PER_MM);
+
+          // Overlay-Grafik als Klon (jede Instance braucht eine eigene Kopie)
+          const overlayClone = createOutlineDefineGraphics(sourceBoard, selectedSet);
+          offC.addChild(overlayClone);
+          rotC.addChild(offC);
+          gerberC.addChild(rotC);
+
+          // Spiegel-Logik
+          if (mirrorX || mirrorY) {
+            const mirrorC = new Container();
+            mirrorC.addChild(gerberC);
+            if (mirrorX) { mirrorC.scale.y = -1; mirrorC.position.y += localH; }
+            if (mirrorY) { mirrorC.scale.x = -1; mirrorC.position.x += localW; }
+            overlayContainer.addChild(mirrorC);
+          } else {
+            overlayContainer.addChild(gerberC);
+          }
+
+          container.addChild(overlayContainer);
+        }
+      }
     }
 
     // Fiducials rendern (interaktiv - klickbar)
@@ -730,6 +845,50 @@ export function PixiPanelCanvas() {
       });
 
       container.addChild(fiducialContainer);
+    }
+
+    // Badmarks rendern (interaktiv - klickbar und ziehbar)
+    for (const badmark of panel.badmarks) {
+      const isBmSelected = badmark.id === selectedBadmarkId;
+      const badmarkContainer = createBadmarkGraphics(badmark, isBmSelected);
+
+      // Interaktiv machen
+      badmarkContainer.eventMode = 'static';
+      badmarkContainer.cursor = badmark.isSyncCopy ? 'default' : 'pointer';
+
+      // Pointerdown-Handler: Badmark auswählen und Drag starten
+      badmarkContainer.on('pointerdown', (event) => {
+        event.stopPropagation();
+        selectBadmark(badmark.id);
+        selectFiducial(null);
+        selectToolingHole(null);
+
+        // Sync-Kopien können nicht gezogen werden
+        if (badmark.isSyncCopy) return;
+
+        // Drag starten
+        const vp = viewportRef.current;
+        const rect = containerRef.current?.getBoundingClientRect();
+        if (!rect) return;
+
+        const bmScreenX = badmark.position.x * PIXELS_PER_MM * vp.scale + vp.offsetX;
+        const bmScreenY = badmark.position.y * PIXELS_PER_MM * vp.scale + vp.offsetY;
+
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+        dragOffsetRef.current = {
+          x: mouseX - bmScreenX,
+          y: mouseY - bmScreenY,
+        };
+
+        usePanelStore.getState().saveHistorySnapshot();
+        isDraggingItemRef.current = true;
+        draggedItemIdRef.current = badmark.id;
+        dragItemTypeRef.current = 'badmark';
+        setCursorStyle('grabbing');
+      });
+
+      container.addChild(badmarkContainer);
     }
 
     // Tooling Holes rendern (interaktiv - klickbar und ziehbar wie Fiducials)
@@ -1031,7 +1190,7 @@ export function PixiPanelCanvas() {
     }
 
     console.log(`Rendered ${instances.length} boards, ${panel.fiducials.length} fiducials, ${panel.tabs.length} tabs, ${panel.vscoreLines.length} v-scores, ${panel.routingContours.length} routing contours with WebGL`);
-  }, [isReady, panel, grid, boards, instances, showBoardBackground, showBoardLabels, showVScoreLines, showRoutingContours, showDimensions, selectedFiducialId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedFreeMousebiteId, selectedRoutingContourId, selectFiducial, selectToolingHole, selectTab, selectVScoreLine, selectFreeMousebite, selectRoutingContour]);
+  }, [isReady, panel, grid, boards, instances, showBoardBackground, showBoardLabels, showVScoreLines, showRoutingContours, showDimensions, outlineDefineState, selectedFiducialId, selectedBadmarkId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedFreeMousebiteId, selectedRoutingContourId, selectFiducial, selectBadmark, selectToolingHole, selectTab, selectVScoreLine, selectFreeMousebite, selectRoutingContour]);
 
   // ----------------------------------------------------------------
   // Mausrad-Zoom (natives Event für passive: false)
@@ -1085,6 +1244,22 @@ export function PixiPanelCanvas() {
     if (isDraggingItemRef.current) return;
 
     // ================================================================
+    // Outline-Define-Modus: Klick oder Rubber-Band-Selektion starten
+    // ================================================================
+    const currentOutlineDefine = usePanelStore.getState().outlineDefineState;
+    if (currentOutlineDefine.active && currentOutlineDefine.sourceBoardId && e.button === 0) {
+      // Startpunkt für potentielles Rubber-Band merken
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      outlineRubberBandRef.current = {
+        startScreenX: e.clientX - rect.left,
+        startScreenY: e.clientY - rect.top,
+        active: false, // Wird erst aktiv wenn Maus bewegt wird (> 5px)
+      };
+      return; // Kein Panning im Outline-Define-Modus
+    }
+
+    // ================================================================
     // Werkzeug-Platzierung: Wenn ein Platzierungs-Werkzeug aktiv ist,
     // wird per Linksklick ein neues Element an der Mausposition platziert.
     // ================================================================
@@ -1116,6 +1291,36 @@ export function PixiPanelCanvas() {
           padDiameter: 1.0,    // Standard 1mm Kupfer-Pad
           maskDiameter: 2.0,   // Standard 2mm Masköffnung
           type: 'panel',       // Panel-Fiducial (nicht Board-spezifisch)
+        });
+        // Werkzeug bleibt aktiv für Multi-Platzierung
+        return;
+      }
+
+      // --- Badmark platzieren ---
+      if (currentTool === 'place-badmark') {
+        // Nächste Board-Instanz zur Klick-Position ermitteln
+        const currentPanel = usePanelStore.getState().panel;
+        let nearestInstanceId = '';
+        let minDist = Infinity;
+        for (const inst of currentPanel.instances) {
+          const board = currentPanel.boards.find(b => b.id === inst.boardId);
+          if (!board) continue;
+          const isRotated = inst.rotation === 90 || inst.rotation === 270;
+          const bw = isRotated ? board.height : board.width;
+          const bh = isRotated ? board.width : board.height;
+          // Mittelpunkt des Boards
+          const cx = inst.position.x + bw / 2;
+          const cy = inst.position.y + bh / 2;
+          const dist = Math.sqrt((mmX - cx) ** 2 + (mmY - cy) ** 2);
+          if (dist < minDist) {
+            minDist = dist;
+            nearestInstanceId = inst.id;
+          }
+        }
+        addBadmark({
+          position: { x: mmX, y: mmY },
+          size: 1.0,
+          boardInstanceId: nearestInstanceId,
         });
         // Werkzeug bleibt aktiv für Multi-Platzierung
         return;
@@ -1323,9 +1528,21 @@ export function PixiPanelCanvas() {
       }
 
       // --- Free-Draw Fräskontur: Punkt zur Polyline hinzufügen ---
+      // Doppelklick (e.detail >= 2) zum Abschliessen, Einzelklick zum Punkt setzen
       if (currentTool === 'route-free-draw') {
+        if (e.detail >= 2) {
+          // Doppelklick: Kontur finalisieren (mind. 2 Punkte nötig)
+          const state = usePanelStore.getState();
+          if (state.routeFreeDrawState.points.length >= 2) {
+            finalizeFreeDrawContour();
+          } else {
+            clearFreeDrawState();
+          }
+          if (snapPreviewRef.current) snapPreviewRef.current.removeChildren();
+          e.preventDefault();
+          return;
+        }
         addFreeDrawPoint({ x: mmX, y: mmY });
-        // Werkzeug bleibt aktiv, Doppelklick zum Abschliessen
         return;
       }
 
@@ -1398,7 +1615,7 @@ export function PixiPanelCanvas() {
       lastMousePosRef.current = { x: e.clientX, y: e.clientY };
       setCursorStyle('grabbing');
     }
-  }, [addFiducial, addToolingHole, addVScoreLine, addTab, addFreeMousebite, addFreeDrawPoint, setRouteSegmentSelectState, toggleSegmentSelection]);
+  }, [addFiducial, addToolingHole, addVScoreLine, addTab, addFreeMousebite, addFreeDrawPoint, setRouteSegmentSelectState, toggleSegmentSelection, toggleOutlineCommand]);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     // === Cursor-Position in mm berechnen und in Store schreiben (für Statusbar) ===
@@ -1413,6 +1630,51 @@ export function PixiPanelCanvas() {
       mmX = (mx - cursorVp.offsetX) / (cursorVp.scale * PIXELS_PER_MM);
       mmY = (my - cursorVp.offsetY) / (cursorVp.scale * PIXELS_PER_MM);
       setCursorPosition({ x: mmX, y: mmY });
+    }
+
+    // === Outline-Define-Modus: Rubber-Band-Rechteck zeichnen ===
+    if (outlineRubberBandRef.current && cursorRect) {
+      const rb = outlineRubberBandRef.current;
+      const currentScreenX = e.clientX - cursorRect.left;
+      const currentScreenY = e.clientY - cursorRect.top;
+
+      // Prüfen ob die Maus weit genug bewegt wurde (> 5px) um einen Drag zu erkennen
+      const dragDist = Math.sqrt((currentScreenX - rb.startScreenX) ** 2 + (currentScreenY - rb.startScreenY) ** 2);
+      if (dragDist > 5) {
+        rb.active = true;
+
+        // Rubber-Band-Rechteck auf dem snapPreview-Container zeichnen (liegt über mainContainer)
+        if (snapPreviewRef.current) {
+          // Alte Rubber-Band-Grafik entfernen
+          if (outlineRubberBandGraphicsRef.current) {
+            snapPreviewRef.current.removeChild(outlineRubberBandGraphicsRef.current);
+            outlineRubberBandGraphicsRef.current.destroy();
+            outlineRubberBandGraphicsRef.current = null;
+          }
+
+          const rbG = new Graphics();
+          // Screen-Pixel → World-mm für beide Ecken
+          const vp = viewportRef.current;
+          const x1mm = (rb.startScreenX - vp.offsetX) / (vp.scale);
+          const y1mm = (rb.startScreenY - vp.offsetY) / (vp.scale);
+          const x2mm = (currentScreenX - vp.offsetX) / (vp.scale);
+          const y2mm = (currentScreenY - vp.offsetY) / (vp.scale);
+
+          const rx = Math.min(x1mm, x2mm);
+          const ry = Math.min(y1mm, y2mm);
+          const rw = Math.abs(x2mm - x1mm);
+          const rh = Math.abs(y2mm - y1mm);
+
+          // Halbtransparentes Rechteck mit orange Rahmen
+          rbG.rect(rx, ry, rw, rh)
+            .fill({ color: 0xFF8C00, alpha: 0.08 })
+            .stroke({ color: 0xFF8C00, width: 1 / vp.scale, alpha: 0.7 });
+
+          snapPreviewRef.current.addChild(rbG);
+          outlineRubberBandGraphicsRef.current = rbG;
+        }
+      }
+      return; // Kein anderes Drag-Handling im Outline-Define-Modus
     }
 
     // === Dimension-Label Drag: Legende verschieben ===
@@ -1456,6 +1718,8 @@ export function PixiPanelCanvas() {
       // Position im Store aktualisieren - je nach Item-Typ
       if (dragItemTypeRef.current === 'fiducial') {
         updateFiducialPosition(draggedItemIdRef.current, { x: mmX, y: mmY });
+      } else if (dragItemTypeRef.current === 'badmark') {
+        updateBadmarkPosition(draggedItemIdRef.current, { x: mmX, y: mmY });
       } else if (dragItemTypeRef.current === 'toolingHole') {
         updateToolingHolePosition(draggedItemIdRef.current, { x: mmX, y: mmY });
       } else if (dragItemTypeRef.current === 'vscoreLine' && dragVScoreInfoRef.current) {
@@ -1849,7 +2113,94 @@ export function PixiPanelCanvas() {
     }
   }, [setViewport, updateFiducialPosition, updateToolingHolePosition, updateTabPosition, updateVScoreLinePosition, updateRoutingContourEndpoints, replaceRoutingContourSegments, setCursorPosition, setDimensionLabelOffset]);
 
-  const handleMouseUp = useCallback(() => {
+  const handleMouseUp = useCallback((e: React.MouseEvent) => {
+    // === Outline-Define-Modus: Rubber-Band abschliessen oder Einzelklick ===
+    if (outlineRubberBandRef.current) {
+      const rb = outlineRubberBandRef.current;
+      const currentOutlineDefine = usePanelStore.getState().outlineDefineState;
+
+      // Rubber-Band-Grafik entfernen
+      if (outlineRubberBandGraphicsRef.current && snapPreviewRef.current) {
+        snapPreviewRef.current.removeChild(outlineRubberBandGraphicsRef.current);
+        outlineRubberBandGraphicsRef.current.destroy();
+        outlineRubberBandGraphicsRef.current = null;
+      }
+
+      if (currentOutlineDefine.active && currentOutlineDefine.sourceBoardId) {
+        const vp = viewportRef.current;
+        const rect = containerRef.current?.getBoundingClientRect();
+
+        if (rect) {
+          const currentPanel = usePanelStore.getState().panel;
+          const sourceBoard = currentPanel.boards.find((b: Board) => b.id === currentOutlineDefine.sourceBoardId);
+
+          if (sourceBoard) {
+            if (rb.active) {
+              // === RUBBER-BAND-SELEKTION: Alle Commands im Rechteck auswählen ===
+              const currentScreenX = e.clientX - rect.left;
+              const currentScreenY = e.clientY - rect.top;
+
+              // Screen → World-mm für beide Ecken
+              const w1x = (rb.startScreenX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const w1y = (rb.startScreenY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+              const w2x = (currentScreenX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const w2y = (currentScreenY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+              // Für jede Instance: Rechteck in Gerber-Koordinaten umrechnen
+              for (const instance of currentPanel.instances) {
+                if (instance.boardId !== currentOutlineDefine.sourceBoardId) continue;
+
+                // Beide Ecken in Gerber-Koordinaten umrechnen
+                const g1 = worldToGerber(w1x, w1y, sourceBoard, instance);
+                const g2 = worldToGerber(w2x, w2y, sourceBoard, instance);
+
+                const gMinX = Math.min(g1.gerberX, g2.gerberX);
+                const gMinY = Math.min(g1.gerberY, g2.gerberY);
+                const gMaxX = Math.max(g1.gerberX, g2.gerberX);
+                const gMaxY = Math.max(g1.gerberY, g2.gerberY);
+
+                // Commands im Rechteck finden
+                const keysInRect = findCommandsInRect(sourceBoard, gMinX, gMinY, gMaxX, gMaxY);
+                if (keysInRect.length > 0) {
+                  // Shift gedrückt → zur Auswahl hinzufügen; sonst ersetzen
+                  const existingSet = new Set(currentOutlineDefine.selectedCommands);
+                  // Alle gefundenen Keys hinzufügen (nicht togglen bei Rubber-Band)
+                  for (const k of keysInRect) existingSet.add(k);
+                  usePanelStore.setState({
+                    outlineDefineState: {
+                      ...currentOutlineDefine,
+                      selectedCommands: Array.from(existingSet),
+                    },
+                  });
+                  break; // Nur erste Instance
+                }
+              }
+            } else {
+              // === EINZELKLICK: Nächsten Command togglen ===
+              const mouseX = rb.startScreenX;
+              const mouseY = rb.startScreenY;
+              const worldX = (mouseX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const worldY = (mouseY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+              for (const instance of currentPanel.instances) {
+                if (instance.boardId !== currentOutlineDefine.sourceBoardId) continue;
+
+                const { gerberX, gerberY } = worldToGerber(worldX, worldY, sourceBoard, instance);
+                const nearestKey = findNearestCommand(sourceBoard, gerberX, gerberY, 2.0);
+                if (nearestKey) {
+                  toggleOutlineCommand(nearestKey);
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      outlineRubberBandRef.current = null;
+      return;
+    }
+
     // Item-Drag beenden (Fiducial, Tooling Hole, Tab, V-Score oder Dimension-Label)
     isDraggingItemRef.current = false;
     draggedItemIdRef.current = null;
@@ -1873,7 +2224,7 @@ export function PixiPanelCanvas() {
     } else {
       setCursorStyle('default');
     }
-  }, []);
+  }, [toggleOutlineCommand]);
 
   // ----------------------------------------------------------------
   // Doppelklick: Free-Draw Kontur abschliessen
@@ -2447,6 +2798,340 @@ function getOutlineSubpath(
 }
 
 // ============================================================================
+// Outline-Define-Modus: Koordinaten-Transformation World → Gerber
+// ============================================================================
+
+/**
+ * Rechnet World-mm Koordinaten (Panel-Ebene) in Gerber-Koordinaten um.
+ * Berücksichtigt Instance-Rotation, Layer-Rotation, Y-Flip und Mirror.
+ * Gibt null zurück wenn die Koordinaten nicht zum Board gehören.
+ */
+function worldToGerber(
+  worldX: number,
+  worldY: number,
+  board: Board,
+  instance: BoardInstance
+): { gerberX: number; gerberY: number } {
+  // World-mm → Board-lokal
+  const localX = worldX - instance.position.x;
+  const localY = worldY - instance.position.y;
+
+  // Instance-Rotation rückrechnen
+  const rotRad = -(instance.rotation * Math.PI) / 180;
+  let boardLocalX = localX * Math.cos(rotRad) - localY * Math.sin(rotRad);
+  let boardLocalY = localX * Math.sin(rotRad) + localY * Math.cos(rotRad);
+
+  // Rotation-Offset rückrechnen
+  const layerRotation = board.layerRotation || 0;
+  const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+  const effectiveW = isLayerRotated ? board.height : board.width;
+  const effectiveH = isLayerRotated ? board.width : board.height;
+
+  switch (instance.rotation) {
+    case 90:  boardLocalX -= effectiveH; break;
+    case 180: boardLocalX -= effectiveW; boardLocalY -= effectiveH; break;
+    case 270: boardLocalY -= effectiveW; break;
+  }
+
+  // Mirror rückrechnen
+  const mirrorX = board.mirrorX || false;
+  const mirrorY = board.mirrorY || false;
+  if (mirrorX) boardLocalY = effectiveH - boardLocalY;
+  if (mirrorY) boardLocalX = effectiveW - boardLocalX;
+
+  // Y-Flip (Gerber Y-up → Canvas Y-down)
+  const flippedY = effectiveH - boardLocalY;
+
+  // Layer-Rotation rückrechnen → Gerber-Koordinaten
+  let gerberX = boardLocalX;
+  let gerberY = flippedY;
+
+  if (layerRotation) {
+    const rotRadLayer = (layerRotation * Math.PI) / 180;
+    const cosR = Math.cos(rotRadLayer);
+    const sinR = Math.sin(rotRadLayer);
+
+    let offX = 0, offY = 0;
+    switch (layerRotation) {
+      case 90: offX = 0; offY = board.width; break;
+      case 180: offX = board.width; offY = board.height; break;
+      case 270: offX = board.height; offY = 0; break;
+    }
+
+    const dx = boardLocalX - offX;
+    const dy = flippedY - offY;
+    gerberX = dx * cosR + dy * sinR;
+    gerberY = -dx * sinR + dy * cosR;
+  }
+
+  // Render-Offset addieren: Die Board-Dimensionen basieren auf sichtbaren Layern,
+  // deren Bounding-Box bei (renderOffsetX, renderOffsetY) beginnen kann statt bei (0,0)
+  gerberX += (board.renderOffsetX || 0);
+  gerberY += (board.renderOffsetY || 0);
+
+  return { gerberX, gerberY };
+}
+
+// ============================================================================
+// Outline-Define-Modus: Commands im Rechteck finden
+// ============================================================================
+
+/**
+ * Findet alle line/arc Commands, die (teilweise) innerhalb eines Gerber-Koordinaten-Rechtecks liegen.
+ * Ein Command gilt als "im Rechteck", wenn sein Start- ODER Endpunkt im Rechteck liegt,
+ * oder wenn das Liniensegment das Rechteck schneidet.
+ */
+function findCommandsInRect(
+  board: Board,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number
+): string[] {
+  const keys: string[] = [];
+
+  const pointInRect = (px: number, py: number) =>
+    px >= minX && px <= maxX && py >= minY && py <= maxY;
+
+  // Prüft ob ein Liniensegment (a→b) das Rechteck schneidet
+  const segmentIntersectsRect = (ax: number, ay: number, bx: number, by: number) => {
+    // Endpunkte im Rect → Treffer
+    if (pointInRect(ax, ay) || pointInRect(bx, by)) return true;
+
+    // Liang-Barsky Algorithmus für Line-Rect-Intersection
+    const dx = bx - ax;
+    const dy = by - ay;
+    let tMin = 0, tMax = 1;
+
+    const edges = [
+      { p: -dx, q: ax - minX },
+      { p: dx, q: maxX - ax },
+      { p: -dy, q: ay - minY },
+      { p: dy, q: maxY - ay },
+    ];
+
+    for (const { p, q } of edges) {
+      if (Math.abs(p) < 1e-10) {
+        if (q < 0) return false;
+      } else {
+        const t = q / p;
+        if (p < 0) {
+          tMin = Math.max(tMin, t);
+        } else {
+          tMax = Math.min(tMax, t);
+        }
+        if (tMin > tMax) return false;
+      }
+    }
+    return true;
+  };
+
+  for (const layer of board.layers) {
+    if (!layer.visible || !layer.parsedData) continue;
+
+    for (let i = 0; i < layer.parsedData.commands.length; i++) {
+      const cmd = layer.parsedData.commands[i];
+
+      if (cmd.type === 'line' && cmd.startPoint && cmd.endPoint) {
+        if (segmentIntersectsRect(cmd.startPoint.x, cmd.startPoint.y, cmd.endPoint.x, cmd.endPoint.y)) {
+          keys.push(`${layer.id}:${i}`);
+        }
+      } else if (cmd.type === 'arc' && cmd.startPoint && cmd.endPoint) {
+        // Für Bögen: Vereinfachter Test — Start- oder Endpunkt im Rect,
+        // oder Mittelpunkt im Rect (deckt die meisten Fälle ab)
+        if (pointInRect(cmd.startPoint.x, cmd.startPoint.y) ||
+            pointInRect(cmd.endPoint.x, cmd.endPoint.y)) {
+          keys.push(`${layer.id}:${i}`);
+        } else if (cmd.centerPoint) {
+          // Prüfe ob der Bogen das Rect schneidet:
+          // Teste mehrere Punkte entlang des Bogens
+          const cx = cmd.centerPoint.x;
+          const cy = cmd.centerPoint.y;
+          const dx = cmd.startPoint.x - cx;
+          const dy = cmd.startPoint.y - cy;
+          const radius = Math.sqrt(dx * dx + dy * dy);
+          if (radius < 0.01) continue;
+
+          const startAngle = Math.atan2(cmd.startPoint.y - cy, cmd.startPoint.x - cx);
+          const endAngle = Math.atan2(cmd.endPoint.y - cy, cmd.endPoint.x - cx);
+
+          let sweep = endAngle - startAngle;
+          if (cmd.clockwise) {
+            if (sweep > 0) sweep -= 2 * Math.PI;
+            if (sweep === 0) sweep = -2 * Math.PI;
+          } else {
+            if (sweep < 0) sweep += 2 * Math.PI;
+            if (sweep === 0) sweep = 2 * Math.PI;
+          }
+
+          // 8 Testpunkte entlang des Bogens prüfen
+          const steps = 8;
+          let found = false;
+          for (let s = 0; s <= steps; s++) {
+            const angle = startAngle + (sweep * s) / steps;
+            const px = cx + radius * Math.cos(angle);
+            const py = cy + radius * Math.sin(angle);
+            if (pointInRect(px, py)) { found = true; break; }
+          }
+          if (found) keys.push(`${layer.id}:${i}`);
+        }
+      }
+    }
+  }
+
+  return keys;
+}
+
+// ============================================================================
+// Outline-Define-Modus: Nächsten Command finden
+// ============================================================================
+
+/**
+ * Sucht den nächsten line/arc Command zum Klickpunkt in Gerber-Koordinaten.
+ * Iteriert über alle sichtbaren Layer und gibt den Key "layerId:cmdIndex" zurück.
+ */
+function findNearestCommand(
+  board: Board,
+  gerberX: number,
+  gerberY: number,
+  maxDist: number
+): string | null {
+  let bestKey: string | null = null;
+  let bestDist = maxDist;
+
+  for (const layer of board.layers) {
+    if (!layer.visible || !layer.parsedData) continue;
+
+    for (let i = 0; i < layer.parsedData.commands.length; i++) {
+      const cmd = layer.parsedData.commands[i];
+
+      if (cmd.type === 'line' && cmd.startPoint && cmd.endPoint) {
+        // Punkt-zu-Liniensegment Distanz
+        const result = nearestPointOnSegment(gerberX, gerberY, cmd.startPoint, cmd.endPoint);
+        if (result.distance < bestDist) {
+          bestDist = result.distance;
+          bestKey = `${layer.id}:${i}`;
+        }
+      } else if (cmd.type === 'arc' && cmd.startPoint && cmd.endPoint && cmd.centerPoint) {
+        // Punkt-zu-Bogen Distanz
+        const dx = cmd.startPoint.x - cmd.centerPoint.x;
+        const dy = cmd.startPoint.y - cmd.centerPoint.y;
+        const radius = Math.sqrt(dx * dx + dy * dy);
+        if (radius < 0.01) continue;
+
+        const startAngle = Math.atan2(cmd.startPoint.y - cmd.centerPoint.y, cmd.startPoint.x - cmd.centerPoint.x);
+        const endAngle = Math.atan2(cmd.endPoint.y - cmd.centerPoint.y, cmd.endPoint.x - cmd.centerPoint.x);
+
+        const result = nearestPointOnArc(
+          gerberX, gerberY,
+          { center: cmd.centerPoint, radius, startAngle, endAngle, clockwise: !!cmd.clockwise },
+          cmd.startPoint, cmd.endPoint
+        );
+        if (result.distance < bestDist) {
+          bestDist = result.distance;
+          bestKey = `${layer.id}:${i}`;
+        }
+      }
+    }
+  }
+
+  return bestKey;
+}
+
+// ============================================================================
+// Outline-Define-Modus: Overlay-Graphics erstellen
+// ============================================================================
+
+/**
+ * Erstellt ein Overlay-Graphics für den Outline-Define-Modus.
+ * Ausgewählte Linien/Bögen werden orange hervorgehoben,
+ * nicht ausgewählte werden grau und transparent dargestellt.
+ */
+function createOutlineDefineGraphics(
+  board: Board,
+  selectedCommands: Set<string>
+): Graphics {
+  const graphics = new Graphics();
+
+  const SELECTED_COLOR = 0xFF8C00;    // Orange für ausgewählte
+  const UNSELECTED_COLOR = 0x666666;  // Grau für nicht ausgewählte
+
+  for (const layer of board.layers) {
+    if (!layer.visible || !layer.parsedData) continue;
+    const { commands, apertures } = layer.parsedData;
+
+    for (let i = 0; i < commands.length; i++) {
+      const cmd = commands[i];
+      if (cmd.type !== 'line' && cmd.type !== 'arc') continue;
+
+      const key = `${layer.id}:${i}`;
+      const isSelected = selectedCommands.has(key);
+      const color = isSelected ? SELECTED_COLOR : UNSELECTED_COLOR;
+      const alpha = isSelected ? 1.0 : 0.3;
+
+      // Strichbreite aus Aperture ermitteln
+      const aperture = cmd.apertureId ? apertures.get(cmd.apertureId) ?? null : null;
+      let strokeWidth = 0.2 * PIXELS_PER_MM;
+      if (aperture?.type === 'circle' && aperture.diameter) {
+        strokeWidth = aperture.diameter * PIXELS_PER_MM;
+      } else if (aperture?.width) {
+        strokeWidth = aperture.width * PIXELS_PER_MM;
+      }
+      strokeWidth = Math.max(strokeWidth, 0.5);
+
+      // Ausgewählte etwas dicker zeichnen
+      if (isSelected) strokeWidth += 2;
+
+      if (cmd.type === 'line' && cmd.startPoint && cmd.endPoint) {
+        graphics
+          .moveTo(cmd.startPoint.x * PIXELS_PER_MM, cmd.startPoint.y * PIXELS_PER_MM)
+          .lineTo(cmd.endPoint.x * PIXELS_PER_MM, cmd.endPoint.y * PIXELS_PER_MM)
+          .stroke({ color, width: strokeWidth, cap: 'round', join: 'round', alpha });
+
+      } else if (cmd.type === 'arc' && cmd.startPoint && cmd.endPoint) {
+        const sx = cmd.startPoint.x * PIXELS_PER_MM;
+        const sy = cmd.startPoint.y * PIXELS_PER_MM;
+
+        if (cmd.centerPoint) {
+          const cx = cmd.centerPoint.x * PIXELS_PER_MM;
+          const cy = cmd.centerPoint.y * PIXELS_PER_MM;
+          const radius = Math.sqrt((sx - cx) ** 2 + (sy - cy) ** 2);
+          if (radius < 0.01 || !isFinite(radius)) continue;
+
+          const startAngle = Math.atan2(sy - cy, sx - cx);
+          const endAngle = Math.atan2(cmd.endPoint.y * PIXELS_PER_MM - cy, cmd.endPoint.x * PIXELS_PER_MM - cx);
+          if (!isFinite(startAngle) || !isFinite(endAngle)) continue;
+
+          let sweep = endAngle - startAngle;
+          if (cmd.clockwise) {
+            if (sweep > 0) sweep -= 2 * Math.PI;
+            if (sweep === 0) sweep = -2 * Math.PI;
+          } else {
+            if (sweep < 0) sweep += 2 * Math.PI;
+            if (sweep === 0) sweep = 2 * Math.PI;
+          }
+
+          const arcSegments = Math.max(16, Math.ceil(Math.abs(sweep) * 32 / Math.PI));
+          graphics.moveTo(sx, sy);
+          for (let si = 1; si <= arcSegments; si++) {
+            const angle = startAngle + (sweep * si) / arcSegments;
+            graphics.lineTo(cx + radius * Math.cos(angle), cy + radius * Math.sin(angle));
+          }
+          graphics.stroke({ color, width: strokeWidth, cap: 'round', join: 'round', alpha });
+        } else {
+          const ex = cmd.endPoint.x * PIXELS_PER_MM;
+          const ey = cmd.endPoint.y * PIXELS_PER_MM;
+          graphics.moveTo(sx, sy).lineTo(ex, ey)
+            .stroke({ color, width: strokeWidth, cap: 'round', alpha });
+        }
+      }
+    }
+  }
+
+  return graphics;
+}
+
+// ============================================================================
 // Board Graphics erstellen
 // ============================================================================
 
@@ -2554,6 +3239,14 @@ function createBoardGraphics(board: Board, instance: BoardInstance, showBackgrou
       }
     }
 
+    // Offset-Container: Verschiebt Gerber-Daten damit sichtbarer Inhalt bei (0,0) startet
+    // Wenn nur bestimmte Layer sichtbar sind, kann deren Bounding-Box bei
+    // (renderOffsetX, renderOffsetY) beginnen statt bei (0,0)
+    const offsetContainer = new Container();
+    const renderOffX = board.renderOffsetX || 0;
+    const renderOffY = board.renderOffsetY || 0;
+    offsetContainer.position.set(-renderOffX * PIXELS_PER_MM, -renderOffY * PIXELS_PER_MM);
+
     // Alle sichtbaren Layer rendern
     for (const layer of visibleLayers) {
       if (!layer.parsedData) continue;
@@ -2561,9 +3254,10 @@ function createBoardGraphics(board: Board, instance: BoardInstance, showBackgrou
       const layerGraphics = createLayerGraphics(layer);
       // Outline-Layer mit voller Deckkraft, alle anderen mit 70% damit überlagerte Layer erkennbar bleiben
       layerGraphics.alpha = layer.type === 'outline' ? 1.0 : 0.7;
-      rotationContainer.addChild(layerGraphics);
+      offsetContainer.addChild(layerGraphics);
     }
 
+    rotationContainer.addChild(offsetContainer);
     gerberContainer.addChild(rotationContainer);
 
     // Spiegel-Container: Spiegelt die Gerber-Layer an X- oder Y-Achse
@@ -2797,6 +3491,44 @@ function createFiducialGraphics(fiducial: Fiducial, isSelected: boolean = false)
 
   // Kleiner Punkt in der Mitte für bessere Sichtbarkeit
   graphics.circle(x, y, padRadius * 0.3).fill({ color: 0x808080 });
+
+  return graphics;
+}
+
+// ============================================================================
+// Badmark Graphics erstellen (Quadrat ■, Amber-Farbe)
+// ============================================================================
+
+function createBadmarkGraphics(badmark: Badmark, isSelected: boolean = false): Graphics {
+  const graphics = new Graphics();
+  const x = badmark.position.x * PIXELS_PER_MM;
+  const y = badmark.position.y * PIXELS_PER_MM;
+  const halfSize = (badmark.size / 2) * PIXELS_PER_MM;
+
+  // Wenn ausgewählt: Leuchtender Rand (Glow-Effekt)
+  if (isSelected) {
+    const glowHalf = halfSize + 4;
+    graphics.rect(x - glowHalf, y - glowHalf, glowHalf * 2, glowHalf * 2)
+      .stroke({ color: 0xffa500, width: 4, alpha: 0.8 }); // Orange
+    const outerGlowHalf = glowHalf + 2;
+    graphics.rect(x - outerGlowHalf, y - outerGlowHalf, outerGlowHalf * 2, outerGlowHalf * 2)
+      .stroke({ color: 0xffcc00, width: 2, alpha: 0.5 }); // Gelb
+  }
+
+  // Hauptfarbe: Amber (0xFFC107), Gold wenn ausgewählt
+  const fillColor = isSelected ? 0xffd700 : 0xffc107;
+  const alpha = badmark.isSyncCopy ? 0.5 : 1.0;
+
+  // Gefülltes Quadrat
+  graphics.rect(x - halfSize, y - halfSize, halfSize * 2, halfSize * 2)
+    .fill({ color: fillColor, alpha });
+
+  // Bei Master-Badmark: Zusätzlicher Viereck-Ring
+  if (badmark.isMasterBadmark) {
+    const ringHalf = badmark.size * 1.25 * PIXELS_PER_MM;
+    graphics.rect(x - ringHalf, y - ringHalf, ringHalf * 2, ringHalf * 2)
+      .stroke({ color: fillColor, width: 2, alpha });
+  }
 
   return graphics;
 }
@@ -3835,22 +4567,47 @@ interface OrdinatePosition {
 }
 
 /**
- * Stagger-Algorithmus: Weist Positionen Levels zu, damit sich zu nahe Texte nicht überlappen.
- * Level 0 = nah an der Achse, Level 1 = weiter weg, Level 2 = noch weiter.
+ * Spread-Algorithmus: Schiebt Text-Positionen entlang der Achse auseinander,
+ * damit eng beieinanderliegende Werte sich nicht überlappen.
+ * Ersetzt den alten Stagger-Algorithmus (der Texte senkrecht zur Achse versetzt hat).
+ *
+ * Vorwärts-Pass: Werte werden auseinandergeschoben wenn der Abstand < minSpacing.
+ * Rückwärts-Pass: Jede zusammenhängende Gruppe wird um ihre Original-Mitte zentriert.
+ *
+ * Rückgabe: Array mit verschobenen Positionen (gleiche Länge wie Eingabe).
  */
-function assignStaggerLevels(positions: OrdinatePosition[], minSpacingMm: number = 3): number[] {
-  if (positions.length === 0) return [];
-  const levels = new Array(positions.length).fill(0);
-  for (let i = 1; i < positions.length; i++) {
-    const gap = positions[i].value - positions[i - 1].value;
-    if (gap < minSpacingMm) {
-      // Nächstes Level (zyklisch 0 → 1 → 2 → 0)
-      levels[i] = (levels[i - 1] + 1) % 3;
-    } else {
-      levels[i] = 0;
+function computeSpreadPositions(values: number[], minSpacing: number = 3): number[] {
+  if (values.length === 0) return [];
+  const adj = values.map(v => v); // Kopie der Originalwerte
+
+  // Vorwärts-Pass: Werte auseinanderschieben
+  for (let i = 1; i < adj.length; i++) {
+    if (adj[i] - adj[i - 1] < minSpacing) {
+      adj[i] = adj[i - 1] + minSpacing;
     }
   }
-  return levels;
+
+  // Rückwärts-Pass: Gruppen symmetrisch um Original-Mitte zentrieren
+  let gi = adj.length - 1;
+  while (gi >= 0) {
+    // Finde den Anfang der zusammenhängenden Gruppe
+    let groupStart = gi;
+    while (groupStart > 0 && adj[groupStart] - adj[groupStart - 1] <= minSpacing + 0.001) {
+      groupStart--;
+    }
+    if (groupStart < gi) {
+      // Gruppe gefunden — um Original-Mitte zentrieren
+      const origCenter = (values[groupStart] + values[gi]) / 2;
+      const adjCenter = (adj[groupStart] + adj[gi]) / 2;
+      const shift = origCenter - adjCenter;
+      for (let j = groupStart; j <= gi; j++) {
+        adj[j] += shift;
+      }
+    }
+    gi = groupStart - 1;
+  }
+
+  return adj;
 }
 
 /**
@@ -3953,6 +4710,13 @@ function createDimensionOverlay(
     addPos(yPositions, { value: fid.position.y, color: COLOR_FID, type: 'fiducial', key: `ord-y-fid-${fid.id}`, featureCanvasPos: { x: fid.position.x, y: fid.position.y } });
   }
 
+  // 5b. Badmarks (Amber 0xFFC107)
+  const COLOR_BADMARK = 0xffc107;
+  for (const bm of panel.badmarks) {
+    addPos(xPositions, { value: bm.position.x, color: COLOR_BADMARK, type: 'badmark', key: `ord-x-bm-${bm.id}`, featureCanvasPos: { x: bm.position.x, y: bm.position.y } });
+    addPos(yPositions, { value: bm.position.y, color: COLOR_BADMARK, type: 'badmark', key: `ord-y-bm-${bm.id}`, featureCanvasPos: { x: bm.position.x, y: bm.position.y } });
+  }
+
   // 6. Tooling Holes
   for (const hole of panel.toolingHoles) {
     addPos(xPositions, { value: hole.position.x, color: COLOR_HOLE, type: 'toolinghole', key: `ord-x-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
@@ -3977,15 +4741,16 @@ function createDimensionOverlay(
   xPositions.sort((a, b) => a.value - b.value);
   yPositions.sort((a, b) => a.value - b.value);
 
-  // Stagger-Levels berechnen
-  const xLevels = assignStaggerLevels(xPositions);
-  const yLevels = assignStaggerLevels(yPositions);
+  // Spread-Positionen berechnen (Text entlang der Achse auseinanderschieben)
+  const xSpread = computeSpreadPositions(xPositions.map(p => p.value));
+  const ySpread = computeSpreadPositions(yPositions.map(p => p.value));
 
   // === Achsen-Positionen (in mm) ===
   const xAxisY = panel.height + axisOffset.y;  // X-Achse unterhalb des Panels
   const yAxisX = -axisOffset.x;                // Y-Achse links vom Panel
   const tickLen = 1.5;  // Tick-Mark Länge in mm
-  const staggerStep = 5; // mm pro Stagger-Level
+  const jogLen = 2;     // Länge des Diagonal-Jogs in mm
+  const textGap = 0.5;  // Abstand zwischen Jog-Ende und Text in mm
 
   // === 1. Nullpunkt-Marker ===
   const nullRadius = 1.5 * px;
@@ -4002,11 +4767,10 @@ function createDimensionOverlay(
   for (let i = 0; i < xPositions.length; i++) {
     const pos = xPositions[i];
     if (hidden.has(pos.key)) continue;
-    const level = xLevels[i];
-    const staggerOffset = level * staggerStep;
+    const adjustedX = xSpread[i];
+    const needsJog = Math.abs(adjustedX - pos.value) > 0.01;
     const tickBaseY = xAxisY; // Basis = Achse
-    const tickEndY = tickBaseY + tickLen + staggerOffset; // Tick geht nach unten
-    const textY = tickEndY + 0.5; // Text leicht unter dem Tick
+    const tickTopY = tickBaseY + tickLen; // Tick-Ende (unten)
 
     // Vertikale Hilfslinie vom Feature bis zur Achse (dünn, farbig)
     drawPixiDashedLine(lineGraphics,
@@ -4015,19 +4779,29 @@ function createDimensionOverlay(
       pos.color, 0.3, 4, 3
     );
 
-    // Tick-Mark (kurzer vertikaler Strich an der Achse)
+    // Tick-Mark (kurzer vertikaler Strich an der Achse, an exakter Position)
     lineGraphics.moveTo(pos.value * px, tickBaseY * px);
-    lineGraphics.lineTo(pos.value * px, (tickBaseY + tickLen) * px);
+    lineGraphics.lineTo(pos.value * px, tickTopY * px);
     lineGraphics.stroke({ color: pos.color, width: 1 });
 
-    // Führungslinie bei Stagger (abgewinkelt zurück zum Tick-Punkt)
-    if (level > 0) {
-      lineGraphics.moveTo(pos.value * px, (tickBaseY + tickLen) * px);
-      lineGraphics.lineTo(pos.value * px, tickEndY * px);
+    let textX: number;
+    let textY: number;
+
+    if (needsJog) {
+      // Diagonal-Jog: Tick-Ende → verschobene X-Position
+      const jogEndY = tickTopY + jogLen;
+      lineGraphics.moveTo(pos.value * px, tickTopY * px);
+      lineGraphics.lineTo(adjustedX * px, jogEndY * px);
       lineGraphics.stroke({ color: pos.color, width: 0.5 });
+      textX = adjustedX;
+      textY = jogEndY + textGap;
+    } else {
+      // Kein Jog nötig — Text direkt unter dem Tick
+      textX = pos.value;
+      textY = tickTopY + textGap;
     }
 
-    // Wert-Text (rotiert -90°, unter dem Tick)
+    // Wert-Text (rotiert -90°, unter dem Tick/Jog — zeigt den echten Wert!)
     const tickContainer = new Container();
     tickContainer.label = pos.key;
     const valueText = new Text({
@@ -4037,7 +4811,7 @@ function createDimensionOverlay(
     valueText.resolution = 4;
     valueText.anchor.set(1, 0.5); // Rechts-Mitte (nach Rotation: oben-mitte)
     valueText.rotation = -Math.PI / 2;
-    tickContainer.position.set(pos.value * px, textY * px);
+    tickContainer.position.set(textX * px, textY * px);
     tickContainer.addChild(valueText);
     tickContainer.eventMode = 'static';
     overlay.addChild(tickContainer);
@@ -4050,11 +4824,10 @@ function createDimensionOverlay(
   for (let i = 0; i < yPositions.length; i++) {
     const pos = yPositions[i];
     if (hidden.has(pos.key)) continue;
-    const level = yLevels[i];
-    const staggerOffset = level * staggerStep;
+    const adjustedY = ySpread[i];
+    const needsJog = Math.abs(adjustedY - pos.value) > 0.01;
     const tickBaseX = yAxisX; // Basis = Achse
-    const tickEndX = tickBaseX - tickLen - staggerOffset; // Tick geht nach links
-    const textX = tickEndX - 0.5; // Text leicht links vom Tick
+    const tickEndX = tickBaseX - tickLen; // Tick-Ende (links)
 
     // Horizontale Hilfslinie vom Feature bis zur Achse (dünn, farbig)
     drawPixiDashedLine(lineGraphics,
@@ -4063,19 +4836,29 @@ function createDimensionOverlay(
       pos.color, 0.3, 4, 3
     );
 
-    // Tick-Mark (kurzer horizontaler Strich an der Achse)
+    // Tick-Mark (kurzer horizontaler Strich an der Achse, an exakter Position)
     lineGraphics.moveTo(tickBaseX * px, pos.value * px);
-    lineGraphics.lineTo((tickBaseX - tickLen) * px, pos.value * px);
+    lineGraphics.lineTo(tickEndX * px, pos.value * px);
     lineGraphics.stroke({ color: pos.color, width: 1 });
 
-    // Führungslinie bei Stagger
-    if (level > 0) {
-      lineGraphics.moveTo((tickBaseX - tickLen) * px, pos.value * px);
-      lineGraphics.lineTo(tickEndX * px, pos.value * px);
+    let textX: number;
+    let textPosY: number;
+
+    if (needsJog) {
+      // Diagonal-Jog: Tick-Ende → verschobene Y-Position
+      const jogEndX = tickEndX - jogLen;
+      lineGraphics.moveTo(tickEndX * px, pos.value * px);
+      lineGraphics.lineTo(jogEndX * px, adjustedY * px);
       lineGraphics.stroke({ color: pos.color, width: 0.5 });
+      textX = jogEndX - textGap;
+      textPosY = adjustedY;
+    } else {
+      // Kein Jog nötig — Text direkt links vom Tick
+      textX = tickEndX - textGap;
+      textPosY = pos.value;
     }
 
-    // Wert-Text (horizontal, links vom Tick)
+    // Wert-Text (horizontal, links vom Tick/Jog — zeigt den echten Wert!)
     const tickContainer = new Container();
     tickContainer.label = pos.key;
     const valueText = new Text({
@@ -4083,8 +4866,8 @@ function createDimensionOverlay(
       style: new TextStyle({ fontSize: 7, fill: pos.color, fontFamily: 'Arial' }),
     });
     valueText.resolution = 4;
-    valueText.anchor.set(1, 0.5); // Rechts-Mitte (Text endet am Tick)
-    tickContainer.position.set(textX * px, pos.value * px);
+    valueText.anchor.set(1, 0.5); // Rechts-Mitte (Text endet am Jog)
+    tickContainer.position.set(textX * px, textPosY * px);
     tickContainer.addChild(valueText);
     tickContainer.eventMode = 'static';
     overlay.addChild(tickContainer);
@@ -4097,7 +4880,7 @@ function createDimensionOverlay(
       const legendOffset = labelOffsets[legendKey] || { dx: 0, dy: 0 };
       // Symbol-Typen: 'line' = farbige Linie, 'dashed' = gestrichelt, 'circle' = Kreis,
       // 'fiducial' = Punkt+Ring, 'hole' = Bohrungssymbol, 'routing' = dicke Linie
-      type LegendSymbol = 'line' | 'dashed' | 'circle' | 'fiducial' | 'hole' | 'routing';
+      type LegendSymbol = 'line' | 'dashed' | 'circle' | 'fiducial' | 'badmark' | 'badmark-master' | 'hole' | 'routing';
       const allEntries: Array<{ color: number; label: string; symbol: LegendSymbol; toolDiameter?: number }> = [];
 
       // Farbcode-Erklärungen (immer anzeigen)
@@ -4118,6 +4901,15 @@ function createDimensionOverlay(
       if (panel.fiducials.length > 0) {
         const f = panel.fiducials[0];
         allEntries.push({ color: COLOR_FID, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}`, symbol: 'fiducial' });
+      }
+      // Badmark Detail — separate Einträge für Master-Badmark und Board-Badmark
+      const masterBm = panel.badmarks.find(b => b.isMasterBadmark);
+      const boardBm = panel.badmarks.find(b => !b.isMasterBadmark && !b.isSyncCopy);
+      if (masterBm) {
+        allEntries.push({ color: COLOR_BADMARK, label: `Master-Badmark: ${masterBm.size.toFixed(1)}mm`, symbol: 'badmark-master' });
+      }
+      if (boardBm) {
+        allEntries.push({ color: COLOR_BADMARK, label: `Badmark: ${boardBm.size.toFixed(1)}mm`, symbol: 'badmark' });
       }
       // Tooling Holes Detail (unique Kombinationen) — Bohrungs-Symbol
       const holeTypes = new Map<string, { label: string; plated: boolean }>();
@@ -4197,6 +4989,19 @@ function createDimensionOverlay(
             symG.circle(symCenterX, symCenterY, outerR);
             symG.stroke({ color: entry.color, width: 1 });
             symG.circle(symCenterX, symCenterY, innerR);
+            symG.fill({ color: entry.color });
+          } else if (entry.symbol === 'badmark-master') {
+            // Master-Badmark: gefülltes Quadrat + äußeres Viereck (Ring)
+            const halfSize = 0.8 * px;
+            const outerHalf = 1.4 * px;
+            symG.rect(symCenterX - halfSize, symCenterY - halfSize, halfSize * 2, halfSize * 2);
+            symG.fill({ color: entry.color });
+            symG.rect(symCenterX - outerHalf, symCenterY - outerHalf, outerHalf * 2, outerHalf * 2);
+            symG.stroke({ color: entry.color, width: 1 });
+          } else if (entry.symbol === 'badmark') {
+            // Board-Badmark: gefülltes Quadrat (ohne Ring)
+            const halfSize = 1.0 * px;
+            symG.rect(symCenterX - halfSize, symCenterY - halfSize, halfSize * 2, halfSize * 2);
             symG.fill({ color: entry.color });
           } else if (entry.symbol === 'hole') {
             // Bohrung: Kreuz im Kreis (kompakt)
