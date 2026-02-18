@@ -34,9 +34,10 @@ const BORDER_BOTTOM = MARGIN + INNER_MARGIN;
 let BORDER_RIGHT = PAGE_WIDTH - MARGIN - INNER_MARGIN;
 let BORDER_TOP = PAGE_HEIGHT - MARGIN - INNER_MARGIN;
 
-// Titelblock-Dimensionen (unten rechts)
-const TITLE_BLOCK_WIDTH = 380;       // ca. 134mm
-const TITLE_BLOCK_HEIGHT = 130;      // ca. 46mm
+// Titelblock-Dimensionen nach VSM/ISO 7200 (unten rechts)
+// VSM-Norm: 180mm Breite, Höhe flexibel (~46mm)
+const TITLE_BLOCK_WIDTH = 180 * MM_TO_PT;  // 180mm = 510pt (VSM-Standard)
+const TITLE_BLOCK_HEIGHT = 46 * MM_TO_PT;  // 46mm = 130pt
 let TITLE_BLOCK_X = BORDER_RIGHT - TITLE_BLOCK_WIDTH;
 let TITLE_BLOCK_Y = BORDER_BOTTOM;
 
@@ -51,9 +52,9 @@ let NOTES_AREA = {
 // Panel-Zeichnungsbereich (Hauptbereich in der Mitte)
 let DRAWING_AREA = {
   x: BORDER_LEFT + 30,
-  y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 30,
-  width: BORDER_RIGHT - BORDER_LEFT - 80,
-  height: BORDER_TOP - BORDER_BOTTOM - TITLE_BLOCK_HEIGHT - NOTES_AREA.height - 60,
+  y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 15,
+  width: BORDER_RIGHT - BORDER_LEFT - 60,
+  height: BORDER_TOP - BORDER_BOTTOM - TITLE_BLOCK_HEIGHT - NOTES_AREA.height - 30,
 };
 
 // Farben für verschiedene Elemente
@@ -99,8 +100,7 @@ export interface DrawingOptions {
   drawingNumber?: string;       // Zeichnungsnummer (z.B. "XXXXX.0120-NZ")
   client?: string;              // Kunde
   drawnBy?: string;             // Gezeichnet von (Kürzel)
-  checkedBy?: string;           // Geprüft von
-  approvedBy?: string;          // Genehmigt von
+  approvedBy?: string;          // Freigegeben von
   issueNumber?: string;         // Ausgabe-Nummer (z.B. "01")
   apNumber?: string;            // AP-Nummer
   sheetNumber?: number;         // Blatt-Nummer (Default: 1)
@@ -141,6 +141,7 @@ function hexToRgbColor(hex: string) {
  * (Fräskonturen, V-Scores, Fiducials) verwenden Y-abwärts (0 = oben).
  *
  * Die Reihenfolge stimmt EXAKT mit dem Canvas überein (pixi-panel-canvas.tsx):
+ * 0. Render-Offset (offsetContainer): Verschiebt Gerber-Daten damit sichtbarer Inhalt bei (0,0) startet
  * 1. Layer-Rotation (rotationContainer): Dreht die Gerber-Daten CCW im Y-up Raum
  * 2. Y-Flip (gerberContainer): Gerber Y-up → Canvas Y-down
  * 3. Spiegelung (mirrorContainer): Spiegelt im Y-down Raum
@@ -154,6 +155,15 @@ function transformGerberPoint(
 ): { x: number; y: number } {
   let x = gx;
   let y = gy;
+
+  // Schritt 0: Render-Offset abziehen (wie offsetContainer im Canvas)
+  // Wenn nur bestimmte Layer sichtbar sind, startet deren Bounding-Box
+  // nicht bei (0,0) im Gerber-Raum. Der Offset verschiebt die Daten
+  // damit der sichtbare Inhalt bei (0,0) des Boards beginnt.
+  const renderOffX = board.renderOffsetX || 0;
+  const renderOffY = board.renderOffsetY || 0;
+  x -= renderOffX;
+  y -= renderOffY;
 
   // Originale Board-Dimensionen (vor jeder Rotation)
   const origW = board.width;
@@ -225,7 +235,8 @@ function drawGerberLayersOnBoard(
   if (visibleLayers.length === 0) return;
 
   for (const layer of visibleLayers) {
-    const layerColor = hexToRgbColor(layer.color);
+    // In der PDF-Zeichnung alle Gerber-Layer schwarz darstellen (nicht Canvas-Farben)
+    const layerColor = rgb(0, 0, 0);
     // Outline-Layer mit voller Deckkraft, andere Layer mit 70%
     const opacity = layer.type === 'outline' ? 1.0 : 0.7;
     const { commands, apertures } = layer.parsedData!;
@@ -536,19 +547,20 @@ export async function generateDimensionDrawing(
 
   // ---- Dynamische Seitengrößen-Berechnung mit automatischer Skalierung ----
   // Ränder um das Panel für Bemaßungen und Annotationen (in PDF-Punkten)
-  const PANEL_MARGIN_LEFT = 80;    // Platz für Y-Offset-Bemaßungen links
-  const PANEL_MARGIN_RIGHT = 250;  // Platz für Bemaßungen + Detail-Tabelle rechts
-  const PANEL_MARGIN_TOP = 100;    // Platz für Notizen-Bereich oben
-  const PANEL_MARGIN_BOTTOM = 200; // Platz für Titelblock + Bemaßungen unten
+  // Optimiert für A4 quer: Panel so gross wie möglich bei 1:1
+  const PANEL_MARGIN_LEFT = 60;    // Platz für Y-Achse Ordinatenbemaßung (~21mm)
+  const PANEL_MARGIN_RIGHT = 170;  // Platz für Detail-Legende rechts (~60mm)
+  const PANEL_MARGIN_TOP = 15;     // Platz über dem Panel (~5mm)
+  const PANEL_MARGIN_BOTTOM = 190; // Titelblock (46mm) + X-Achse (10mm) + Ticks/Text (~11mm)
 
-  // Maximale Seitengrösse: A3 quer (420 x 297 mm)
-  // Grössere Seiten werden automatisch herunterskaliert
-  const MAX_PAGE_WIDTH = 420 * MM_TO_PT;   // 1190.55 pt
-  const MAX_PAGE_HEIGHT = 297 * MM_TO_PT;  // 841.89 pt
+  // Standard-Seitengrösse: A4 quer (297 x 210 mm)
+  // Panels die nicht passen werden automatisch herunterskaliert (ISO 5455)
+  const MAX_PAGE_WIDTH = 297 * MM_TO_PT;   // 841.89 pt (A4 quer)
+  const MAX_PAGE_HEIGHT = 210 * MM_TO_PT;  // 595.28 pt (A4 quer)
 
-  // Minimale Seitengrösse: A4 quer (297 x 210 mm)
-  const MIN_PAGE_WIDTH = 841.89;   // 297mm
-  const MIN_PAGE_HEIGHT = 595.28;  // 210mm
+  // Minimale Seitengrösse = gleich wie Maximum (immer A4)
+  const MIN_PAGE_WIDTH = 297 * MM_TO_PT;   // 841.89 pt
+  const MIN_PAGE_HEIGHT = 210 * MM_TO_PT;  // 595.28 pt
 
   // Gesamte Ränder um das Panel (in PDF-Punkten)
   const totalMarginH = PANEL_MARGIN_LEFT + PANEL_MARGIN_RIGHT + 2 * (MARGIN + INNER_MARGIN);
@@ -563,17 +575,24 @@ export async function generateDimensionDrawing(
   const panelHeightPt1to1 = panel.height * MM_TO_PT;
 
   // Standard-Massstäbe für technische Zeichnungen (ISO 5455)
-  const STANDARD_SCALES = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20];
+  // Verkleinerung: 1:1.5, 1:2, ... und Vergrösserung: 2:1, 5:1, 10:1, ...
+  const STANDARD_SCALES_DOWN = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20];
 
-  // Massstab berechnen: Passt das Panel bei 1:1 auf max. A3?
+  // Massstab berechnen oder Override verwenden
   let scaleRatio = 1;
-  if (panelWidthPt1to1 > maxPanelAreaW || panelHeightPt1to1 > maxPanelAreaH) {
-    // Panel ist zu gross für A3 bei 1:1 → Skalierung nötig
-    const fitScaleW = maxPanelAreaW / panelWidthPt1to1;
-    const fitScaleH = maxPanelAreaH / panelHeightPt1to1;
-    const fitScale = Math.min(fitScaleW, fitScaleH);
-    // Nächsten Standard-Massstab finden, bei dem das Panel passt (1/ratio <= fitScale)
-    scaleRatio = STANDARD_SCALES.find(r => 1 / r <= fitScale) || STANDARD_SCALES[STANDARD_SCALES.length - 1];
+
+  if (panel.pdfScaleOverride && panel.pdfScaleOverride > 0) {
+    // Manueller Override — Benutzer hat den Massstab selbst gewählt
+    // Wert ist das scaleRatio: 0.1 = 10:1, 0.5 = 2:1, 1 = 1:1, 2 = 1:2
+    scaleRatio = panel.pdfScaleOverride;
+  } else {
+    // Automatische Berechnung (wie bisher) — nur Verkleinerung
+    if (panelWidthPt1to1 > maxPanelAreaW || panelHeightPt1to1 > maxPanelAreaH) {
+      const fitScaleW = maxPanelAreaW / panelWidthPt1to1;
+      const fitScaleH = maxPanelAreaH / panelHeightPt1to1;
+      const fitScale = Math.min(fitScaleW, fitScaleH);
+      scaleRatio = STANDARD_SCALES_DOWN.find(r => 1 / r <= fitScale) || STANDARD_SCALES_DOWN[STANDARD_SCALES_DOWN.length - 1];
+    }
   }
 
   // Skalierte Panel-Dimensionen
@@ -597,22 +616,44 @@ export async function generateDimensionDrawing(
   };
   DRAWING_AREA = {
     x: BORDER_LEFT + 30,
-    y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 30,
-    width: BORDER_RIGHT - BORDER_LEFT - 80,
-    height: BORDER_TOP - BORDER_BOTTOM - TITLE_BLOCK_HEIGHT - NOTES_AREA.height - 60,
+    y: BORDER_BOTTOM + TITLE_BLOCK_HEIGHT + 15,
+    width: BORDER_RIGHT - BORDER_LEFT - 60,
+    height: BORDER_TOP - BORDER_BOTTOM - TITLE_BLOCK_HEIGHT - NOTES_AREA.height - 30,
   };
 
   // Seite hinzufügen (dynamische Größe, passt sich an Panel an)
   const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
 
+  // Gespeicherte Zeichnungsvorschau-Konfiguration verwenden (falls vorhanden)
+  // Damit stimmt die PDF-Ausgabe exakt mit der Canvas-Vorschau überein
+  let offsetX: number;
+  let offsetY: number;
+
+  if (panel.drawingPreviewConfig) {
+    // Massstab aus der Zeichnungsvorschau übernehmen — aber NUR wenn kein
+    // manueller Override gesetzt ist (Override hat immer Vorrang)
+    if (!(panel.pdfScaleOverride && panel.pdfScaleOverride > 0)) {
+      scaleRatio = panel.drawingPreviewConfig.scaleRatio;
+    }
+    const previewScale = MM_TO_PT / scaleRatio;
+    const panelHeightPx = panel.height * previewScale;
+
+    // Canvas speichert Y-down (0 = oben), PDF braucht Y-up (0 = unten)
+    // panelOffsetX ist direkt in mm vom linken Papierrand
+    offsetX = panel.drawingPreviewConfig.panelOffsetX * MM_TO_PT;
+    // panelOffsetY (Canvas: von oben) → PDF: PAGE_HEIGHT - panelOffsetY - panelHeight/scale
+    offsetY = PAGE_HEIGHT - panel.drawingPreviewConfig.panelOffsetY * MM_TO_PT - panelHeightPx;
+  } else {
+    offsetX = BORDER_LEFT + PANEL_MARGIN_LEFT;
+    offsetY = BORDER_BOTTOM + PANEL_MARGIN_BOTTOM;
+  }
+
   // Skalierung: MM_TO_PT / scaleRatio (bei 1:1 = MM_TO_PT, bei 1:2 = halbe Grösse etc.)
   const scale = MM_TO_PT / scaleRatio;
 
-  // Panel-Positionierung: mittig im verfügbaren Zeichnungsbereich
+  // Panel-Dimensionen in PDF-Punkten (skaliert)
   const panelWidthPx = panel.width * scale;
   const panelHeightPx = panel.height * scale;
-  const offsetX = BORDER_LEFT + PANEL_MARGIN_LEFT;
-  const offsetY = BORDER_BOTTOM + PANEL_MARGIN_BOTTOM;
 
   // Hilfsfunktion: mm → PDF-Koordinaten (skaliert mit dem gewählten Massstab)
   // toY ist invertiert: Panel Y=0 (oben im Canvas) → PDF oben, Y=panel.height (unten) → PDF unten
@@ -800,6 +841,39 @@ export async function generateDimensionDrawing(
   }
 
   // ----------------------------------------------------------------
+  // 6b. Badmarks einzeichnen (Quadrate — Amber-Farbe)
+  // ----------------------------------------------------------------
+  const BADMARK_COLOR = rgb(1.0, 0.757, 0.027); // 0xFFC107
+  for (const bm of panel.badmarks) {
+    const x = toX(bm.position.x);
+    const y = toY(bm.position.y);
+    const halfSize = (bm.size / 2) * scale;
+
+    // Gefülltes Quadrat
+    page.drawRectangle({
+      x: x - halfSize,
+      y: y - halfSize,
+      width: halfSize * 2,
+      height: halfSize * 2,
+      color: BADMARK_COLOR,
+      opacity: bm.isSyncCopy ? 0.5 : 1.0,
+    });
+
+    // Bei Master-Badmark: Zusätzliches Viereck (Ring)
+    if (bm.isMasterBadmark) {
+      const ringHalf = bm.size * 1.25 * scale;
+      page.drawRectangle({
+        x: x - ringHalf,
+        y: y - ringHalf,
+        width: ringHalf * 2,
+        height: ringHalf * 2,
+        borderColor: BADMARK_COLOR,
+        borderWidth: 0.5,
+      });
+    }
+  }
+
+  // ----------------------------------------------------------------
   // 7. Tooling Holes einzeichnen (nur Kreise + Kreuz — Labels sind jetzt in Ordinaten-Ticks)
   // ----------------------------------------------------------------
   for (const hole of panel.toolingHoles) {
@@ -827,11 +901,12 @@ export async function generateDimensionDrawing(
   // Farben exakt wie im Canvas (Hex → RGB)
   // Canvas: 0xcccccc, 0x888888, 0x3b82f6, 0xff69b4, 0x00cc66, 0xff6666, 0x00e5ff, 0xff9100
   const ORD_COLORS = {
-    panel:      rgb(0.8, 0.8, 0.8),         // 0xcccccc
-    frame:      rgb(0.533, 0.533, 0.533),    // 0x888888
+    panel:      rgb(0.3, 0.3, 0.3),         // Dunkelgrau, gut sichtbar beim Drucken
+    frame:      rgb(0.35, 0.35, 0.35),       // Dunkelgrau, gut sichtbar beim Drucken
     board:      rgb(0.231, 0.510, 0.965),    // 0x3b82f6
     vscore:     rgb(1.0, 0.412, 0.706),      // 0xff69b4
     fiducial:   rgb(0.0, 0.8, 0.4),          // 0x00cc66
+    badmark:    rgb(1.0, 0.757, 0.027),      // 0xFFC107
     toolinghole: rgb(1.0, 0.4, 0.4),         // 0xff6666
     routeBoard: rgb(0.0, 0.898, 1.0),        // 0x00e5ff
     routePanel: rgb(1.0, 0.569, 0.0),        // 0xff9100
@@ -896,6 +971,12 @@ export async function generateDimensionDrawing(
     addPdfPos(pdfYPositions, { value: fid.position.y, color: ORD_COLORS.fiducial, type: 'fiducial', key: `ord-y-fid-${fid.id}`, featureCanvasPos: { x: fid.position.x, y: fid.position.y } });
   }
 
+  // Badmarks
+  for (const bm of panel.badmarks) {
+    addPdfPos(pdfXPositions, { value: bm.position.x, color: ORD_COLORS.badmark, type: 'badmark', key: `ord-x-bm-${bm.id}`, featureCanvasPos: { x: bm.position.x, y: bm.position.y } });
+    addPdfPos(pdfYPositions, { value: bm.position.y, color: ORD_COLORS.badmark, type: 'badmark', key: `ord-y-bm-${bm.id}`, featureCanvasPos: { x: bm.position.x, y: bm.position.y } });
+  }
+
   // Tooling Holes
   for (const hole of panel.toolingHoles) {
     addPdfPos(pdfXPositions, { value: hole.position.x, color: ORD_COLORS.toolinghole, type: 'toolinghole', key: `ord-x-th-${hole.id}`, featureCanvasPos: { x: hole.position.x, y: hole.position.y } });
@@ -920,33 +1001,53 @@ export async function generateDimensionDrawing(
   pdfXPositions.sort((a, b) => a.value - b.value);
   pdfYPositions.sort((a, b) => a.value - b.value);
 
-  // Stagger-Levels
-  const pdfAssignStagger = (positions: PdfOrdinatePosition[], minSpacing: number = 3): number[] => {
+  // Spread-Positionen berechnen (Text entlang der Achse auseinanderschieben)
+  // minSpacing wird dynamisch an den Massstab angepasst, damit Texte auf dem
+  // Papier nie überlappen — egal ob 1:1, 1:2 oder 1:5
+  const defaultMinSpacing = Math.max(3, 2 * scaleRatio);
+  const pdfComputeSpread = (positions: PdfOrdinatePosition[], minSpacing: number = defaultMinSpacing): number[] => {
     if (positions.length === 0) return [];
-    const levels = new Array(positions.length).fill(0);
-    for (let i = 1; i < positions.length; i++) {
-      if (positions[i].value - positions[i - 1].value < minSpacing) {
-        levels[i] = (levels[i - 1] + 1) % 3;
-      } else {
-        levels[i] = 0;
+    const values = positions.map(p => p.value);
+    const adj = values.map(v => v);
+    // Vorwärts-Pass: Werte auseinanderschieben
+    for (let i = 1; i < adj.length; i++) {
+      if (adj[i] - adj[i - 1] < minSpacing) {
+        adj[i] = adj[i - 1] + minSpacing;
       }
     }
-    return levels;
+    // Rückwärts-Pass: Gruppen symmetrisch um Original-Mitte zentrieren
+    let gi = adj.length - 1;
+    while (gi >= 0) {
+      let groupStart = gi;
+      while (groupStart > 0 && adj[groupStart] - adj[groupStart - 1] <= minSpacing + 0.001) {
+        groupStart--;
+      }
+      if (groupStart < gi) {
+        const origCenter = (values[groupStart] + values[gi]) / 2;
+        const adjCenter = (adj[groupStart] + adj[gi]) / 2;
+        const shift = origCenter - adjCenter;
+        for (let j = groupStart; j <= gi; j++) {
+          adj[j] += shift;
+        }
+      }
+      gi = groupStart - 1;
+    }
+    return adj;
   };
 
-  const pdfXLevels = pdfAssignStagger(pdfXPositions);
-  const pdfYLevels = pdfAssignStagger(pdfYPositions);
+  const pdfXSpread = pdfComputeSpread(pdfXPositions);
+  const pdfYSpread = pdfComputeSpread(pdfYPositions);
 
-  // Achsen-Abstand
   // Achsen-Abstand zum Panel — mit scaleRatio kompensiert,
   // damit der Abstand auf dem Papier immer gleich aussieht
   const axisOff = panel.dimensionOverrides?.ordinateAxisOffset || { x: 10, y: 10 };
   const xAxisYmm = panel.height + axisOff.y * scaleRatio;  // Y-Position der X-Achse (mm)
   const yAxisXmm = -(axisOff.x * scaleRatio);              // X-Position der Y-Achse (mm)
-  // Tick-Länge und Stagger in mm — mit scaleRatio kompensiert,
+  // Tick-Länge und Jog-Parameter in mm — mit scaleRatio kompensiert,
   // damit sie auf dem Papier immer gleich gross erscheinen
   const tickLen = 1.5 * scaleRatio;       // mm (kompensiert)
-  const staggerStep = 5 * scaleRatio;    // mm pro Level (kompensiert)
+  const jogLen = 2 * scaleRatio;          // Diagonal-Jog Länge (kompensiert)
+  const pdfTextGap = 0.5 * scaleRatio;   // Abstand Jog-Ende → Text (kompensiert)
   const fontSize = 3.5;
 
   // Nullpunkt-Marker
@@ -967,43 +1068,50 @@ export async function generateDimensionDrawing(
   for (let i = 0; i < pdfXPositions.length; i++) {
     const pos = pdfXPositions[i];
     if (hiddenElements.has(pos.key)) continue;
-    const level = pdfXLevels[i];
-    const staggerOff = level * staggerStep;
-    const tickEndMm = xAxisYmm + tickLen + staggerOff;
+    const adjustedX = pdfXSpread[i];
+    const needsJog = Math.abs(adjustedX - pos.value) > 0.01;
+    const tickTopMm = xAxisYmm + tickLen; // Tick-Ende (unten)
 
     // Hilfslinie vom Feature zur Achse (gestrichelt, farbig)
     drawDashedLine(page, toX(pos.value), toY(pos.featureCanvasPos.y), toX(pos.value), toY(xAxisYmm), {
       color: pos.color, thickness: 0.2, dashLength: 2, gapLength: 2,
     });
 
-    // Tick-Mark
+    // Tick-Mark (an exakter Position)
     page.drawLine({
       start: { x: toX(pos.value), y: toY(xAxisYmm) },
-      end: { x: toX(pos.value), y: toY(xAxisYmm + tickLen) },
+      end: { x: toX(pos.value), y: toY(tickTopMm) },
       color: pos.color, thickness: 0.6,
     });
 
-    // Führungslinie bei Stagger
-    if (level > 0) {
+    let textXmm: number;
+    let textYmm: number;
+
+    if (needsJog) {
+      // Diagonal-Jog: Tick-Ende → verschobene X-Position
+      const jogEndMm = tickTopMm + jogLen;
       page.drawLine({
-        start: { x: toX(pos.value), y: toY(xAxisYmm + tickLen) },
-        end: { x: toX(pos.value), y: toY(tickEndMm) },
+        start: { x: toX(pos.value), y: toY(tickTopMm) },
+        end: { x: toX(adjustedX), y: toY(jogEndMm) },
         color: pos.color, thickness: 0.3,
       });
+      textXmm = adjustedX;
+      textYmm = jogEndMm + pdfTextGap;
+    } else {
+      // Kein Jog — Text direkt unter dem Tick
+      textXmm = pos.value;
+      textYmm = tickTopMm + pdfTextGap;
     }
 
-    // Wert-Text (rotiert 90° im PDF — senkrecht unter dem Tick)
+    // Wert-Text (90° rotiert = vertikal, Standard bei Ordinatenbemaßung)
     const txt = pos.value.toFixed(1);
     const txtW = font.widthOfTextAtSize(txt, fontSize);
-    // PDF Text: rotieren um -90° damit er senkrecht steht (liest man von rechts)
     page.drawText(txt, {
-      x: toX(pos.value) + fontSize * 0.35,
-      y: toY(tickEndMm + 0.5 * scaleRatio) - txtW,
+      x: toX(textXmm) + fontSize * 0.35,
+      y: toY(textYmm) - txtW,
       size: fontSize, font, color: pos.color,
-      rotate: { type: 'degrees' as any, angle: 0 } as any,
+      rotate: { type: 'degrees' as any, angle: 90 } as any,
     });
-    // Alternative: Text einfach vertikal platzieren ohne Rotation (lesbar horizontal)
-    // In der Praxis besser lesbar, da PDF-Viewer Rotation nicht immer korrekt darstellen
   }
 
   // Y-Achse (vertikal, links vom Panel)
@@ -1016,37 +1124,47 @@ export async function generateDimensionDrawing(
   for (let i = 0; i < pdfYPositions.length; i++) {
     const pos = pdfYPositions[i];
     if (hiddenElements.has(pos.key)) continue;
-    const level = pdfYLevels[i];
-    const staggerOff = level * staggerStep;
-    const tickEndMm = yAxisXmm - tickLen - staggerOff;
+    const adjustedY = pdfYSpread[i];
+    const needsJog = Math.abs(adjustedY - pos.value) > 0.01;
+    const tickEndXmm = yAxisXmm - tickLen; // Tick-Ende (links)
 
     // Hilfslinie vom Feature zur Achse (gestrichelt, farbig)
     drawDashedLine(page, toX(pos.featureCanvasPos.x), toY(pos.value), toX(yAxisXmm), toY(pos.value), {
       color: pos.color, thickness: 0.2, dashLength: 2, gapLength: 2,
     });
 
-    // Tick-Mark
+    // Tick-Mark (an exakter Position)
     page.drawLine({
       start: { x: toX(yAxisXmm), y: toY(pos.value) },
-      end: { x: toX(yAxisXmm - tickLen), y: toY(pos.value) },
+      end: { x: toX(tickEndXmm), y: toY(pos.value) },
       color: pos.color, thickness: 0.6,
     });
 
-    // Führungslinie bei Stagger
-    if (level > 0) {
+    let textXmm: number;
+    let textYmm: number;
+
+    if (needsJog) {
+      // Diagonal-Jog: Tick-Ende → verschobene Y-Position
+      const jogEndXmm = tickEndXmm - jogLen;
       page.drawLine({
-        start: { x: toX(yAxisXmm - tickLen), y: toY(pos.value) },
-        end: { x: toX(tickEndMm), y: toY(pos.value) },
+        start: { x: toX(tickEndXmm), y: toY(pos.value) },
+        end: { x: toX(jogEndXmm), y: toY(adjustedY) },
         color: pos.color, thickness: 0.3,
       });
+      textXmm = jogEndXmm - pdfTextGap;
+      textYmm = adjustedY;
+    } else {
+      // Kein Jog — Text direkt links vom Tick
+      textXmm = tickEndXmm - pdfTextGap;
+      textYmm = pos.value;
     }
 
-    // Wert-Text (horizontal, links vom Tick)
+    // Wert-Text (horizontal, links vom Tick/Jog — zeigt den echten Wert!)
     const txt = pos.value.toFixed(1);
     const txtW = font.widthOfTextAtSize(txt, fontSize);
     page.drawText(txt, {
-      x: toX(tickEndMm - 0.5 * scaleRatio) - txtW,
-      y: toY(pos.value) - fontSize * 0.35,
+      x: toX(textXmm) - txtW,
+      y: toY(textYmm) - fontSize * 0.35,
       size: fontSize, font, color: pos.color,
     });
   }
@@ -1055,7 +1173,7 @@ export async function generateDimensionDrawing(
   // 9. Detail-Legende (Farbcode + Detailparameter)
   // ----------------------------------------------------------------
   if (!hiddenElements.has('routing-legend')) {
-    type PdfLegendSymbol = 'line' | 'dashed' | 'fiducial' | 'hole' | 'routing';
+    type PdfLegendSymbol = 'line' | 'dashed' | 'fiducial' | 'badmark' | 'badmark-master' | 'hole' | 'routing' | 'radius';
     const allPdfEntries: Array<{ color: ReturnType<typeof rgb>; label: string; symbol: PdfLegendSymbol; toolDiameter?: number }> = [];
 
     // Farbcode-Erklärungen
@@ -1075,6 +1193,19 @@ export async function generateDimensionDrawing(
       const f = panel.fiducials[0];
       allPdfEntries.push({ color: ORD_COLORS.fiducial, label: `Fiducial: Pad Ø${f.padDiameter} / Mask Ø${f.maskDiameter}`, symbol: 'fiducial' });
     }
+    // Badmark Detail — separate Einträge für Master-Badmark und Board-Badmark
+    const masterBm = panel.badmarks.find(b => b.isMasterBadmark);
+    const boardBm = panel.badmarks.find(b => !b.isMasterBadmark && !b.isSyncCopy);
+    if (masterBm) {
+      allPdfEntries.push({ color: ORD_COLORS.badmark, label: `Master-Badmark: ${masterBm.size.toFixed(1)}mm`, symbol: 'badmark-master' });
+    }
+    if (boardBm) {
+      allPdfEntries.push({ color: ORD_COLORS.badmark, label: `Badmark: ${boardBm.size.toFixed(1)}mm`, symbol: 'badmark' });
+    }
+    // Eckenradius (wenn vorhanden)
+    if (panel.frame.cornerRadius && panel.frame.cornerRadius > 0) {
+      allPdfEntries.push({ color: ORD_COLORS.panel, label: `Eckenradius: R ${panel.frame.cornerRadius.toFixed(1)}`, symbol: 'radius' as PdfLegendSymbol });
+    }
     const pdfHoleTypes = new Map<string, string>();
     for (const h of panel.toolingHoles) {
       const k = `${h.diameter.toFixed(1)}-${h.plated}`;
@@ -1093,10 +1224,10 @@ export async function generateDimensionDrawing(
     Array.from(pdfRoutingTypes.values()).forEach(entry => allPdfEntries.push({ ...entry, symbol: 'routing' }));
 
     if (allPdfEntries.length > 0) {
-      const lineH = 5;
+      const lineH = 6;
       const legendPad = 3;
-      const legendW = 50;
-      const titleH = 5;
+      const legendW = 58;
+      const titleH = 6;
       const legendH = legendPad * 2 + allPdfEntries.length * lineH + titleH;
 
       // Legende: feste Grösse auf dem Papier (unabhängig vom Massstab)
@@ -1124,7 +1255,7 @@ export async function generateDimensionDrawing(
       page.drawText('Details', {
         x: lx + legendPad * legendScale,
         y: ly - (titleH - 1) * legendScale,
-        size: 4, font, color: rgb(0, 0, 0),
+        size: 5, font: fontBold, color: rgb(0, 0, 0),
       });
 
       allPdfEntries.forEach((entry, idx) => {
@@ -1136,6 +1267,35 @@ export async function generateDimensionDrawing(
         if (entry.symbol === 'fiducial') {
           page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 2, borderColor: entry.color, borderWidth: 0.6 });
           page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 0.8, color: entry.color });
+        } else if (entry.symbol === 'badmark-master') {
+          // Master-Badmark: gefülltes Quadrat + äußeres Viereck (Ring)
+          const halfSize = symR * 0.6;
+          const outerHalf = symR * 1.1;
+          page.drawRectangle({
+            x: symCenterX - halfSize,
+            y: lineCenterY - halfSize,
+            width: halfSize * 2,
+            height: halfSize * 2,
+            color: entry.color,
+          });
+          page.drawRectangle({
+            x: symCenterX - outerHalf,
+            y: lineCenterY - outerHalf,
+            width: outerHalf * 2,
+            height: outerHalf * 2,
+            borderColor: entry.color,
+            borderWidth: 0.6,
+          });
+        } else if (entry.symbol === 'badmark') {
+          // Board-Badmark: gefülltes Quadrat (ohne Ring)
+          const halfSize = symR * 0.8;
+          page.drawRectangle({
+            x: symCenterX - halfSize,
+            y: lineCenterY - halfSize,
+            width: halfSize * 2,
+            height: halfSize * 2,
+            color: entry.color,
+          });
         } else if (entry.symbol === 'hole') {
           page.drawCircle({ x: symCenterX, y: lineCenterY, size: symR * 2, borderColor: entry.color, borderWidth: 0.6 });
           page.drawLine({ start: { x: symCenterX - symR, y: lineCenterY }, end: { x: symCenterX + symR, y: lineCenterY }, color: entry.color, thickness: 0.5 });
@@ -1162,6 +1322,22 @@ export async function generateDimensionDrawing(
             end: { x: lineEndX, y: lineCenterY },
             color: entry.color, thickness: 0.8,
           });
+        } else if (entry.symbol === 'radius') {
+          // Eckenradius: Viertelkreis-Bogen als Symbol
+          const arcR = 1.5 * legendScale;
+          const arcCX = lx + (legendPad + 1) * legendScale;
+          const arcCY = lineCenterY - arcR * 0.3;
+          // PDF-Bogen: Approximation als 3 kurze Linien (Viertelkreis von 0° bis 90°)
+          const segments = 6;
+          for (let s = 0; s < segments; s++) {
+            const a0 = (s / segments) * (Math.PI / 2);
+            const a1 = ((s + 1) / segments) * (Math.PI / 2);
+            page.drawLine({
+              start: { x: arcCX + arcR * Math.cos(a0), y: arcCY + arcR * Math.sin(a0) },
+              end: { x: arcCX + arcR * Math.cos(a1), y: arcCY + arcR * Math.sin(a1) },
+              color: entry.color, thickness: 0.8,
+            });
+          }
         } else {
           page.drawLine({
             start: { x: lx + legendPad * legendScale, y: lineCenterY },
@@ -1170,7 +1346,7 @@ export async function generateDimensionDrawing(
           });
         }
 
-        const fontSize = 3.5;
+        const fontSize = 4.5;
         page.drawText(entry.label, {
           x: lx + (legendPad + 12) * legendScale,
           y: lineCenterY - fontSize * 0.35,
@@ -1519,191 +1695,310 @@ function drawTitleBlockISO(
   options: DrawingOptions,
   scaleRatio: number
 ) {
+  // ========================================================================
+  // Titelblock nach VSM / SN EN ISO 7200
+  //
+  // Aufbau (180mm breit, ~46mm hoch):
+  //
+  // VERWALTUNGSZONE (links, 78mm)      | IDENTIFIKATIONSZONE (rechts, 102mm)
+  // ────────────────────────────────────┼────────────────────────────────────
+  // Gezeichn.  │ Datum │ Name          │  BENENNUNG (Titel)
+  // ───────────┼───────┼───────────────┤  (Panel-Name, gross)
+  // Freigabe   │ Datum │ Name          │  ZEICHNUNGS-NR.
+  // ───────────┴───────┴───────┬───────┼──────┬──────┬──────┬───────────────
+  // (Urspr.)   │ FIRMA / LOGO │Masst. │Format│Blatt │Bl.Anz│
+  // ========================================================================
+
   const x = TITLE_BLOCK_X;
   const y = TITLE_BLOCK_Y;
   const w = TITLE_BLOCK_WIDTH;
   const h = TITLE_BLOCK_HEIGHT;
 
-  // Äußerer Rahmen des Titelblocks
+  // Hilfsfunktion: mm → PDF-Punkte (relativ)
+  const mm = (v: number) => v * MM_TO_PT;
+
+  // ---- Liniendicken gemäss VSM ----
+  const OUTER_LINE = 0.7;     // Aussenrahmen
+  const MAIN_LINE = 0.35;     // Hauptfeldtrennlinien
+  const SUB_LINE = 0.18;      // Unterfeldtrennlinien
+
+  // ---- Äusserer Rahmen (dicke Linie, VSM-konform) ----
   page.drawRectangle({
     x, y, width: w, height: h,
     borderColor: COLORS.black,
-    borderWidth: 1,
+    borderWidth: OUTER_LINE,
   });
 
-  // ---- Zeilen-Höhen (von oben nach unten) ----
-  const row1H = 30;   // Issue / AP-No / Date / Name / Titel
-  const row2H = 15;   // Approved
-  const row3H = 38;   // Client / Company / Logo
-  const row4H = 15;   // Zeichnungsnummer
-  const row5H = 15;   // Associated Docs
-  // Gesamt: 113 (rest für Feinabstimmung via TITLE_BLOCK_HEIGHT)
+  // ====================================================================
+  // ZEILEN-LAYOUT (von oben nach unten, Höhen in mm)
+  // ====================================================================
+  const rowH1 = mm(10);    // Zeile 1: Gezeichnet (etwas mehr Platz)
+  const rowH2 = mm(10);    // Zeile 2: Freigegeben
+  const rowH4 = mm(14);    // Zeile 3: Firma / Massstab / Format / Blatt
+  // Resthohe verteilt sich auf Feinabstimmung / untere Kante
 
-  const row1Y = y + h - row1H;
-  const row2Y = row1Y - row2H;
-  const row3Y = row2Y - row3H;
-  const row4Y = row3Y - row4H;
-  const row5Y = row4Y - row5H;
+  // Y-Koordinaten der Zeilengrenzen (PDF: y=0 unten)
+  const rowTop  = y + h;                // Oberkante Titelblock
+  const row1Bot = rowTop - rowH1;       // Unterkante Zeile 1 (Gezeichnet)
+  const row2Bot = row1Bot - rowH2;      // Unterkante Zeile 2 (Freigegeben)
+  const row3Bot = row2Bot;              // Alias: row3Bot = row2Bot (keine Geprüft-Zeile mehr)
+  const row4Bot = row3Bot - rowH4;      // Unterkante Zeile 3 (Firma etc.)
 
-  // Horizontale Trennlinien
-  page.drawLine({ start: { x, y: row1Y }, end: { x: x + w, y: row1Y }, color: COLORS.black, thickness: 0.5 });
-  page.drawLine({ start: { x, y: row2Y }, end: { x: x + w, y: row2Y }, color: COLORS.black, thickness: 0.5 });
-  page.drawLine({ start: { x, y: row3Y }, end: { x: x + w, y: row3Y }, color: COLORS.black, thickness: 0.5 });
-  page.drawLine({ start: { x, y: row4Y }, end: { x: x + w, y: row4Y }, color: COLORS.black, thickness: 0.5 });
+  // ====================================================================
+  // SPALTEN-LAYOUT (VSM-Verwaltungszone links, Identifikationszone rechts)
+  // ====================================================================
+  // Verwaltungszone (links): 3 Spalten
+  const labelW = mm(28);    // Spalte "Label" (Gezeichn./Freigabe)
+  const dateW  = mm(22);    // Spalte "Datum"
+  const nameW  = mm(28);    // Spalte "Name"
+  const leftZoneW = labelW + dateW + nameW;  // = 78mm
 
-  // ---- ZEILE 1: Issue / AP / Date / Name / Titel ----
-  const col1W = 40;   // Issue
-  const col2W = 50;   // AP-No.
-  const col3W = 42;   // Date
-  const col4W = 42;   // Name
-  const col5W = w - col1W - col2W - col3W - col4W; // Titel (Rest)
+  // Identifikationszone (rechts): Rest
+  const rightZoneW = w - leftZoneW;  // = 102mm
 
-  // Vertikale Trennlinien in Zeile 1
-  const col1X = x;
-  const col2X = x + col1W;
-  const col3X = col2X + col2W;
-  const col4X = col3X + col3W;
-  const col5X = col4X + col4W;
+  // X-Koordinaten der Spaltentrennungen
+  const colLabel = x;                     // Linke Kante (Label)
+  const colDate  = x + labelW;            // Datum-Spalte
+  const colName  = colDate + dateW;        // Name-Spalte
+  const colRight = colName + nameW;        // Beginn rechte Zone (Benennung/Zeichn.Nr.)
 
-  page.drawLine({ start: { x: col2X, y: y + h }, end: { x: col2X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
-  page.drawLine({ start: { x: col3X, y: y + h }, end: { x: col3X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
-  page.drawLine({ start: { x: col4X, y: y + h }, end: { x: col4X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
-  page.drawLine({ start: { x: col5X, y: y + h }, end: { x: col5X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
+  // ====================================================================
+  // HORIZONTALE TRENNLINIEN (Hauptlinien)
+  // ====================================================================
+  page.drawLine({ start: { x, y: row1Bot }, end: { x: x + w, y: row1Bot }, color: COLORS.black, thickness: MAIN_LINE });
+  page.drawLine({ start: { x, y: row2Bot }, end: { x: x + w, y: row2Bot }, color: COLORS.black, thickness: MAIN_LINE });
 
-  // Header-Labels (Zeile 1 oben)
-  const headerY = y + h - 8;
-  page.drawText('Issue', { x: col1X + 2, y: headerY, size: 4.5, font, color: COLORS.gray });
-  page.drawText('AP-No.', { x: col2X + 2, y: headerY, size: 4.5, font, color: COLORS.gray });
-  page.drawText('Date', { x: col3X + 2, y: headerY, size: 4.5, font, color: COLORS.gray });
-  page.drawText('Name', { x: col4X + 2, y: headerY, size: 4.5, font, color: COLORS.gray });
+  // ====================================================================
+  // VERTIKALE TRENNLINIEN
+  // ====================================================================
+  // Verwaltungszone: Datum / Name Spalten (Zeile 1-2)
+  page.drawLine({ start: { x: colDate, y: rowTop }, end: { x: colDate, y: row2Bot }, color: COLORS.black, thickness: SUB_LINE });
+  page.drawLine({ start: { x: colName, y: rowTop }, end: { x: colName, y: row2Bot }, color: COLORS.black, thickness: SUB_LINE });
+  // Haupttrennung: Verwaltungszone | Identifikationszone (ganze Höhe)
+  page.drawLine({ start: { x: colRight, y: rowTop }, end: { x: colRight, y: y }, color: COLORS.black, thickness: MAIN_LINE });
 
-  // Werte Zeile 1 (Gezeichnet von)
+  // ====================================================================
+  // ZEILE 1: GEZEICHNET (oben)
+  // ====================================================================
+  const labelSize = 5;        // Schriftgrösse für Labels
+  const valueSize = 7;        // Schriftgrösse für Werte (vergrössert)
+  const labelColor = COLORS.gray;
+  const valueColor = COLORS.black;
+  const labelPad = 3;         // Abstand vom linken Zellenrand
   const drawnDate = options.date || new Date().toLocaleDateString('de-CH');
-  const drawnBy = options.drawnBy || 'PCB';
-  page.drawText(options.issueNumber || '01', { x: col1X + 2, y: headerY - 11, size: 6, font: fontBold, color: COLORS.black });
-  page.drawText(options.apNumber || '', { x: col2X + 2, y: headerY - 11, size: 6, font, color: COLORS.black });
-  page.drawText(drawnDate, { x: col3X + 2, y: headerY - 11, size: 5, font, color: COLORS.black });
-  page.drawText(drawnBy, { x: col4X + 2, y: headerY - 11, size: 6, font, color: COLORS.black });
+  const drawnBy = options.drawnBy || '';
 
-  // Titel-Bereich (rechte große Zelle)
+  // Hilfsfunktion: Text horizontal und vertikal mittig in einer Zelle
+  const drawCenteredInCell = (
+    text: string, cellX: number, cellW: number, cellBotY: number, cellH: number,
+    size: number, usedFont: PDFFont, color: ReturnType<typeof rgb>
+  ) => {
+    const textWidth = usedFont.widthOfTextAtSize(text, size);
+    const cx = cellX + (cellW - textWidth) / 2;
+    const cy = cellBotY + (cellH - size * 0.75) / 2; // 0.75 = Offset für Baseline
+    page.drawText(text, { x: cx, y: cy, size, font: usedFont, color });
+  };
+
+  // Label "Gezeichn." (oben links in der Zelle)
+  page.drawText('Gezeichn.', {
+    x: colLabel + labelPad, y: rowTop - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  // Datum — mittig in Datum-Zelle
+  drawCenteredInCell(drawnDate, colDate, dateW, row1Bot, rowH1, valueSize, font, valueColor);
+  // Name — mittig in Name-Zelle (fett)
+  drawCenteredInCell(drawnBy, colName, nameW, row1Bot, rowH1, valueSize, fontBold, valueColor);
+
+  // ====================================================================
+  // ZEILE 2: FREIGEGEBEN
+  // ====================================================================
+  const approvedBy = options.approvedBy || '';
+
+  // Label "Freigabe" (oben links in der Zelle)
+  page.drawText('Freigabe', {
+    x: colLabel + labelPad, y: row1Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  // Datum — mittig in Datum-Zelle (nur wenn Freigeber vorhanden)
+  if (approvedBy) {
+    drawCenteredInCell(drawnDate, colDate, dateW, row2Bot, rowH2, valueSize, font, valueColor);
+  }
+  // Name — mittig in Name-Zelle (fett)
+  drawCenteredInCell(approvedBy, colName, nameW, row2Bot, rowH2, valueSize, fontBold, valueColor);
+
+  // ====================================================================
+  // IDENTIFIKATIONSZONE RECHTS: BENENNUNG (Zeile 1+2, grosses Feld)
+  // ====================================================================
   const titleText = options.title || options.projectName || panel.name;
+  // Benennung-Label (klein, oben)
+  page.drawText('Benennung', {
+    x: colRight + labelPad, y: rowTop - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  // Titel gross und fett
   page.drawText(titleText, {
-    x: col5X + 4,
-    y: y + h - 12,
-    size: 7.5,
-    font: fontBold,
-    color: COLORS.black,
+    x: colRight + labelPad, y: rowTop - mm(8),
+    size: 9, font: fontBold, color: valueColor,
   });
 
-  // Array-Info unter dem Titel
-  if (instances.length > 1) {
-    const xs = Array.from(new Set(instances.map(i => Math.round(i.position.x * 10) / 10))).sort((a, b) => a - b);
-    const ys = Array.from(new Set(instances.map(i => Math.round(i.position.y * 10) / 10))).sort((a, b) => a - b);
-    page.drawText(`Panel ${xs.length}x${ys.length}`, {
-      x: col5X + 4,
-      y: y + h - 22,
-      size: 6,
-      font,
-      color: COLORS.gray,
+  // ====================================================================
+  // IDENTIFIKATIONSZONE RECHTS: ZEICHNUNGS-NR. (Zeile 2, rechte Seite)
+  // ====================================================================
+  const drawingNum = options.drawingNumber || '';
+  // Label
+  page.drawText('Zeichnungs-Nr.', {
+    x: colRight + labelPad, y: row1Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  // Zeichnungsnummer gross und fett
+  if (drawingNum) {
+    page.drawText(drawingNum, {
+      x: colRight + labelPad, y: row1Bot - mm(8),
+      size: 9, font: fontBold, color: valueColor,
     });
   }
 
-  // ---- ZEILE 2: Approved ----
-  // Trennlinien in Zeile 2 (gleiche Spalten wie Zeile 1)
-  page.drawLine({ start: { x: col2X, y: row1Y }, end: { x: col2X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
-  page.drawLine({ start: { x: col3X, y: row1Y }, end: { x: col3X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
-  page.drawLine({ start: { x: col4X, y: row1Y }, end: { x: col4X, y: row2Y }, color: COLORS.black, thickness: 0.3 });
+  // ====================================================================
+  // ZEILE 4: FIRMA / LOGO / MASSSTAB / FORMAT / BLATT (unterste Zeile)
+  // ====================================================================
+  // Horizontale Trennlinie über Zeile 3 ist bereits gezeichnet (row2Bot)
 
-  page.drawText('Approved', { x: col1X + 2, y: row1Y + 4, size: 4.5, font, color: COLORS.gray });
-  page.drawText(drawnDate, { x: col2X + 2, y: row1Y + 4, size: 4.5, font, color: COLORS.black });
-  page.drawText(options.approvedBy || '', { x: col3X + 2, y: row1Y + 4, size: 5, font, color: COLORS.black });
+  // Spaltenaufteilung Zeile 4:
+  //  [Firma/Logo ~56mm] | [Massstab ~24mm] | [Format ~24mm] | [Blatt ~24mm] | [Bl.Anz ~24mm]
+  // Diese 5 Sub-Spalten teilen nur die LINKE Verwaltungszone + rechte Zone auf
+  const z4LogoW  = leftZoneW;                      // Logo nimmt ganze linke Zone ein
+  const z4SubW   = rightZoneW / 4;                  // 4 gleiche Sub-Spalten rechts
 
-  // ---- ZEILE 3: Client / Company + Logo ----
-  const leftColW = w / 2;
-  const rightColW = w - leftColW;
-  const midX = x + leftColW;
+  const z4LogoX  = x;
+  const z4Col1X  = colRight;                         // Massstab
+  const z4Col2X  = z4Col1X + z4SubW;                 // Format
+  const z4Col3X  = z4Col2X + z4SubW;                 // Blatt
+  const z4Col4X  = z4Col3X + z4SubW;                 // Bl.Anz.
 
-  // Vertikale Trennlinie
-  page.drawLine({ start: { x: midX, y: row2Y }, end: { x: midX, y: row3Y }, color: COLORS.black, thickness: 0.3 });
+  // Vertikale Trennlinien in Zeile 4
+  page.drawLine({ start: { x: z4Col1X, y: row3Bot }, end: { x: z4Col1X, y: row4Bot }, color: COLORS.black, thickness: MAIN_LINE });
+  page.drawLine({ start: { x: z4Col2X, y: row3Bot }, end: { x: z4Col2X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
+  page.drawLine({ start: { x: z4Col3X, y: row3Bot }, end: { x: z4Col3X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
+  page.drawLine({ start: { x: z4Col4X, y: row3Bot }, end: { x: z4Col4X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
 
-  // Linke Seite: Client, Format, Scale
-  page.drawText('Client', { x: x + 2, y: row2Y - 9, size: 4.5, font, color: COLORS.gray });
-  page.drawText(options.client || '', { x: x + 30, y: row2Y - 9, size: 5, font: fontBold, color: COLORS.black });
+  // Untere Trennlinie (falls row4Bot > y, d.h. es gibt noch Restplatz unten)
+  if (row4Bot > y + 1) {
+    page.drawLine({ start: { x, y: row4Bot }, end: { x: x + w, y: row4Bot }, color: COLORS.black, thickness: MAIN_LINE });
+  }
 
-  page.drawText('Format:', { x: x + 2, y: row2Y - 19, size: 4.5, font, color: COLORS.gray });
-  // Dynamisches Format: A4 wenn Standardgröße, sonst mm-Angabe
-  const formatLabel = (PAGE_WIDTH <= 842 && PAGE_HEIGHT <= 596) ? 'A4' :
-    `${Math.round(PAGE_WIDTH / MM_TO_PT)}×${Math.round(PAGE_HEIGHT / MM_TO_PT)} mm`;
-  page.drawText(formatLabel, { x: x + 30, y: row2Y - 19, size: 5, font: fontBold, color: COLORS.black });
-
-  page.drawText('Scale:', { x: x + 2, y: row2Y - 29, size: 4.5, font, color: COLORS.gray });
-  page.drawText(`1:${scaleRatio}`, { x: x + 30, y: row2Y - 29, size: 5, font: fontBold, color: COLORS.black });
-
-  // Rechte Seite: SMTEC Logo (zentriert in der Zelle)
+  // ---- Firma / Logo (linke Zone, Zeile 4) ----
   if (logoImage) {
-    // Logo-Originalgröße für Seitenverhältnis
+    // Logo-Originalgrösse für Seitenverhältnis
     const logoDim = logoImage.scale(1);
     const logoAspect = logoDim.width / logoDim.height;
-    // Logo so groß wie möglich in die Zelle einpassen (mit Padding)
-    const cellPadX = 6;
-    const cellPadY = 4;
-    const maxLogoW = rightColW - cellPadX * 2;
-    const maxLogoH = row3H - cellPadY * 2;
-    // Seitenverhältnis beibehalten: breiter Aspekt → Breite limitiert
+    const cellPad = 4;
+    const maxLogoW = z4LogoW - cellPad * 2;
+    const maxLogoH = rowH4 - cellPad * 2;
     let logoW = maxLogoW;
     let logoH = logoW / logoAspect;
     if (logoH > maxLogoH) {
       logoH = maxLogoH;
       logoW = logoH * logoAspect;
     }
-    // Zentriert in der rechten Zelle platzieren
-    const logoX = midX + (rightColW - logoW) / 2;
-    const logoY = row3Y + (row3H - logoH) / 2;
-    page.drawImage(logoImage, {
-      x: logoX, y: logoY,
-      width: logoW, height: logoH,
-    });
+    // Zentriert in der Zelle
+    const logoX = z4LogoX + (z4LogoW - logoW) / 2;
+    const logoY = row4Bot + (rowH4 - logoH) / 2;
+    page.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
   } else {
-    // Fallback ohne Logo: Firmenname als Text
+    // Fallback: Firmenname als Text
     page.drawText('SMTEC AG', {
-      x: midX + 4,
-      y: row2Y - 14,
-      size: 11,
-      font: fontBold,
-      color: COLORS.black,
+      x: z4LogoX + labelPad, y: row3Bot - mm(5),
+      size: 9, font: fontBold, color: valueColor,
     });
     page.drawText('Electronic Solution', {
-      x: midX + 4,
-      y: row2Y - 26,
-      size: 6,
-      font,
-      color: rgb(0.1, 0.4, 0.85),
+      x: z4LogoX + labelPad, y: row3Bot - mm(9),
+      size: 5, font, color: rgb(0.1, 0.4, 0.85),
     });
   }
 
-  // ---- ZEILE 4: Zeichnungsnummer ----
-  page.drawText('Drawing No.', { x: x + 2, y: row3Y + row4H - 6, size: 4.5, font, color: COLORS.gray });
-  const drawingNum = options.drawingNumber || '';
-  if (drawingNum) {
-    page.drawText(drawingNum, {
-      x: x + 50,
-      y: row3Y + 3,
-      size: 7.5,
-      font: fontBold,
-      color: COLORS.black,
-    });
-  }
-
-  // ---- ZEILE 5 (unterstes Feld): Sheet x/y ----
-  const sheetText = `Sheet ${options.sheetNumber || 1} of ${options.totalSheets || 1}`;
-  const sheetWidth = font.widthOfTextAtSize(sheetText, 5.5);
-  page.drawText(sheetText, {
-    x: x + w - sheetWidth - 4,
-    y: row4Y + 3,
-    size: 5.5,
-    font,
-    color: COLORS.black,
+  // ---- Massstab ----
+  // Korrektes Label: scaleRatio < 1 = Vergrösserung (z.B. 0.5 → "2:1"),
+  //                  scaleRatio = 1 → "1:1",
+  //                  scaleRatio > 1 = Verkleinerung (z.B. 2 → "1:2")
+  // Vergrösserungsfaktor sauber formatieren (z.B. 1.5, 2, 5 — ohne unnötige Nullen)
+  const fmtRatio = (v: number) => Number.isInteger(v) ? `${v}` : `${parseFloat(v.toFixed(1))}`;
+  const scaleLabel = scaleRatio < 1
+    ? `${fmtRatio(1 / scaleRatio)}:1`     // Vergrösserung, z.B. "2:1", "1.5:1"
+    : scaleRatio === 1
+      ? '1:1'
+      : `1:${fmtRatio(scaleRatio)}`;      // Verkleinerung, z.B. "1:2", "1:1.5"
+  page.drawText('Massstab', {
+    x: z4Col1X + labelPad, y: row3Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
   });
+  page.drawText(scaleLabel, {
+    x: z4Col1X + labelPad, y: row3Bot - mm(9),
+    size: 8, font: fontBold, color: valueColor,
+  });
+
+  // ---- Format ----
+  page.drawText('Format', {
+    x: z4Col2X + labelPad, y: row3Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  // Dynamisch: A4 / A3 / custom
+  const pageWmm = Math.round(PAGE_WIDTH / MM_TO_PT);
+  const pageHmm = Math.round(PAGE_HEIGHT / MM_TO_PT);
+  let formatLabel = `${pageWmm}x${pageHmm}`;
+  if (pageWmm === 297 && pageHmm === 210) formatLabel = 'A4';
+  else if (pageWmm === 420 && pageHmm === 297) formatLabel = 'A3';
+  page.drawText(formatLabel, {
+    x: z4Col2X + labelPad, y: row3Bot - mm(9),
+    size: 7, font: fontBold, color: valueColor,
+  });
+
+  // ---- Blatt ----
+  page.drawText('Blatt', {
+    x: z4Col3X + labelPad, y: row3Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  page.drawText(`${options.sheetNumber || 1}`, {
+    x: z4Col3X + labelPad, y: row3Bot - mm(9),
+    size: 8, font: fontBold, color: valueColor,
+  });
+
+  // ---- Blatt-Anzahl ----
+  page.drawText('Bl. Anz.', {
+    x: z4Col4X + labelPad, y: row3Bot - mm(3.5),
+    size: labelSize, font, color: labelColor,
+  });
+  page.drawText(`${options.totalSheets || 1}`, {
+    x: z4Col4X + labelPad, y: row3Bot - mm(9),
+    size: 8, font: fontBold, color: valueColor,
+  });
+
+  // ====================================================================
+  // RESTBEREICH (unter Zeile 4, falls Platz vorhanden): Ausgabe-Nr.
+  // ====================================================================
+  if (row4Bot > y + mm(2)) {
+    const restH = row4Bot - y;
+    // Ausgabe-Nr. links
+    page.drawText('Ausgabe', {
+      x: x + labelPad, y: y + restH / 2 - 1,
+      size: 4, font, color: labelColor,
+    });
+    page.drawText(options.issueNumber || '01', {
+      x: x + mm(15), y: y + restH / 2 - 1,
+      size: 5.5, font: fontBold, color: valueColor,
+    });
+
+    // Panel-Dimensionen rechts unten
+    let dimText = `${panel.width.toFixed(1)} x ${panel.height.toFixed(1)} mm`;
+    if (instances.length > 1) {
+      const xs = Array.from(new Set(instances.map(i => Math.round(i.position.x * 10) / 10))).sort((a, b) => a - b);
+      const ys = Array.from(new Set(instances.map(i => Math.round(i.position.y * 10) / 10))).sort((a, b) => a - b);
+      dimText = `Panel ${xs.length} x ${ys.length}  (${dimText})`;
+    }
+    page.drawText(dimText, {
+      x: colRight + labelPad, y: y + restH / 2 - 1,
+      size: 5, font, color: labelColor,
+    });
+  }
 }
 
 // ============================================================================
@@ -1868,17 +2163,56 @@ function drawElementDescriptions(
     });
   }
 
-  // ---- Eckenradius ----
-  if (options.cornerRadius && options.cornerRadius > 0) {
-    page.drawText(`R=${options.cornerRadius.toFixed(1)}mm`, {
-      x: toX(0) - 5, y: toY(0) + 5,
-      size: smallSize, font, color: COLORS.black,
-    });
-  } else if (panel.frame.cornerRadius && panel.frame.cornerRadius > 0) {
-    page.drawText(`R=${panel.frame.cornerRadius.toFixed(1)}mm`, {
-      x: toX(0) - 5, y: toY(0) + 5,
-      size: smallSize, font, color: COLORS.black,
-    });
+  // ---- Eckenradius-Bemaßung (Führungslinie + R-Wert an der oberen linken Ecke) ----
+  {
+    const cr = panel.frame.cornerRadius || 0;
+    if (cr > 0) {
+      // Punkt auf dem Bogen (45°-Position der oberen linken Ecke)
+      // Bogenzentrum bei (cr, cr) vom Panel-Ursprung, Bogen von 180° bis 270°
+      // 45°-Mitte = 225° = 5*PI/4
+      const angle = (5 * Math.PI) / 4;
+      const arcPtX = cr + cr * Math.cos(angle); // mm
+      const arcPtY = cr + cr * Math.sin(angle); // mm (Panel-Y: 0=oben)
+
+      // Führungslinie: vom Bogen nach links oben raus
+      const leaderEndX = arcPtX - cr * 0.8;
+      const leaderEndY = arcPtY - cr * 0.8;
+
+      // In PDF-Koordinaten umrechnen
+      const pdfArcX = toX(arcPtX);
+      const pdfArcY = toY(arcPtY);
+      const pdfEndX = toX(leaderEndX);
+      const pdfEndY = toY(leaderEndY);
+
+      // Führungslinie
+      page.drawLine({
+        start: { x: pdfArcX, y: pdfArcY },
+        end: { x: pdfEndX, y: pdfEndY },
+        color: rgb(0.3, 0.3, 0.3), thickness: 0.5,
+      });
+
+      // Pfeilspitze am Bogen-Ende
+      const arrowLen = 2 * MM_TO_PT; // 2mm Pfeil
+      const arrowAngle = Math.atan2(pdfArcY - pdfEndY, pdfArcX - pdfEndX);
+      const a1 = arrowAngle + 0.4;
+      const a2 = arrowAngle - 0.4;
+      page.drawLine({
+        start: { x: pdfArcX, y: pdfArcY },
+        end: { x: pdfArcX - arrowLen * Math.cos(a1), y: pdfArcY - arrowLen * Math.sin(a1) },
+        color: rgb(0.3, 0.3, 0.3), thickness: 0.5,
+      });
+      page.drawLine({
+        start: { x: pdfArcX, y: pdfArcY },
+        end: { x: pdfArcX - arrowLen * Math.cos(a2), y: pdfArcY - arrowLen * Math.sin(a2) },
+        color: rgb(0.3, 0.3, 0.3), thickness: 0.5,
+      });
+
+      // Text "R X.X" am Ende der Führungslinie
+      page.drawText(`R ${cr.toFixed(1)}`, {
+        x: pdfEndX - 12 * MM_TO_PT, y: pdfEndY + 1,
+        size: 5, font: fontBold, color: rgb(0.2, 0.2, 0.2),
+      });
+    }
   }
 
   // ---- Fräskonturen-Legende ----

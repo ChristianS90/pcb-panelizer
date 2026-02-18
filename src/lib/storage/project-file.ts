@@ -16,6 +16,12 @@ import {
   extractBoardOutline,
   calculateCombinedBoundingBox,
 } from '@/lib/gerber/parser';
+import { saveAs } from 'file-saver';
+import {
+  getCurrentFileHandle,
+  setCurrentFileHandle,
+  isFileSystemAccessSupported,
+} from './file-handle';
 
 // Aktuelle Version des Dateiformats (für zukünftige Kompatibilität)
 const FORMAT_VERSION = '1.0.0';
@@ -198,4 +204,154 @@ export async function deserializeProject(
     panel,
     settings: projectFile.settings,
   };
+}
+
+// ============================================================================
+// Speichern (Ctrl+S) — Direkt ueberschreiben wenn Handle vorhanden
+// ============================================================================
+
+/**
+ * Die erlaubten Dateitypen fuer den Speichern-Dialog.
+ * Wird von saveProjectAs() und openProjectWithHandle() verwendet.
+ */
+const PANELIZER_FILE_TYPES: FilePickerAcceptType[] = [
+  {
+    description: 'Panelizer Projekt',
+    accept: { 'application/json': ['.panelizer.json', '.json'] },
+  },
+];
+
+/**
+ * Speichert das Projekt — wie "Ctrl+S" in Word/Excel.
+ *
+ * Verhalten:
+ * - Wenn schon ein File-Handle vorhanden ist (d.h. die Datei wurde schon
+ *   einmal gespeichert oder geoeffnet): Direkt in die gleiche Datei schreiben.
+ *   Kein Dialog, kein Nachfragen — einfach ueberschreiben.
+ * - Wenn KEIN Handle vorhanden ist (neue Datei): Automatisch den
+ *   "Speichern unter"-Dialog oeffnen (wie Word bei einer neuen Datei).
+ *
+ * @param panel - Das aktuelle Panel aus dem Store
+ * @param settings - Die aktuellen Einstellungen (Einheit, Grid)
+ */
+export async function saveProject(
+  panel: Panel,
+  settings: { unit: Unit; grid: GridConfig }
+): Promise<void> {
+  const handle = getCurrentFileHandle();
+
+  if (handle) {
+    // Handle vorhanden → direkt in die Datei schreiben (kein Dialog!)
+    // Das ist der "Speichern"-Fall (wie Ctrl+S wenn Datei schon offen)
+    const jsonString = serializeProject(panel, settings);
+    const writable = await handle.createWritable();
+    await writable.write(jsonString);
+    await writable.close();
+    console.log('Projekt gespeichert (direkt):', handle.name);
+  } else {
+    // Kein Handle → "Speichern unter"-Dialog oeffnen
+    // Das passiert bei einer neuen Datei (noch nie gespeichert)
+    await saveProjectAs(panel, settings);
+  }
+}
+
+// ============================================================================
+// Speichern unter (Ctrl+Shift+S) — IMMER Dialog oeffnen
+// ============================================================================
+
+/**
+ * Speichert das Projekt mit "Speichern unter"-Dialog — wie "Ctrl+Shift+S".
+ *
+ * Verhalten:
+ * - Oeffnet IMMER den Datei-Dialog, auch wenn schon ein Handle existiert.
+ * - Der Benutzer waehlt Ort und Dateinamen.
+ * - Nach dem Speichern wird der neue Handle gesetzt, damit folgende
+ *   Ctrl+S-Aufrufe in die NEUE Datei schreiben.
+ *
+ * Fallback: Wenn die File System Access API nicht verfuegbar ist
+ * (z.B. in Firefox), wird die alte Download-Methode (file-saver) verwendet.
+ *
+ * @param panel - Das aktuelle Panel aus dem Store
+ * @param settings - Die aktuellen Einstellungen (Einheit, Grid)
+ */
+export async function saveProjectAs(
+  panel: Panel,
+  settings: { unit: Unit; grid: GridConfig }
+): Promise<void> {
+  // Panel-Daten serialisieren
+  const jsonString = serializeProject(panel, settings);
+
+  // Sicherer Dateiname erstellen (Sonderzeichen entfernen)
+  const safeName = panel.name.replace(/[^a-zA-Z0-9äöüÄÖÜß_\-]/g, '_');
+
+  if (isFileSystemAccessSupported()) {
+    // --- Chrome/Edge: File System Access API verwenden ---
+    // Oeffnet den nativen "Speichern unter"-Dialog des Betriebssystems
+    const handle = await window.showSaveFilePicker!({
+      suggestedName: `${safeName}.panelizer.json`,
+      types: PANELIZER_FILE_TYPES,
+    });
+
+    // In die ausgewaehlte Datei schreiben
+    const writable = await handle.createWritable();
+    await writable.write(jsonString);
+    await writable.close();
+
+    // Handle merken → naechstes Ctrl+S schreibt direkt in DIESE Datei
+    setCurrentFileHandle(handle, handle.name);
+    console.log('Projekt gespeichert unter:', handle.name);
+  } else {
+    // --- Fallback fuer Firefox/Safari: Klassischer Download ---
+    // Hier kann kein Handle gesetzt werden, da die API fehlt.
+    // Jedes Speichern loest einen Download aus.
+    const blob = new Blob([jsonString], { type: 'application/json' });
+    const filename = `${safeName}.panelizer.json`;
+    saveAs(blob, filename);
+    console.log('Projekt heruntergeladen (Fallback):', filename);
+  }
+}
+
+// ============================================================================
+// Oeffnen mit Handle — Datei oeffnen UND Handle merken
+// ============================================================================
+
+/**
+ * Oeffnet eine Projektdatei ueber den nativen "Datei oeffnen"-Dialog
+ * und merkt sich den File-Handle.
+ *
+ * Das ist der Unterschied zum bisherigen Oeffnen:
+ * - Bisher: Datei wird als Upload gelesen → kein Handle → Ctrl+S loest Download aus
+ * - Neu: Datei wird mit showOpenFilePicker geoeffnet → Handle gespeichert →
+ *   Ctrl+S schreibt ZURUECK in dieselbe Datei (wie in Word!)
+ *
+ * @returns Das deserialisierte Projekt (Panel + Settings) oder null bei Abbruch
+ */
+export async function openProjectWithHandle(): Promise<{
+  panel: Panel;
+  settings: { unit: Unit; grid: GridConfig };
+} | null> {
+  if (!isFileSystemAccessSupported()) {
+    // API nicht verfuegbar → null zurueckgeben, damit der Aufrufer
+    // auf den klassischen File-Input zurueckfaellt
+    return null;
+  }
+
+  // Nativen "Datei oeffnen"-Dialog anzeigen
+  const [handle] = await window.showOpenFilePicker!({
+    types: PANELIZER_FILE_TYPES,
+    multiple: false, // Nur eine Datei
+  });
+
+  // Datei lesen
+  const file = await handle.getFile();
+  const jsonString = await file.text();
+
+  // Deserialisieren (inkl. Gerber-Neuparsen)
+  const result = await deserializeProject(jsonString);
+
+  // Handle merken → naechstes Ctrl+S schreibt zurueck in DIESE Datei
+  setCurrentFileHandle(handle, handle.name);
+  console.log('Projekt geoeffnet mit Handle:', handle.name);
+
+  return result;
 }

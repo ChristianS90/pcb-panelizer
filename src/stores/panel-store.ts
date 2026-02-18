@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { extractBoardOutline, calculateCombinedBoundingBox } from '@/lib/gerber';
+import { getNextDrawingNumber, incrementRevision } from '@/lib/utils/drawing-number';
 import type {
   Board,
   BoardInstance,
@@ -40,6 +41,7 @@ import type {
   DimensionLabelOffset,
   DimensionLineDistances,
   DimensionOverrides,
+  DrawingPreviewConfig,
 } from '@/types';
 
 // ============================================================================
@@ -132,6 +134,9 @@ interface PanelStore {
 
   /** Bemaßungs-Overlay im Canvas ein-/ausblenden */
   showDimensions: boolean;
+
+  /** Zeichnungsvorschau im Canvas ein-/ausblenden */
+  showDrawingPreview: boolean;
 
   /** Undo/Redo History (für später) */
   history: {
@@ -237,8 +242,12 @@ interface PanelStore {
   /** Setzt den Panel-Namen */
   setPanelName: (name: string) => void;
 
+  /** Setzt den PDF-Massstab-Override (0 = automatisch) */
+  setPdfScale: (scaleOverride: number) => void;
   /** Setzt die Zeichnungsnummer für den PDF-Titelblock */
   setDrawingNumber: (drawingNumber: string) => void;
+  /** Erhoeht die Revision der Zeichnungsnummer um 1 (z.B. .01 → .02) */
+  incrementDrawingRevision: () => void;
   /** Setzt "Gezeichnet von" für den PDF-Titelblock */
   setDrawnBy: (drawnBy: string) => void;
   /** Setzt "Freigegeben von" für den PDF-Titelblock */
@@ -306,7 +315,7 @@ interface PanelStore {
   selectBadmark: (badmarkId: string | null) => void;
 
   /** Platziert die Master-Badmark automatisch auf der kurzen Seite */
-  addMasterBadmark: () => void;
+  addMasterBadmark: (size?: number) => void;
 
   /** Fügt eine Tooling-Bohrung hinzu */
   addToolingHole: (hole: Omit<ToolingHole, 'id'>) => void;
@@ -455,6 +464,19 @@ interface PanelStore {
 
   /** Fräskonturen-Bemaßung in Ordinate ein-/ausblenden */
   toggleRoutingDimensions: () => void;
+
+  // --------------------------------------------------------------------------
+  // Zeichnungsvorschau-Aktionen
+  // --------------------------------------------------------------------------
+
+  /** Schaltet die Zeichnungsvorschau ein/aus (berechnet Config beim ersten Einschalten) */
+  toggleDrawingPreview: () => void;
+
+  /** Setzt die Panel-Position auf dem Zeichnungsblatt (für Drag & Drop, mit Clamping) */
+  setDrawingPanelOffset: (x: number, y: number) => void;
+
+  /** Neuberechnung der Zeichnungskonfiguration (nach Panel-Grössenänderung) */
+  recalculateDrawingConfig: () => void;
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen (Zoom, Pan)
@@ -1739,6 +1761,72 @@ function nativeArcToFreeMousebite(
 // Maximale Anzahl an Undo-Schritten (ältere werden verworfen)
 const HISTORY_LIMIT = 50;
 
+// ============================================================================
+// Zeichnungsvorschau: Config-Berechnung (reine Funktion)
+// ============================================================================
+
+/**
+ * Berechnet die Zeichnungsvorschau-Konfiguration für ein Panel.
+ *
+ * Gleiche Logik wie im PDF-Export (dimension-drawing.ts):
+ * - Papierformat: A4 quer (297 × 210 mm)
+ * - ISO 5455 Standard-Massstäbe
+ * - Panel-Position mit Rändern für Bemaßungs-Annotationen
+ *
+ * @param panel - Das aktuelle Panel
+ * @returns DrawingPreviewConfig mit Massstab und initialer Position
+ */
+function computeDrawingConfig(panel: Panel): DrawingPreviewConfig {
+  // Papierformat: A4 quer
+  const paperWidth = 297;   // mm
+  const paperHeight = 210;  // mm
+
+  // Ränder (in mm) — gleich wie PDF-Export
+  const MARGIN_MM = 7;       // Äusserer Rand (~20pt / MM_TO_PT)
+  const INNER_MARGIN_MM = 2; // Innerer Rahmen-Abstand (~6pt / MM_TO_PT)
+  const borderLeft = MARGIN_MM + INNER_MARGIN_MM;
+  const borderBottom = MARGIN_MM + INNER_MARGIN_MM;
+
+  // Panel-Ränder für Bemaßungen (in mm)
+  const panelMarginLeft = 21;   // Y-Achse Ordinatenbemaßung
+  const panelMarginRight = 60;  // Detail-Legende rechts
+  const panelMarginTop = 5;     // Platz über dem Panel
+  const panelMarginBottom = 67; // Titelblock (46mm) + X-Achse + Ticks
+
+  // Verfügbarer Platz für das Panel (in mm)
+  const availW = paperWidth - 2 * (MARGIN_MM + INNER_MARGIN_MM) - panelMarginLeft - panelMarginRight;
+  const availH = paperHeight - 2 * (MARGIN_MM + INNER_MARGIN_MM) - panelMarginTop - panelMarginBottom;
+
+  // Massstab bestimmen: manueller Override hat Vorrang, sonst automatisch
+  let scaleRatio = 1;
+
+  if (panel.pdfScaleOverride && panel.pdfScaleOverride > 0) {
+    // Manueller Override vom Benutzer (z.B. 0.5 = 2:1, 2 = 1:2)
+    scaleRatio = panel.pdfScaleOverride;
+  } else {
+    // Automatische Berechnung: ISO 5455 Verkleinerungs-Massstäbe
+    const STANDARD_SCALES = [1, 1.5, 2, 2.5, 3, 4, 5, 10, 20];
+    if (panel.width > availW || panel.height > availH) {
+      const fitScaleW = availW / panel.width;
+      const fitScaleH = availH / panel.height;
+      const fitScale = Math.min(fitScaleW, fitScaleH);
+      scaleRatio = STANDARD_SCALES.find(r => 1 / r <= fitScale) || STANDARD_SCALES[STANDARD_SCALES.length - 1];
+    }
+  }
+
+  // Initiale Panel-Position: links oben im verfügbaren Bereich
+  const panelOffsetX = borderLeft + panelMarginLeft;
+  const panelOffsetY = MARGIN_MM + INNER_MARGIN_MM + panelMarginTop;
+
+  return {
+    panelOffsetX,
+    panelOffsetY,
+    scaleRatio,
+    paperWidth,
+    paperHeight,
+  };
+}
+
 export const usePanelStore = create<PanelStore>((set, get) => {
 
   /**
@@ -1791,6 +1879,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   showVScoreLines: true,
   showRoutingContours: true,
   showDimensions: false,
+  showDrawingPreview: false,
   history: {
     past: [],
     future: [],
@@ -1802,13 +1891,21 @@ export const usePanelStore = create<PanelStore>((set, get) => {
 
   addBoard: (board) => {
     saveHistory();
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        boards: [...state.panel.boards, board],
-        modifiedAt: new Date(),
-      },
-    }));
+    set((state) => {
+      // Wenn Panel noch keine Zeichnungsnummer hat → automatisch vergeben
+      const drawingNumber = !state.panel.drawingNumber
+        ? getNextDrawingNumber()
+        : state.panel.drawingNumber;
+
+      return {
+        panel: {
+          ...state.panel,
+          boards: [...state.panel.boards, board],
+          drawingNumber,
+          modifiedAt: new Date(),
+        },
+      };
+    });
   },
 
   removeBoard: (boardId) => {
@@ -2313,6 +2410,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         },
       };
     });
+    // Zeichnungsvorschau-Config aktualisieren (Breite/Höhe getauscht)
+    get().recalculateDrawingConfig();
   },
 
   // --------------------------------------------------------------------------
@@ -2413,6 +2512,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         selectedInstances: [], // Auswahl zurücksetzen
       };
     });
+    // Zeichnungsvorschau-Config aktualisieren (Panel-Grösse kann sich geändert haben)
+    get().recalculateDrawingConfig();
   },
 
   // --------------------------------------------------------------------------
@@ -2510,6 +2611,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         modifiedAt: new Date(),
       },
     }));
+    // Zeichnungsvorschau-Config aktualisieren (Massstab ggf. neu berechnen)
+    get().recalculateDrawingConfig();
   },
 
   setPanelSize: (width, height) => {
@@ -2522,6 +2625,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         modifiedAt: new Date(),
       },
     }));
+    // Zeichnungsvorschau-Config aktualisieren (Massstab ggf. neu berechnen)
+    get().recalculateDrawingConfig();
   },
 
   setPanelName: (name) => {
@@ -2535,12 +2640,63 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     }));
   },
 
+  setPdfScale: (scaleOverride) => {
+    // Zuerst den Override setzen
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        pdfScaleOverride: scaleOverride,
+        modifiedAt: new Date(),
+      },
+    }));
+    // Zeichnungsvorschau neu berechnen, damit der Massstab sofort sichtbar wird
+    const state = get();
+    if (state.panel.drawingPreviewConfig) {
+      // Config neu berechnen (computeDrawingConfig liest jetzt pdfScaleOverride)
+      const newConfig = computeDrawingConfig(state.panel);
+      // Position vom alten Config übernehmen, aber Clamping prüfen
+      const oldConfig = state.panel.drawingPreviewConfig;
+      const MARGIN_MM = 7;
+      const INNER_MARGIN_MM = 2;
+      const scaledPanelW = state.panel.width / newConfig.scaleRatio;
+      const scaledPanelH = state.panel.height / newConfig.scaleRatio;
+      const maxX = newConfig.paperWidth - MARGIN_MM - INNER_MARGIN_MM - scaledPanelW;
+      const maxY = newConfig.paperHeight - MARGIN_MM - INNER_MARGIN_MM - scaledPanelH;
+      const minXY = MARGIN_MM + INNER_MARGIN_MM;
+
+      set({
+        panel: {
+          ...state.panel,
+          drawingPreviewConfig: {
+            ...newConfig,
+            panelOffsetX: Math.round(Math.max(minXY, Math.min(maxX, oldConfig.panelOffsetX)) * 100) / 100,
+            panelOffsetY: Math.round(Math.max(minXY, Math.min(maxY, oldConfig.panelOffsetY)) * 100) / 100,
+          },
+          modifiedAt: new Date(),
+        },
+      });
+    }
+  },
+
   setDrawingNumber: (drawingNumber) => {
     saveHistory();
     set((state) => ({
       panel: {
         ...state.panel,
         drawingNumber,
+        modifiedAt: new Date(),
+      },
+    }));
+  },
+
+  incrementDrawingRevision: () => {
+    saveHistory();
+    set((state) => ({
+      panel: {
+        ...state.panel,
+        drawingNumber: state.panel.drawingNumber
+          ? incrementRevision(state.panel.drawingNumber)
+          : state.panel.drawingNumber,
         modifiedAt: new Date(),
       },
     }));
@@ -2928,7 +3084,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       selectedBadmarkId: badmarkId,
     })),
 
-  addMasterBadmark: () => {
+  addMasterBadmark: (size) => {
     saveHistory();
     set((state) => {
       const panel = state.panel;
@@ -2947,7 +3103,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       const masterBadmark: Badmark = {
         id: uuidv4(),
         position: { x, y },
-        size: 1.0,
+        size: size ?? 1.0,
         boardInstanceId: '', // Panel-weit, nicht board-spezifisch
         isMasterBadmark: true,
       };
@@ -4214,6 +4370,96 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   },
 
   // --------------------------------------------------------------------------
+  // Zeichnungsvorschau
+  // --------------------------------------------------------------------------
+
+  // Schaltet die Zeichnungsvorschau ein/aus.
+  // Beim ersten Einschalten wird die Config automatisch berechnet.
+  toggleDrawingPreview: () => {
+    const state = get();
+    const newShow = !state.showDrawingPreview;
+
+    if (newShow && !state.panel.drawingPreviewConfig) {
+      // Erstes Einschalten: Config berechnen und speichern
+      const config = computeDrawingConfig(state.panel);
+      set({
+        showDrawingPreview: true,
+        panel: {
+          ...state.panel,
+          drawingPreviewConfig: config,
+          modifiedAt: new Date(),
+        },
+      });
+    } else {
+      set({ showDrawingPreview: newShow });
+    }
+  },
+
+  // Setzt die Panel-Position auf dem Zeichnungsblatt (für Drag & Drop).
+  // Position wird auf den verfügbaren Zeichnungsbereich geclampet.
+  setDrawingPanelOffset: (x, y) => {
+    set((state) => {
+      const config = state.panel.drawingPreviewConfig;
+      if (!config) return state;
+
+      // Clamping: Panel darf nicht ausserhalb des inneren Rahmens liegen
+      const MARGIN_MM = 7;
+      const INNER_MARGIN_MM = 2;
+      const minX = MARGIN_MM + INNER_MARGIN_MM;
+      const minY = MARGIN_MM + INNER_MARGIN_MM;
+      const scaledPanelW = state.panel.width / config.scaleRatio;
+      const scaledPanelH = state.panel.height / config.scaleRatio;
+      const maxX = config.paperWidth - MARGIN_MM - INNER_MARGIN_MM - scaledPanelW;
+      const maxY = config.paperHeight - MARGIN_MM - INNER_MARGIN_MM - scaledPanelH;
+
+      const clampedX = Math.max(minX, Math.min(maxX, x));
+      const clampedY = Math.max(minY, Math.min(maxY, y));
+
+      return {
+        panel: {
+          ...state.panel,
+          drawingPreviewConfig: {
+            ...config,
+            panelOffsetX: Math.round(clampedX * 100) / 100,
+            panelOffsetY: Math.round(clampedY * 100) / 100,
+          },
+          modifiedAt: new Date(),
+        },
+      };
+    });
+  },
+
+  // Neuberechnung der Zeichnungskonfiguration (bei Panel-Grössenänderung).
+  // Behält die Position bei wenn möglich, berechnet aber den Massstab neu.
+  recalculateDrawingConfig: () => {
+    const state = get();
+    if (!state.panel.drawingPreviewConfig) return;
+
+    const newConfig = computeDrawingConfig(state.panel);
+    // Position vom alten Config übernehmen, aber Clamping prüfen
+    const oldConfig = state.panel.drawingPreviewConfig;
+    const MARGIN_MM = 7;
+    const INNER_MARGIN_MM = 2;
+    const scaledPanelW = state.panel.width / newConfig.scaleRatio;
+    const scaledPanelH = state.panel.height / newConfig.scaleRatio;
+    const maxX = newConfig.paperWidth - MARGIN_MM - INNER_MARGIN_MM - scaledPanelW;
+    const maxY = newConfig.paperHeight - MARGIN_MM - INNER_MARGIN_MM - scaledPanelH;
+    const minXY = MARGIN_MM + INNER_MARGIN_MM;
+
+    set({
+      panel: {
+        ...state.panel,
+        drawingPreviewConfig: {
+          ...newConfig,
+          panelOffsetX: Math.round(Math.max(minXY, Math.min(maxX, oldConfig.panelOffsetX)) * 100) / 100,
+          panelOffsetY: Math.round(Math.max(minXY, Math.min(maxY, oldConfig.panelOffsetY)) * 100) / 100,
+        },
+        modifiedAt: new Date(),
+      },
+    });
+  },
+
+  // --------------------------------------------------------------------------
   // Grid-Einstellungen
   // --------------------------------------------------------------------------
 
@@ -4397,3 +4643,6 @@ export const useShowDimensions = () => usePanelStore((state) => state.showDimens
 
 /** Hook: Outline-Definitions-Modus State */
 export const useOutlineDefineState = () => usePanelStore((state) => state.outlineDefineState);
+
+/** Hook: Zeichnungsvorschau ein-/ausblenden */
+export const useShowDrawingPreview = () => usePanelStore((state) => state.showDrawingPreview);

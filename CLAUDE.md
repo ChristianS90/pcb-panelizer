@@ -60,7 +60,8 @@ pcb-panelizer/
 │   │   ├── export/             # Export-Funktionen
 │   │   │   └── dimension-drawing.ts # PDF-Maßzeichnung Generator
 │   │   ├── storage/            # Projekt Speichern/Laden
-│   │   │   └── project-file.ts # Serialisierung/Deserialisierung (.panelizer.json)
+│   │   │   ├── project-file.ts # Serialisierung/Deserialisierung (.panelizer.json)
+│   │   │   └── file-handle.ts  # FileSystemFileHandle-Verwaltung (Speichern unter)
 │   │   └── utils/              # Allgemeine Utilities
 │   │       └── index.ts        # cn(), formatMM(), snapToGrid()
 │   │
@@ -68,7 +69,8 @@ pcb-panelizer/
 │   │   └── panel-store.ts      # Zustand Store (State Management)
 │   │
 │   └── types/
-│       └── index.ts            # TypeScript Typdefinitionen
+│       ├── index.ts            # TypeScript Typdefinitionen
+│       └── file-system-access.d.ts # TypeScript-Typen für File System Access API
 │
 ├── public/                     # Statische Assets
 ├── package.json
@@ -365,6 +367,39 @@ Der `usePanelStore` enthält:
 - [x] **Board-Hintergrund und Beschriftung standardmäßig ausgeblendet**
   - `showBoardBackground` und `showBoardLabels` sind standardmäßig `false`
 
+### Phase 12 - Erledigt
+
+- [x] **Speichern unter (wie Word/Excel)**
+  - **Ctrl+S** (Speichern): Wenn Datei schon geöffnet → direkt überschreiben (kein Dialog). Wenn neu → "Speichern unter" Dialog.
+  - **Ctrl+Shift+S** (Speichern unter): Öffnet IMMER den Datei-Dialog für Ort und Name.
+  - **File System Access API** (`showSaveFilePicker`, `showOpenFilePicker`) für native Datei-Dialoge in Chrome
+  - **FileSystemFileHandle-Persistenz**: Handle wird nach Speichern/Öffnen gemerkt, Speichern schreibt direkt zurück
+  - **Dateiname in Titelleiste**: Nach Speichern/Öffnen wird Dateiname neben Panel-Name angezeigt
+  - **Neues Panel** setzt Handle zurück → nächstes Speichern öffnet wieder Dialog
+  - **Fallback** auf `file-saver` wenn File System Access API nicht verfügbar (Firefox etc.)
+  - **Grünes Häkchen** als kurze "Gespeichert"-Bestätigung nach Ctrl+S
+  - **CustomEvents** (`panelizer:save`, `panelizer:save-as`) für Canvas→Header-Kommunikation
+  - Neue Dateien: `file-handle.ts` (Handle-Verwaltung), `file-system-access.d.ts` (TypeScript-Typen)
+- [x] **Zeichnungsnummer in Titelleiste** neben Panel-Name (Mono-Font, grauer Hintergrund)
+- [x] **Freigabe-Sektion** in der Header-Toolbar (ersetzt "Einstellungen und Hilfe") mit Gezeichnet/Freigabe-Infos
+- [x] **Manueller PDF-Massstab**
+  - Dropdown in Properties Panel (Dimensionen-Sektion) für manuelle Massstab-Auswahl
+  - **Vergrösserungsmassstäbe** für kleine Boards: 10:1, 5:1, 3:1, 2:1, 1.5:1
+  - **Verkleinerungsmassstäbe**: 1:1 bis 1:20 (ISO 5455)
+  - "Automatisch" Option für bisheriges Verhalten
+  - Massstab wird sowohl im PDF-Export als auch in der Canvas-Vorschau berücksichtigt
+  - Neues Feld `pdfScaleOverride` auf Panel-Typ
+- [x] **Eckenverrundung bemasst**
+  - **Leader-Line mit Pfeilspitze** am abgerundeten Eck (technische Zeichnung, R-Wert)
+  - Im Canvas und PDF identisch dargestellt
+  - **Detail-Legende**: "Eckenradius: R X.X" Eintrag mit Viertelkreis-Symbol
+- [x] **Vergrösserte Schriften in Detail-Legende** (besser lesbar auf gedruckter Zeichnung)
+  - PDF: Titel 4→5pt bold, Einträge 3.5→4.5pt, Zeilenhöhe 5→6mm, Breite 50→58mm
+  - Canvas: Titel 7→8px, Einträge 5→6px, Zeilenhöhe 4→5mm, Breite 40→48mm
+- [x] **Vergrösserte Schriften im Zeichnungskopf**
+  - Werte 6→7pt, Benennung/Zeichnungs-Nr 8→9pt, Massstab/Blatt 7→8pt
+  - **Zentrierte Darstellung** von Datum und Name in Gezeichn./Freigabe-Zellen (`drawCenteredInCell()` Helper)
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)
@@ -387,13 +422,17 @@ Der `usePanelStore` enthält:
 | Fräskontur | - | Dropdown: Kontur folgen oder Frei zeichnen |
 | **Maße** | - | Bemaßungs-Overlay ein-/ausschalten (Toggle) |
 
-### Mess-Werkzeug Tasten
+### Tastenkürzel
 
 | Taste | Funktion |
 |-------|----------|
-| M | Umschalten Absolut ↔ Inkremental |
-| A | Snap: Nächste Ecke/Kante/Kreismitte einfangen |
-| ESC | Messung zurücksetzen (Tool bleibt aktiv) |
+| Ctrl+S | Speichern (direkt wenn Datei bekannt, sonst "Speichern unter") |
+| Ctrl+Shift+S | Speichern unter (immer Datei-Dialog) |
+| Ctrl+Z | Rückgängig (Undo) |
+| Ctrl+Y / Ctrl+Shift+Z | Wiederholen (Redo) |
+| M | Mess-Werkzeug: Umschalten Absolut ↔ Inkremental |
+| A | Mess-Werkzeug: Snap auf nächste Ecke/Kante/Kreismitte |
+| ESC | Messung zurücksetzen / Werkzeug-Aktion abbrechen |
 
 ---
 
@@ -517,11 +556,11 @@ Der `usePanelStore` enthält:
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
 2. PDF wird generiert und heruntergeladen
-3. **Automatische Massstab-Skalierung:**
-   - Kleine Panels → A4 quer, Massstab 1:1
-   - Mittlere Panels → A3 quer, Massstab 1:1
-   - Grosse Panels → A3 quer, automatisch skaliert (z.B. 1:2, 1:3 etc.)
-   - ISO 5455 Standard-Massstäbe: 1:1, 1:1.5, 1:2, 1:2.5, 1:3, 1:4, 1:5, 1:10, 1:20
+3. **Massstab-Skalierung:**
+   - **Manuell wählbar** im Properties Panel → Dimensionen → PDF-Massstab
+   - Vergrösserung: 10:1, 5:1, 3:1, 2:1, 1.5:1 (für kleine Boards)
+   - Verkleinerung: 1:1, 1:1.5, 1:2, 1:2.5, 1:3, 1:4, 1:5, 1:10, 1:20
+   - "Automatisch" für bisheriges Verhalten (A4/A3, passender ISO 5455 Massstab)
    - Korrekter Massstab im Titelblock angezeigt
 4. Enthält **identische Ordinatenbemaßung** wie im Canvas:
    - Panel-Umriss mit Board-Umrissen (blau) und sichtbaren Gerber-Layern
@@ -529,10 +568,11 @@ Der `usePanelStore` enthält:
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
    - **Fiducials** und **Tooling Holes** als Symbole
    - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Fräserbreite-Streifen
+   - **Eckenverrundung** mit Leader-Line, Pfeilspitze und R-Wert
    - **Ordinatenbemaßung**: X-Achse, Y-Achse, Nullpunkt, Tick-Marks, Hilfslinien
-   - **Detail-Legende** mit Farbcode und Parametern (feste Grösse, massstabsunabhängig)
+   - **Detail-Legende** mit Farbcode, Parametern und Eckenradius (feste Grösse, massstabsunabhängig)
    - **Zeichnungsrahmen** mit Gitterreferenz-System (dynamische Spalten/Reihen)
-   - **ISO-Titelblock** mit SMTEC AG Logo und korrektem Massstab
+   - **ISO-Titelblock** mit SMTEC AG Logo, korrektem Massstab, zentriertem Datum/Name
 5. Ausgeblendete Elemente erscheinen nicht im PDF
 
 ---

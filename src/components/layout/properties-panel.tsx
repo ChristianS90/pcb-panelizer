@@ -29,10 +29,15 @@ import {
   EyeOff,
   ArrowLeftRight,
   Ruler,
+  Plus,
+  X,
+  FileText,
+  Users,
 } from 'lucide-react';
-import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard } from '@/stores/panel-store';
+import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useSelectedBadmarkId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
-import type { Tab, VScoreLine, RoutingContour } from '@/types';
+import type { Tab, VScoreLine, RoutingContour, Badmark } from '@/types';
+import { getUsers, addUser, removeUser, type User } from '@/lib/utils/user-management';
 
 // ============================================================================
 // Haupt Properties Panel
@@ -47,7 +52,9 @@ export function PropertiesPanel() {
     vscore: false,
     routing: false,
     fiducials: false,
+    badmarks: false,
     tooling: false,
+    drawingHead: false,
     dimensions: false,
   });
 
@@ -60,6 +67,7 @@ export function PropertiesPanel() {
     const toolToSection: Record<string, keyof typeof expandedSections> = {
       'place-hole': 'tooling',
       'place-fiducial': 'fiducials',
+      'place-badmark': 'badmarks',
       'place-tab': 'tabs',
       'place-vscore': 'vscore',
       'place-mousebite': 'tabs',
@@ -77,7 +85,9 @@ export function PropertiesPanel() {
         vscore: false,
         routing: false,
         fiducials: false,
+        badmarks: false,
         tooling: false,
+        drawingHead: false,
         dimensions: false,
         [section]: true,
       });
@@ -96,7 +106,9 @@ export function PropertiesPanel() {
         vscore: false,
         routing: false,
         fiducials: false,
+        badmarks: false,
         tooling: false,
+        drawingHead: false,
         dimensions: false,
       };
       // Wenn die angeklickte Sektion offen war → alle zu
@@ -167,6 +179,16 @@ export function PropertiesPanel() {
         <FiducialsConfig />
       </PropertySection>
 
+      {/* Badmark-Konfiguration */}
+      <PropertySection
+        title="Badmarks"
+        icon={<Square className="w-4 h-4" />}
+        expanded={expandedSections.badmarks}
+        onToggle={() => toggleSection('badmarks')}
+      >
+        <BadmarksConfig />
+      </PropertySection>
+
       {/* Tooling-Konfiguration */}
       <PropertySection
         title="Tooling"
@@ -175,6 +197,16 @@ export function PropertiesPanel() {
         onToggle={() => toggleSection('tooling')}
       >
         <ToolingConfig />
+      </PropertySection>
+
+      {/* Zeichnungskopf (PDF-Titelblock) */}
+      <PropertySection
+        title="Zeichnungskopf"
+        icon={<FileText className="w-4 h-4" />}
+        expanded={expandedSections.drawingHead}
+        onToggle={() => toggleSection('drawingHead')}
+      >
+        <DrawingHeadConfig />
       </PropertySection>
 
       {/* Dimensionen & Info */}
@@ -1979,6 +2011,232 @@ function FiducialItem({ index, fiducial, isSelected, onSelect, onUpdatePosition,
 }
 
 // ============================================================================
+// Badmark-Konfiguration
+// ============================================================================
+
+function BadmarksConfig() {
+  const [badmarkSize, setBadmarkSize] = useState(1.0);
+
+  const addBadmark = usePanelStore((state) => state.addBadmark);
+  const removeBadmark = usePanelStore((state) => state.removeBadmark);
+  const clearAllBadmarks = usePanelStore((state) => state.clearAllBadmarks);
+  const updateBadmarkPosition = usePanelStore((state) => state.updateBadmarkPosition);
+  const selectBadmark = usePanelStore((state) => state.selectBadmark);
+  const addMasterBadmark = usePanelStore((state) => state.addMasterBadmark);
+  const selectedBadmarkId = useSelectedBadmarkId();
+  const panel = usePanel();
+
+  const badmarkCount = panel.badmarks.length;
+  const boardBadmarks = panel.badmarks.filter(b => !b.isMasterBadmark);
+  const masterBadmarks = panel.badmarks.filter(b => b.isMasterBadmark);
+
+  return (
+    <div className="space-y-3">
+      {/* Info */}
+      <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded">
+        Badmarks markieren defekte Boards. Die Pick & Place Maschine
+        überspringt Boards mit abgedeckter Badmark.
+      </div>
+
+      {/* Badmark-Größe */}
+      <div>
+        <NumberInput
+          label="Badmark-Größe (mm)"
+          value={badmarkSize}
+          onChange={(v) => setBadmarkSize(Math.max(0.5, Math.min(3.0, v)))}
+        />
+        <input
+          type="range"
+          min="0.5"
+          max="3.0"
+          step="0.1"
+          value={badmarkSize}
+          onChange={(e) => setBadmarkSize(parseFloat(e.target.value))}
+          className="w-full mt-1"
+        />
+      </div>
+
+      {/* Master-Badmark platzieren */}
+      <button
+        onClick={() => addMasterBadmark(badmarkSize)}
+        className="w-full btn-primary text-sm"
+      >
+        Master-Badmark platzieren
+      </button>
+
+      {/* Liste der Master-Badmarks */}
+      {masterBadmarks.length > 0 && (
+        <div className="space-y-2">
+          <span className="text-xs font-medium text-gray-700">Master-Badmark:</span>
+          {masterBadmarks.map((bm, i) => (
+            <BadmarkItem
+              key={bm.id}
+              index={i + 1}
+              badmark={bm}
+              isSelected={bm.id === selectedBadmarkId}
+              onSelect={() => selectBadmark(bm.id)}
+              onUpdatePosition={(pos) => updateBadmarkPosition(bm.id, pos)}
+              onRemove={() => removeBadmark(bm.id)}
+              label="Master"
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Liste der Board-Badmarks */}
+      {boardBadmarks.length > 0 && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-gray-700">Board-Badmarks ({boardBadmarks.length}):</span>
+            <button
+              onClick={clearAllBadmarks}
+              className="text-xs text-red-500 hover:text-red-700"
+            >
+              Alle löschen
+            </button>
+          </div>
+          <div className="space-y-2 max-h-48 overflow-y-auto">
+            {boardBadmarks.map((bm, i) => (
+              <BadmarkItem
+                key={bm.id}
+                index={i + 1}
+                badmark={bm}
+                isSelected={bm.id === selectedBadmarkId}
+                onSelect={() => selectBadmark(bm.id)}
+                onUpdatePosition={(pos) => updateBadmarkPosition(bm.id, pos)}
+                onRemove={() => {
+                  // Bei Sync-Kopie: Master-Badmark löschen (entfernt auch alle Kopien)
+                  if (bm.isSyncCopy && bm.masterBadmarkId) {
+                    removeBadmark(bm.masterBadmarkId);
+                  } else {
+                    removeBadmark(bm.id);
+                  }
+                }}
+                label={bm.isSyncCopy ? 'Kopie' : undefined}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {badmarkCount === 0 && (
+        <div className="text-xs text-gray-500 text-center py-2">
+          Noch keine Badmarks platziert. Wählen Sie das Badmark-Werkzeug und klicken Sie auf den Nutzenrand.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Einzelnes Badmark-Item mit editierbaren Koordinaten
+interface BadmarkItemProps {
+  index: number;
+  badmark: Badmark;
+  isSelected: boolean;
+  onSelect: () => void;
+  onUpdatePosition: (position: { x: number; y: number }) => void;
+  onRemove: () => void;
+  label?: string;
+}
+
+function BadmarkItem({ index, badmark, isSelected, onSelect, onUpdatePosition, onRemove, label }: BadmarkItemProps) {
+  const [xValue, setXValue] = useState(badmark.position.x.toFixed(2));
+  const [yValue, setYValue] = useState(badmark.position.y.toFixed(2));
+
+  useEffect(() => {
+    setXValue(badmark.position.x.toFixed(2));
+    setYValue(badmark.position.y.toFixed(2));
+  }, [badmark.position]);
+
+  const isSyncCopy = badmark.isSyncCopy;
+
+  const handleXBlur = () => {
+    if (isSyncCopy) return;
+    const x = parseFloat(xValue);
+    if (!isNaN(x)) onUpdatePosition({ x, y: badmark.position.y });
+  };
+
+  const handleYBlur = () => {
+    if (isSyncCopy) return;
+    const y = parseFloat(yValue);
+    if (!isNaN(y)) onUpdatePosition({ x: badmark.position.x, y });
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent, handler: () => void) => {
+    if (e.key === 'Enter') handler();
+  };
+
+  return (
+    <div
+      onClick={onSelect}
+      className={cn(
+        "rounded p-2 text-xs cursor-pointer transition-all",
+        isSelected
+          ? "bg-amber-100 ring-2 ring-amber-400 shadow-lg shadow-amber-200"
+          : "bg-gray-50 hover:bg-gray-100"
+      )}
+    >
+      <div className="flex items-center justify-between mb-1">
+        <span className={cn(
+          "font-medium",
+          isSelected ? "text-amber-700" : "text-gray-700"
+        )}>
+          Badmark {index} {isSelected && "\u2713"}
+          {label && (
+            <span className={cn(
+              "ml-1 text-[10px] px-1 py-0.5 rounded",
+              label === 'Kopie' ? "bg-blue-100 text-blue-600" :
+              label === 'Master' ? "bg-purple-100 text-purple-600" :
+              "bg-gray-100 text-gray-600"
+            )}>{label}</span>
+          )}
+        </span>
+        <button
+          onClick={(e) => { e.stopPropagation(); onRemove(); }}
+          className="text-red-400 hover:text-red-600 text-xs"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500 w-4">X:</span>
+          <input
+            type="text"
+            value={xValue}
+            onChange={(e) => setXValue(e.target.value)}
+            onBlur={handleXBlur}
+            onKeyDown={(e) => { e.stopPropagation(); handleKeyDown(e, handleXBlur); }}
+            disabled={isSyncCopy}
+            className={cn(
+              "flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full",
+              isSyncCopy && "bg-gray-100 text-gray-400"
+            )}
+          />
+          <span className="text-gray-400">mm</span>
+        </div>
+        <div className="flex items-center gap-1">
+          <span className="text-gray-500 w-4">Y:</span>
+          <input
+            type="text"
+            value={yValue}
+            onChange={(e) => setYValue(e.target.value)}
+            onBlur={handleYBlur}
+            onKeyDown={(e) => { e.stopPropagation(); handleKeyDown(e, handleYBlur); }}
+            disabled={isSyncCopy}
+            className={cn(
+              "flex-1 px-1 py-0.5 border border-gray-300 rounded text-xs w-full",
+              isSyncCopy && "bg-gray-100 text-gray-400"
+            )}
+          />
+          <span className="text-gray-400">mm</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // Tooling-Konfiguration
 // ============================================================================
 
@@ -2240,6 +2498,293 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
 }
 
 // ============================================================================
+// Freigabeprozess: Zeichner & Freigeber Dropdowns + Benutzerverwaltung
+// ============================================================================
+
+/**
+ * Dropdown-Auswahl für "Gezeichnet von" und "Freigegeben von"
+ *
+ * - Benutzer werden aus dem localStorage geladen
+ * - 4-Augen-Prinzip: Der Zeichner kann sich nicht selbst als Freigeber wählen
+ * - Neue Benutzer können inline hinzugefügt werden
+ * - Aufklappbare Benutzerverwaltung zum Hinzufügen/Löschen
+ */
+function ApprovalDropdowns({
+  drawnBy,
+  approvedBy,
+  onDrawnByChange,
+  onApprovedByChange,
+}: {
+  drawnBy: string;
+  approvedBy: string;
+  onDrawnByChange: (value: string) => void;
+  onApprovedByChange: (value: string) => void;
+}) {
+  // Benutzerliste aus localStorage laden
+  const [users, setUsers] = useState<User[]>([]);
+  // Benutzerverwaltung aufgeklappt?
+  const [showManagement, setShowManagement] = useState(false);
+  // Eingabefelder für neuen Benutzer
+  const [newName, setNewName] = useState('');
+  const [newInitials, setNewInitials] = useState('');
+
+  // Beim ersten Rendern: Benutzer aus localStorage laden
+  useEffect(() => {
+    setUsers(getUsers());
+  }, []);
+
+  // Warnung wenn Zeichner = Freigeber (sollte durch Filter nicht passieren,
+  // aber als Sicherheitsnetz falls alte Werte vorhanden)
+  const isSamePerson = drawnBy !== '' && approvedBy !== '' && drawnBy === approvedBy;
+
+  /**
+   * Neuen Benutzer hinzufügen
+   * Wird aufgerufen wenn der "Hinzufügen"-Button geklickt wird
+   */
+  const handleAddUser = () => {
+    const trimmedName = newName.trim();
+    const trimmedInitials = newInitials.trim();
+
+    // Validierung: Beide Felder müssen ausgefüllt sein
+    if (!trimmedName || !trimmedInitials) return;
+
+    // Benutzer im localStorage anlegen
+    addUser(trimmedName, trimmedInitials);
+
+    // Liste neu laden und Eingabefelder leeren
+    setUsers(getUsers());
+    setNewName('');
+    setNewInitials('');
+  };
+
+  /**
+   * Benutzer löschen
+   * Wenn der gelöschte Benutzer aktuell als Zeichner/Freigeber ausgewählt ist,
+   * wird die Auswahl zurückgesetzt.
+   */
+  const handleRemoveUser = (user: User) => {
+    // Wenn dieser Benutzer aktuell ausgewählt ist, Auswahl zurücksetzen
+    if (drawnBy === user.initials) onDrawnByChange('');
+    if (approvedBy === user.initials) onApprovedByChange('');
+
+    // Benutzer aus localStorage löschen und Liste neu laden
+    removeUser(user.id);
+    setUsers(getUsers());
+  };
+
+  return (
+    <>
+      {/* Dropdown-Reihe: Zeichner und Freigeber nebeneinander */}
+      <div className="grid grid-cols-2 gap-2">
+        {/* Dropdown: Gezeichnet von */}
+        <div>
+          <label className="text-xs text-gray-600 block mb-1">Gezeichnet von</label>
+          <select
+            value={drawnBy}
+            onChange={(e) => {
+              onDrawnByChange(e.target.value);
+              // Wenn der neue Zeichner = aktueller Freigeber → Freigeber zurücksetzen
+              if (e.target.value !== '' && e.target.value === approvedBy) {
+                onApprovedByChange('');
+              }
+            }}
+            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                       focus:outline-none focus:ring-1 focus:ring-primary-500"
+          >
+            <option value="">— Wählen —</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.initials}>
+                {u.initials} — {u.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Dropdown: Freigegeben von (filtert den Zeichner heraus = 4-Augen-Prinzip) */}
+        <div>
+          <label className="text-xs text-gray-600 block mb-1">Freigegeben von</label>
+          <select
+            value={approvedBy}
+            onChange={(e) => onApprovedByChange(e.target.value)}
+            className={cn(
+              "w-full px-2 py-1.5 text-sm border rounded focus:outline-none focus:ring-1 focus:ring-primary-500",
+              isSamePerson
+                ? "border-red-400 bg-red-50"
+                : "border-gray-300"
+            )}
+          >
+            <option value="">— Wählen —</option>
+            {/* 4-Augen-Prinzip: Aktueller Zeichner wird NICHT angezeigt */}
+            {users
+              .filter((u) => u.initials !== drawnBy)
+              .map((u) => (
+                <option key={u.id} value={u.initials}>
+                  {u.initials} — {u.name}
+                </option>
+              ))}
+          </select>
+        </div>
+      </div>
+
+      {/* Warnung bei identischem Zeichner/Freigeber (Sicherheitsnetz) */}
+      {isSamePerson && (
+        <div className="text-xs text-red-600 bg-red-50 px-2 py-1 rounded">
+          Zeichner und Freigeber dürfen nicht identisch sein (4-Augen-Prinzip)
+        </div>
+      )}
+
+      {/* Hinweis wenn keine Benutzer vorhanden */}
+      {users.length === 0 && (
+        <div className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded">
+          Noch keine Benutzer angelegt. Klicke auf &laquo;Benutzer verwalten&raquo; um Benutzer hinzuzufügen.
+        </div>
+      )}
+
+      {/* Aufklappbare Benutzerverwaltung */}
+      <button
+        onClick={() => setShowManagement(!showManagement)}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700
+                   transition-colors w-full"
+      >
+        {showManagement ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        <Users className="w-3 h-3" />
+        Benutzer verwalten
+      </button>
+
+      {showManagement && (
+        <div className="space-y-2 pl-1">
+          {/* Eingabezeile: Neuen Benutzer hinzufügen */}
+          <div className="flex gap-1">
+            <input
+              type="text"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => {
+                e.stopPropagation(); // Verhindert Canvas-Shortcuts
+                if (e.key === 'Enter') handleAddUser();
+              }}
+              placeholder="Name"
+              className="flex-1 min-w-0 px-2 py-1 text-xs border border-gray-300 rounded
+                         focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+            <input
+              type="text"
+              value={newInitials}
+              onChange={(e) => setNewInitials(e.target.value.toUpperCase())}
+              onKeyDown={(e) => {
+                e.stopPropagation(); // Verhindert Canvas-Shortcuts
+                if (e.key === 'Enter') handleAddUser();
+              }}
+              placeholder="Kürzel"
+              maxLength={4}
+              className="w-14 px-2 py-1 text-xs border border-gray-300 rounded
+                         focus:outline-none focus:ring-1 focus:ring-primary-500"
+            />
+            <button
+              onClick={handleAddUser}
+              disabled={!newName.trim() || !newInitials.trim()}
+              className="px-2 py-1 text-xs bg-primary-500 text-white rounded
+                         hover:bg-primary-600 disabled:opacity-40 disabled:cursor-not-allowed
+                         flex items-center gap-0.5"
+              title="Benutzer hinzufügen"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+
+          {/* Liste bestehender Benutzer */}
+          {users.length > 0 && (
+            <div className="space-y-1">
+              {users.map((user) => (
+                <div
+                  key={user.id}
+                  className="flex items-center justify-between px-2 py-1 bg-gray-50 rounded text-xs"
+                >
+                  <span>
+                    <span className="font-medium text-gray-700">{user.initials}</span>
+                    <span className="text-gray-500 ml-1">— {user.name}</span>
+                  </span>
+                  <button
+                    onClick={() => handleRemoveUser(user)}
+                    className="text-gray-400 hover:text-red-500 transition-colors p-0.5"
+                    title={`${user.name} entfernen`}
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
+// ============================================================================
+// Zeichnungskopf (PDF-Titelblock Konfiguration)
+// ============================================================================
+
+/**
+ * Konfiguration für den Zeichnungskopf im PDF-Export
+ *
+ * Enthält:
+ * - Zeichnungsnummer (wird im Titelblock angezeigt)
+ * - Gezeichnet von / Freigegeben von (4-Augen-Prinzip)
+ */
+function DrawingHeadConfig() {
+  // Store-Aktionen für Zeichnungskopf-Felder
+  const panel = usePanel();
+  const setDrawnBy = usePanelStore((state) => state.setDrawnBy);
+  const setApprovedBy = usePanelStore((state) => state.setApprovedBy);
+  const incrementDrawingRevision = usePanelStore((state) => state.incrementDrawingRevision);
+
+  return (
+    <div className="space-y-3">
+      {/* Zeichnungsnummer — wird automatisch beim Board-Import vergeben */}
+      <div>
+        <label className="text-xs text-gray-600 block mb-1">Zeichnungsnummer</label>
+        {panel.drawingNumber ? (
+          <div className="flex gap-2">
+            {/* Read-only Anzeige der Zeichnungsnummer (grauer Hintergrund) */}
+            <input
+              type="text"
+              value={panel.drawingNumber}
+              readOnly
+              className="flex-1 px-2 py-1.5 text-sm border border-gray-300 rounded
+                         bg-gray-100 text-gray-700 cursor-default"
+            />
+            {/* Button zum Erhoehen der Revision (.01 → .02 → .03 ...) */}
+            <button
+              onClick={incrementDrawingRevision}
+              title="Revision erhoehen"
+              className="px-2.5 py-1.5 text-xs font-medium bg-primary-50 text-primary-700
+                         border border-primary-300 rounded hover:bg-primary-100
+                         transition-colors whitespace-nowrap"
+            >
+              Rev +
+            </button>
+          </div>
+        ) : (
+          /* Hinweistext wenn noch keine Nummer vorhanden */
+          <p className="text-xs text-gray-400 italic py-1.5">
+            Wird beim Board-Import automatisch vergeben
+          </p>
+        )}
+      </div>
+
+      {/* Gezeichnet von / Freigegeben von — mit 4-Augen-Prinzip */}
+      <ApprovalDropdowns
+        drawnBy={panel.drawnBy || ''}
+        approvedBy={panel.approvedBy || ''}
+        onDrawnByChange={setDrawnBy}
+        onApprovedByChange={setApprovedBy}
+      />
+    </div>
+  );
+}
+
+// ============================================================================
 // Dimensionen & Info
 // ============================================================================
 
@@ -2250,13 +2795,13 @@ function DimensionsInfo() {
   const setUnit = usePanelStore((state) => state.setUnit);
   const setGrid = usePanelStore((state) => state.setGrid);
   const setPanelSize = usePanelStore((state) => state.setPanelSize);
-  const setDrawingNumber = usePanelStore((state) => state.setDrawingNumber);
-  const setDrawnBy = usePanelStore((state) => state.setDrawnBy);
-  const setApprovedBy = usePanelStore((state) => state.setApprovedBy);
-
+  const setPdfScale = usePanelStore((state) => state.setPdfScale);
   // Berechne Statistiken
   const boardCount = panel.instances.length;
   const uniqueBoards = panel.boards.length;
+
+  // Aktueller Massstab-Override (0 = automatisch)
+  const currentScale = panel.pdfScaleOverride || 0;
 
   return (
     <div className="space-y-3">
@@ -2292,44 +2837,34 @@ function DimensionsInfo() {
         </div>
       </div>
 
-      {/* Zeichnungskopf-Felder für PDF */}
-      <div className="space-y-2 pt-1 border-t border-gray-200">
-        <div className="text-xs text-gray-500 font-medium">Zeichnungskopf (PDF)</div>
-        <div>
-          <label className="text-xs text-gray-600 block mb-1">Zeichnungsnummer</label>
-          <input
-            type="text"
-            value={panel.drawingNumber || ''}
-            onChange={(e) => setDrawingNumber(e.target.value)}
-            placeholder="z.B. 12345.0120-NZ"
-            className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
-                       focus:outline-none focus:ring-1 focus:ring-primary-500"
-          />
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          <div>
-            <label className="text-xs text-gray-600 block mb-1">Gezeichnet von</label>
-            <input
-              type="text"
-              value={panel.drawnBy || ''}
-              onChange={(e) => setDrawnBy(e.target.value)}
-              placeholder="Kürzel"
-              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
-                         focus:outline-none focus:ring-1 focus:ring-primary-500"
-            />
-          </div>
-          <div>
-            <label className="text-xs text-gray-600 block mb-1">Freigegeben von</label>
-            <input
-              type="text"
-              value={panel.approvedBy || ''}
-              onChange={(e) => setApprovedBy(e.target.value)}
-              placeholder="Kürzel"
-              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
-                         focus:outline-none focus:ring-1 focus:ring-primary-500"
-            />
-          </div>
-        </div>
+      {/* PDF-Massstab für Zeichnung */}
+      <div>
+        <label className="text-xs text-gray-600 block mb-1">PDF-Massstab</label>
+        <select
+          value={currentScale}
+          onChange={(e) => setPdfScale(parseFloat(e.target.value))}
+          className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded
+                     focus:outline-none focus:ring-1 focus:ring-primary-500"
+        >
+          <option value={0}>Automatisch</option>
+          {/* Vergrösserung (kleine Boards grösser darstellen) */}
+          <option value={0.1}>10:1 (10-fach vergrössert)</option>
+          <option value={0.2}>5:1 (5-fach vergrössert)</option>
+          <option value={1/3}>3:1 (3-fach vergrössert)</option>
+          <option value={0.5}>2:1 (2-fach vergrössert)</option>
+          <option value={1/1.5}>1.5:1 (1.5-fach vergrössert)</option>
+          {/* Originalmassstab */}
+          <option value={1}>1:1 (Originalgrösse)</option>
+          {/* Verkleinerung (grosse Panels kleiner darstellen) */}
+          <option value={1.5}>1:1.5</option>
+          <option value={2}>1:2 (halb so gross)</option>
+          <option value={2.5}>1:2.5</option>
+          <option value={3}>1:3</option>
+          <option value={4}>1:4</option>
+          <option value={5}>1:5</option>
+          <option value={10}>1:10</option>
+          <option value={20}>1:20</option>
+        </select>
       </div>
 
       {/* Einheiten */}

@@ -29,6 +29,7 @@ import {
   useShowVScoreLines,
   useShowRoutingContours,
   useShowDimensions,
+  useShowDrawingPreview,
   useOutlineDefineState,
   findNearestArcAtPoint,
   buildOutlineSegments,
@@ -36,7 +37,7 @@ import {
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
-import type { BoardInstance, Board, GerberFile, Fiducial, Badmark, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset } from '@/types';
+import type { BoardInstance, Board, GerberFile, Fiducial, Badmark, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset, DrawingPreviewConfig } from '@/types';
 
 // ============================================================================
 // Konstanten
@@ -79,6 +80,7 @@ export function PixiPanelCanvas() {
   const showVScoreLines = useShowVScoreLines();
   const showRoutingContours = useShowRoutingContours();
   const showDimensions = useShowDimensions();
+  const showDrawingPreview = useShowDrawingPreview();
   const outlineDefineState = useOutlineDefineState();
 
   // Aktives Werkzeug (z.B. 'select', 'place-fiducial', 'place-hole', 'place-vscore', 'place-tab')
@@ -139,10 +141,12 @@ export function PixiPanelCanvas() {
   // Generisch: dragItemType bestimmt ob Fiducial oder Tooling Hole gezogen wird
   const isDraggingItemRef = useRef(false);
   const draggedItemIdRef = useRef<string | null>(null);
-  const dragItemTypeRef = useRef<'fiducial' | 'badmark' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | null>(null);
+  const dragItemTypeRef = useRef<'fiducial' | 'badmark' | 'toolingHole' | 'tab' | 'vscoreLine' | 'routingStart' | 'routingEnd' | 'dimensionLabel' | 'drawingPanelDrag' | null>(null);
   // Für Dimension-Label-Drag: Key des Labels (z.B. "routing-legend") und Basis-Position in mm
   const dragDimLabelKeyRef = useRef<string | null>(null);
   const dragDimLabelBaseRef = useRef<{ x: number; y: number } | null>(null);
+  // Für Drawing-Panel-Drag: Maus-Offset zum Panel-Ankerpunkt (in mm auf dem Papier)
+  const dragDrawingPanelStartRef = useRef<{ mouseX: number; mouseY: number; panelOffX: number; panelOffY: number } | null>(null);
   // Für V-Score Drag: Orientierung der Linie (horizontal/vertikal)
   const dragVScoreInfoRef = useRef<{ isHorizontal: boolean } | null>(null);
   // Für Tab-Drag: gespeicherte Info über Kante, Board-Instanz und Board-Größe
@@ -249,6 +253,23 @@ export function PixiPanelCanvas() {
   // ----------------------------------------------------------------
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // ---- Speichern-Shortcuts (senden CustomEvents an den Header) ----
+
+      // Speichern unter: Ctrl+Shift+S / Cmd+Shift+S
+      // WICHTIG: Muss VOR Ctrl+S geprüft werden, da Shift+S auch S enthält!
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('panelizer:save-as'));
+        return;
+      }
+
+      // Speichern: Ctrl+S / Cmd+S
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('panelizer:save'));
+        return;
+      }
+
       // Undo: Ctrl+Z / Cmd+Z
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
         e.preventDefault();
@@ -639,6 +660,29 @@ export function PixiPanelCanvas() {
     // Alles löschen
     container.removeChildren();
 
+    // Ziel-Container für Panel-Inhalt bestimmen
+    // Bei aktiver Zeichnungsvorschau wird der Inhalt in einen Sub-Container mit Offset + Skalierung gepackt
+    let panelTarget: Container = container;
+    const drawingConfig = panel.drawingPreviewConfig;
+
+    if (showDrawingPreview && drawingConfig) {
+      // Zeichnungsrahmen rendern (Papier + Rahmen + Gitterreferenzen + Titelblock)
+      const drawingFrame = createDrawingFrame(drawingConfig, panel);
+      container.addChild(drawingFrame);
+
+      // Panel-Inhalt in Sub-Container mit Offset + Skalierung
+      const panelContent = new Container();
+      panelContent.label = 'panelContent';
+      panelContent.position.set(
+        drawingConfig.panelOffsetX * PIXELS_PER_MM,
+        drawingConfig.panelOffsetY * PIXELS_PER_MM
+      );
+      // Skalierung: 1/scaleRatio (z.B. 1:2 → Panel wird halb so gross dargestellt)
+      panelContent.scale.set(1 / drawingConfig.scaleRatio);
+      container.addChild(panelContent);
+      panelTarget = panelContent;
+    }
+
     // Nutzenrand zeichnen (mit optionalem Eckenradius)
     const frameGraphics = new Graphics();
     const panelW = panel.width * PIXELS_PER_MM;
@@ -658,7 +702,7 @@ export function PixiPanelCanvas() {
         .fill({ color: COLORS.panelFrame })
         .stroke({ color: COLORS.panelBorder, width: 2 });
     }
-    container.addChild(frameGraphics);
+    panelTarget.addChild(frameGraphics);
 
     // Grid zeichnen (nur Major-Linien)
     if (grid.visible) {
@@ -676,7 +720,7 @@ export function PixiPanelCanvas() {
         gridGraphics.lineTo(panel.width * PIXELS_PER_MM, y * PIXELS_PER_MM);
       }
 
-      container.addChild(gridGraphics);
+      panelTarget.addChild(gridGraphics);
     }
 
     // Fadenkreuz am Nullpunkt (0,0) zeichnen
@@ -702,7 +746,7 @@ export function PixiPanelCanvas() {
       .circle(0, 0, 3)
       .stroke({ color: crosshairColor, width: 1 });
 
-    container.addChild(crosshairGraphics);
+    panelTarget.addChild(crosshairGraphics);
 
     // Boards rendern
     const isOutlineDefineActive = outlineDefineState.active;
@@ -717,7 +761,7 @@ export function PixiPanelCanvas() {
         boardContainer.alpha = 0.15;
       }
 
-      container.addChild(boardContainer);
+      panelTarget.addChild(boardContainer);
     }
 
     // Outline-Define-Modus: Overlay mit ausgewählten/nicht-ausgewählten Commands
@@ -795,7 +839,7 @@ export function PixiPanelCanvas() {
             overlayContainer.addChild(gerberC);
           }
 
-          container.addChild(overlayContainer);
+          panelTarget.addChild(overlayContainer);
         }
       }
     }
@@ -844,7 +888,7 @@ export function PixiPanelCanvas() {
         setCursorStyle('grabbing');
       });
 
-      container.addChild(fiducialContainer);
+      panelTarget.addChild(fiducialContainer);
     }
 
     // Badmarks rendern (interaktiv - klickbar und ziehbar)
@@ -888,7 +932,7 @@ export function PixiPanelCanvas() {
         setCursorStyle('grabbing');
       });
 
-      container.addChild(badmarkContainer);
+      panelTarget.addChild(badmarkContainer);
     }
 
     // Tooling Holes rendern (interaktiv - klickbar und ziehbar wie Fiducials)
@@ -931,7 +975,7 @@ export function PixiPanelCanvas() {
         setCursorStyle('grabbing');
       });
 
-      container.addChild(holeGraphics);
+      panelTarget.addChild(holeGraphics);
     }
 
     // Tabs rendern (interaktiv - klickbar und ziehbar)
@@ -983,7 +1027,7 @@ export function PixiPanelCanvas() {
         setCursorStyle('grabbing');
       });
 
-      container.addChild(tabGraphics);
+      panelTarget.addChild(tabGraphics);
     }
 
     // V-Score Linien rendern (interaktiv - klickbar und ziehbar, nur wenn sichtbar)
@@ -1018,7 +1062,7 @@ export function PixiPanelCanvas() {
         setCursorStyle(isHorizontal ? 'ns-resize' : 'ew-resize');
       });
 
-      container.addChild(lineGraphics);
+      panelTarget.addChild(lineGraphics);
     }
 
     // Rundungs-Mousebites rendern (interaktiv - klickbar)
@@ -1040,7 +1084,7 @@ export function PixiPanelCanvas() {
         selectVScoreLine(null);
       });
 
-      container.addChild(mbGraphics);
+      panelTarget.addChild(mbGraphics);
     }
 
     // Fräskonturen rendern (interaktiv - klickbar, nicht ziehbar, nur wenn sichtbar)
@@ -1117,12 +1161,34 @@ export function PixiPanelCanvas() {
         selectFreeMousebite(null);
       });
 
-      container.addChild(contourGraphics);
+      panelTarget.addChild(contourGraphics);
     }
 
     // Klick auf leere Fläche: Auswahl aufheben (alle Elementtypen)
-    container.eventMode = 'static';
-    container.on('pointerdown', () => {
+    panelTarget.eventMode = 'static';
+    panelTarget.on('pointerdown', (e: any) => {
+      // Im Zeichnungsvorschau-Modus: Panel-Drag starten wenn auf den Panel-Content-Bereich geklickt wird
+      if (showDrawingPreview && panel.drawingPreviewConfig && e.button === 0) {
+        const config = panel.drawingPreviewConfig;
+        const vp = viewportRef.current;
+        const localPos = e.global;
+        // Mausposition in mm auf dem Papier umrechnen
+        const worldX = (localPos.x - vp.offsetX) / vp.scale;
+        const worldY = (localPos.y - vp.offsetY) / vp.scale;
+        const paperMmX = worldX / PIXELS_PER_MM;
+        const paperMmY = worldY / PIXELS_PER_MM;
+
+        usePanelStore.getState().saveHistorySnapshot();
+        isDraggingItemRef.current = true;
+        dragItemTypeRef.current = 'drawingPanelDrag';
+        dragDrawingPanelStartRef.current = {
+          mouseX: paperMmX,
+          mouseY: paperMmY,
+          panelOffX: config.panelOffsetX,
+          panelOffY: config.panelOffsetY,
+        };
+        setCursorStyle('grabbing');
+      }
       selectFiducial(null);
       selectToolingHole(null);
       selectTab(null);
@@ -1186,11 +1252,35 @@ export function PixiPanelCanvas() {
       };
       registerDimHandlers(dimOverlay);
 
-      container.addChild(dimOverlay);
+      panelTarget.addChild(dimOverlay);
     }
 
     console.log(`Rendered ${instances.length} boards, ${panel.fiducials.length} fiducials, ${panel.tabs.length} tabs, ${panel.vscoreLines.length} v-scores, ${panel.routingContours.length} routing contours with WebGL`);
-  }, [isReady, panel, grid, boards, instances, showBoardBackground, showBoardLabels, showVScoreLines, showRoutingContours, showDimensions, outlineDefineState, selectedFiducialId, selectedBadmarkId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedFreeMousebiteId, selectedRoutingContourId, selectFiducial, selectBadmark, selectToolingHole, selectTab, selectVScoreLine, selectFreeMousebite, selectRoutingContour]);
+  }, [isReady, panel, grid, boards, instances, showBoardBackground, showBoardLabels, showVScoreLines, showRoutingContours, showDimensions, showDrawingPreview, outlineDefineState, selectedFiducialId, selectedBadmarkId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedFreeMousebiteId, selectedRoutingContourId, selectFiducial, selectBadmark, selectToolingHole, selectTab, selectVScoreLine, selectFreeMousebite, selectRoutingContour]);
+
+  // ----------------------------------------------------------------
+  // Viewport auto-zoom bei Zeichnungsvorschau-Wechsel
+  // ----------------------------------------------------------------
+  useEffect(() => {
+    if (!showDrawingPreview || !panel.drawingPreviewConfig || !containerRef.current) return;
+    const config = panel.drawingPreviewConfig;
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+
+    // Auf Papiergrösse zoomen (mit etwas Rand)
+    const paperWPx = config.paperWidth * PIXELS_PER_MM;
+    const paperHPx = config.paperHeight * PIXELS_PER_MM;
+    const padding = 40; // Pixel Rand um das Papier
+    const scaleX = (rect.width - 2 * padding) / paperWPx;
+    const scaleY = (rect.height - 2 * padding) / paperHPx;
+    const newScale = Math.min(scaleX, scaleY);
+    const offsetX = (rect.width - paperWPx * newScale) / 2;
+    const offsetY = (rect.height - paperHPx * newScale) / 2;
+
+    setViewport({ scale: newScale, offsetX, offsetY });
+  // Nur beim Ein-/Ausschalten auslösen, nicht bei jeder Panel-Änderung
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showDrawingPreview]);
 
   // ----------------------------------------------------------------
   // Mausrad-Zoom (natives Event für passive: false)
@@ -1675,6 +1765,27 @@ export function PixiPanelCanvas() {
         }
       }
       return; // Kein anderes Drag-Handling im Outline-Define-Modus
+    }
+
+    // === Drawing-Panel Drag: Panel auf dem Zeichnungsblatt verschieben ===
+    if (isDraggingItemRef.current && dragItemTypeRef.current === 'drawingPanelDrag' && dragDrawingPanelStartRef.current) {
+      const vp = viewportRef.current;
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
+      // Mausposition in mm auf dem Papier
+      const worldX = (mouseX - vp.offsetX) / vp.scale;
+      const worldY = (mouseY - vp.offsetY) / vp.scale;
+      const paperMmX = worldX / PIXELS_PER_MM;
+      const paperMmY = worldY / PIXELS_PER_MM;
+
+      const start = dragDrawingPanelStartRef.current;
+      const dx = paperMmX - start.mouseX;
+      const dy = paperMmY - start.mouseY;
+      const setDrawingPanelOffset = usePanelStore.getState().setDrawingPanelOffset;
+      setDrawingPanelOffset(start.panelOffX + dx, start.panelOffY + dy);
+      return;
     }
 
     // === Dimension-Label Drag: Legende verschieben ===
@@ -2209,6 +2320,7 @@ export function PixiPanelCanvas() {
     dragOutlineInfoRef.current = null;
     dragDimLabelKeyRef.current = null;
     dragDimLabelBaseRef.current = null;
+    dragDrawingPanelStartRef.current = null;
 
     // Alignment-Hilfslinien entfernen (nach Label-Drag)
     if (dimAlignGuideRef.current) {
@@ -4611,6 +4723,210 @@ function computeSpreadPositions(values: number[], minSpacing: number = 3): numbe
 }
 
 /**
+ * Erstellt den Zeichnungsrahmen (Papier, Rahmenlinien, Gitterreferenzen, Titelblock)
+ * als PixiJS Container für die Zeichnungsvorschau im Canvas.
+ *
+ * Layout (A4 quer, 297×210mm):
+ * - Weisses Papier als Hintergrund
+ * - Äusserer Rahmen (MARGIN vom Rand, 1.5px)
+ * - Innerer Rahmen (MARGIN + INNER_MARGIN, 0.5px)
+ * - Spalten-Nummern (1-6+) oben/unten, Reihen-Buchstaben (A-F) links/rechts
+ * - Vereinfachter Titelblock unten rechts
+ */
+function createDrawingFrame(
+  config: DrawingPreviewConfig,
+  panel: Panel
+): Container {
+  const frame = new Container();
+  frame.label = 'drawingFrame';
+  const px = PIXELS_PER_MM;
+
+  // --- Konstanten (in mm) ---
+  const MARGIN = 7;        // Äusserer Rand
+  const INNER_MARGIN = 2;  // Abstand innerer zum äusseren Rahmen
+  const paperW = config.paperWidth * px;
+  const paperH = config.paperHeight * px;
+
+  // --- Weisses Papier ---
+  const paper = new Graphics();
+  paper.rect(0, 0, paperW, paperH).fill({ color: 0xffffff });
+  frame.addChild(paper);
+
+  // --- Äusserer Rahmen (1.5px schwarz) ---
+  const outerBorder = new Graphics();
+  const outerX = MARGIN * px;
+  const outerY = MARGIN * px;
+  const outerW = (config.paperWidth - 2 * MARGIN) * px;
+  const outerH = (config.paperHeight - 2 * MARGIN) * px;
+  outerBorder.rect(outerX, outerY, outerW, outerH)
+    .stroke({ color: 0x000000, width: 1.5 });
+  frame.addChild(outerBorder);
+
+  // --- Innerer Rahmen (0.5px schwarz) ---
+  const innerBorder = new Graphics();
+  const innerX = (MARGIN + INNER_MARGIN) * px;
+  const innerY = (MARGIN + INNER_MARGIN) * px;
+  const innerW = (config.paperWidth - 2 * (MARGIN + INNER_MARGIN)) * px;
+  const innerH = (config.paperHeight - 2 * (MARGIN + INNER_MARGIN)) * px;
+  innerBorder.rect(innerX, innerY, innerW, innerH)
+    .stroke({ color: 0x000000, width: 0.5 });
+  frame.addChild(innerBorder);
+
+  // --- Gitterreferenzen ---
+  const gridGraphics = new Graphics();
+  const textStyle = new TextStyle({
+    fontSize: 8,
+    fontFamily: 'Arial, sans-serif',
+    fill: 0x000000,
+  });
+
+  // Spalten-Nummern (1-6) oben und unten
+  const numCols = 6;
+  const colWidth = outerW / numCols;
+  for (let i = 0; i < numCols; i++) {
+    const colX = outerX + i * colWidth;
+
+    // Vertikale Trennlinien (im Rahmenbereich: äusserer → innerer Rand)
+    if (i > 0) {
+      // Oben
+      gridGraphics.moveTo(colX, outerY).lineTo(colX, innerY)
+        .stroke({ color: 0x000000, width: 0.3 });
+      // Unten
+      gridGraphics.moveTo(colX, innerY + innerH).lineTo(colX, outerY + outerH)
+        .stroke({ color: 0x000000, width: 0.3 });
+    }
+
+    // Spalten-Nummer (zentriert)
+    const numText = new Text({ text: `${i + 1}`, style: textStyle });
+    numText.anchor.set(0.5, 0.5);
+    // Oben
+    numText.position.set(colX + colWidth / 2, outerY + (INNER_MARGIN * px) / 2);
+    frame.addChild(numText);
+    // Unten
+    const numTextBot = new Text({ text: `${i + 1}`, style: textStyle });
+    numTextBot.anchor.set(0.5, 0.5);
+    numTextBot.position.set(colX + colWidth / 2, outerY + outerH - (INNER_MARGIN * px) / 2);
+    frame.addChild(numTextBot);
+  }
+
+  // Reihen-Buchstaben (A-F) links und rechts
+  const letters = ['A', 'B', 'C', 'D', 'E', 'F'];
+  const numRows = letters.length;
+  const rowHeight = outerH / numRows;
+  for (let i = 0; i < numRows; i++) {
+    const rowY = outerY + i * rowHeight;
+
+    // Horizontale Trennlinien (im Rahmenbereich)
+    if (i > 0) {
+      // Links
+      gridGraphics.moveTo(outerX, rowY).lineTo(innerX, rowY)
+        .stroke({ color: 0x000000, width: 0.3 });
+      // Rechts
+      gridGraphics.moveTo(innerX + innerW, rowY).lineTo(outerX + outerW, rowY)
+        .stroke({ color: 0x000000, width: 0.3 });
+    }
+
+    // Buchstabe (zentriert)
+    const letterText = new Text({ text: letters[i], style: textStyle });
+    letterText.anchor.set(0.5, 0.5);
+    // Links
+    letterText.position.set(outerX + (INNER_MARGIN * px) / 2, rowY + rowHeight / 2);
+    frame.addChild(letterText);
+    // Rechts
+    const letterTextR = new Text({ text: letters[i], style: textStyle });
+    letterTextR.anchor.set(0.5, 0.5);
+    letterTextR.position.set(outerX + outerW - (INNER_MARGIN * px) / 2, rowY + rowHeight / 2);
+    frame.addChild(letterTextR);
+  }
+
+  frame.addChild(gridGraphics);
+
+  // --- Vereinfachter Titelblock (unten rechts, 180mm × 46mm) ---
+  const tbW = 180 * px;
+  const tbH = 46 * px;
+  const tbX = innerX + innerW - tbW;
+  const tbY = innerY + innerH - tbH;
+
+  const titleBlock = new Graphics();
+  // Rahmen des Titelblocks
+  titleBlock.rect(tbX, tbY, tbW, tbH)
+    .fill({ color: 0xffffff })
+    .stroke({ color: 0x000000, width: 0.5 });
+
+  // Horizontale Trennlinien im Titelblock
+  const tbRowH = tbH / 4;
+  for (let i = 1; i < 4; i++) {
+    titleBlock.moveTo(tbX, tbY + i * tbRowH)
+      .lineTo(tbX + tbW, tbY + i * tbRowH)
+      .stroke({ color: 0x000000, width: 0.3 });
+  }
+
+  // Vertikale Trennlinie (links: ~56mm für Firma, rechts: Details)
+  const leftZoneW = 56 * px;
+  titleBlock.moveTo(tbX + leftZoneW, tbY)
+    .lineTo(tbX + leftZoneW, tbY + tbH)
+    .stroke({ color: 0x000000, width: 0.3 });
+
+  frame.addChild(titleBlock);
+
+  // Titelblock-Texte
+  const titleStyle = new TextStyle({ fontSize: 10, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' });
+  const labelStyle = new TextStyle({ fontSize: 6, fontFamily: 'Arial, sans-serif', fill: 0x666666 });
+  const valueStyle = new TextStyle({ fontSize: 8, fontFamily: 'Arial, sans-serif', fill: 0x000000 });
+
+  // SMTEC AG (links oben im Titelblock)
+  const companyText = new Text({ text: 'SMTEC AG', style: titleStyle });
+  companyText.position.set(tbX + 4 * px, tbY + 4 * px);
+  frame.addChild(companyText);
+
+  // Panel-Name (rechts oben im Titelblock, über der Trennlinie)
+  const nameLabel = new Text({ text: 'Benennung', style: labelStyle });
+  nameLabel.position.set(tbX + leftZoneW + 3 * px, tbY + 2 * px);
+  frame.addChild(nameLabel);
+  const nameValue = new Text({ text: panel.name || 'Panel', style: valueStyle });
+  nameValue.position.set(tbX + leftZoneW + 3 * px, tbY + 8 * px);
+  frame.addChild(nameValue);
+
+  // Massstab (Zeile 4 rechts)
+  const scaleLabel = new Text({ text: 'Massstab', style: labelStyle });
+  scaleLabel.position.set(tbX + leftZoneW + 3 * px, tbY + 3 * tbRowH + 2 * px);
+  frame.addChild(scaleLabel);
+  const scaleValue = new Text({ text: `1:${config.scaleRatio}`, style: new TextStyle({ fontSize: 10, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' }) });
+  scaleValue.position.set(tbX + leftZoneW + 3 * px, tbY + 3 * tbRowH + 10 * px);
+  frame.addChild(scaleValue);
+
+  // Format (rechts neben Massstab)
+  const subColW = (tbW - leftZoneW) / 4;
+  const formatLabel = new Text({ text: 'Format', style: labelStyle });
+  formatLabel.position.set(tbX + leftZoneW + subColW + 3 * px, tbY + 3 * tbRowH + 2 * px);
+  frame.addChild(formatLabel);
+  const formatValue = new Text({ text: 'A4', style: valueStyle });
+  formatValue.position.set(tbX + leftZoneW + subColW + 3 * px, tbY + 3 * tbRowH + 10 * px);
+  frame.addChild(formatValue);
+
+  // Datum
+  const dateLabel = new Text({ text: 'Datum', style: labelStyle });
+  dateLabel.position.set(tbX + leftZoneW + 3 * px, tbY + tbRowH + 2 * px);
+  frame.addChild(dateLabel);
+  const today = new Date().toLocaleDateString('de-CH');
+  const dateValue = new Text({ text: today, style: valueStyle });
+  dateValue.position.set(tbX + leftZoneW + 3 * px, tbY + tbRowH + 8 * px);
+  frame.addChild(dateValue);
+
+  // Zeichnungsnummer (falls vorhanden)
+  if (panel.drawingNumber) {
+    const dnLabel = new Text({ text: 'Zeichnungs-Nr.', style: labelStyle });
+    dnLabel.position.set(tbX + leftZoneW + 2 * subColW + 3 * px, tbY + 2 * px);
+    frame.addChild(dnLabel);
+    const dnValue = new Text({ text: panel.drawingNumber, style: valueStyle });
+    dnValue.position.set(tbX + leftZoneW + 2 * subColW + 3 * px, tbY + 8 * px);
+    frame.addChild(dnValue);
+  }
+
+  return frame;
+}
+
+/**
  * Erstellt das komplette Ordinaten-Bemaßungs-Overlay als PixiJS Container.
  *
  * VSM/ISO 129 Ordinatenbemaßung:
@@ -4873,6 +5189,48 @@ function createDimensionOverlay(
     overlay.addChild(tickContainer);
   }
 
+  // === 3b. Eckenradius-Bemaßung (Führungslinie + R-Wert an der Ecke oben links) ===
+  if (panel.frame.cornerRadius && panel.frame.cornerRadius > 0) {
+    const cr = panel.frame.cornerRadius;
+    // Punkt auf dem Bogen (45°-Position der oberen linken Ecke)
+    // Ecke oben links: Bogenzentrum ist bei (cr, cr), Bogen geht von 180° bis 270°
+    // 45°-Mitte des Bogens = 225° = 5*PI/4
+    const angle = (5 * Math.PI) / 4;
+    const arcPointX = cr + cr * Math.cos(angle); // Punkt AUF dem Bogen
+    const arcPointY = cr + cr * Math.sin(angle);
+
+    // Führungslinie: vom Bogen diagonal nach links oben raus
+    const leaderEndX = arcPointX - cr * 0.8;
+    const leaderEndY = arcPointY - cr * 0.8;
+
+    // Führungslinie zeichnen
+    lineGraphics.moveTo(arcPointX * px, arcPointY * px);
+    lineGraphics.lineTo(leaderEndX * px, leaderEndY * px);
+    lineGraphics.stroke({ color: COLOR_PANEL, width: 1 });
+
+    // Pfeilspitze am Bogen-Ende (zeigt zum Bogen hin)
+    const arrowLen = 1.2;
+    const arrowAngle = Math.atan2(arcPointY - leaderEndY, arcPointX - leaderEndX);
+    const a1 = arrowAngle + 0.4;
+    const a2 = arrowAngle - 0.4;
+    lineGraphics.moveTo(arcPointX * px, arcPointY * px);
+    lineGraphics.lineTo((arcPointX - arrowLen * Math.cos(a1)) * px, (arcPointY - arrowLen * Math.sin(a1)) * px);
+    lineGraphics.stroke({ color: COLOR_PANEL, width: 1 });
+    lineGraphics.moveTo(arcPointX * px, arcPointY * px);
+    lineGraphics.lineTo((arcPointX - arrowLen * Math.cos(a2)) * px, (arcPointY - arrowLen * Math.sin(a2)) * px);
+    lineGraphics.stroke({ color: COLOR_PANEL, width: 1 });
+
+    // Text "R X.X"
+    const radiusText = new Text({
+      text: `R ${cr.toFixed(1)}`,
+      style: new TextStyle({ fontSize: 6, fill: COLOR_PANEL, fontFamily: 'Arial', fontWeight: 'bold' }),
+    });
+    radiusText.resolution = 4;
+    radiusText.anchor.set(1, 1); // Rechts unten verankern (Text endet an der Führungslinie)
+    radiusText.position.set(leaderEndX * px, leaderEndY * px - 1);
+    overlay.addChild(radiusText);
+  }
+
   // === 4. Detail-Legende (rechts neben dem Panel) ===
   {
     const legendKey = 'routing-legend';
@@ -4880,7 +5238,7 @@ function createDimensionOverlay(
       const legendOffset = labelOffsets[legendKey] || { dx: 0, dy: 0 };
       // Symbol-Typen: 'line' = farbige Linie, 'dashed' = gestrichelt, 'circle' = Kreis,
       // 'fiducial' = Punkt+Ring, 'hole' = Bohrungssymbol, 'routing' = dicke Linie
-      type LegendSymbol = 'line' | 'dashed' | 'circle' | 'fiducial' | 'badmark' | 'badmark-master' | 'hole' | 'routing';
+      type LegendSymbol = 'line' | 'dashed' | 'circle' | 'fiducial' | 'badmark' | 'badmark-master' | 'hole' | 'routing' | 'radius';
       const allEntries: Array<{ color: number; label: string; symbol: LegendSymbol; toolDiameter?: number }> = [];
 
       // Farbcode-Erklärungen (immer anzeigen)
@@ -4922,6 +5280,10 @@ function createDimensionOverlay(
       Array.from(holeTypes.values()).forEach(({ label }) => {
         allEntries.push({ color: COLOR_HOLE, label, symbol: 'hole' });
       });
+      // Eckenradius (wenn vorhanden)
+      if (panel.frame.cornerRadius && panel.frame.cornerRadius > 0) {
+        allEntries.push({ color: COLOR_PANEL, label: `Eckenradius: R ${panel.frame.cornerRadius.toFixed(1)}`, symbol: 'radius' as LegendSymbol });
+      }
       // Fräskonturen (unique Typen)
       const routingTypes = new Map<string, { color: number; label: string; toolDiameter: number }>();
       for (const contour of panel.routingContours) {
@@ -4938,10 +5300,10 @@ function createDimensionOverlay(
       });
 
       if (allEntries.length > 0) {
-        const lineH = 4;
+        const lineH = 5;
         const pad = 2;
-        const legendW = 40;
-        const titleH = 5;
+        const legendW = 48;
+        const titleH = 6;
         const legendH = pad * 2 + allEntries.length * lineH + titleH;
 
         // Standard-Position: rechts neben dem Panel
@@ -4962,7 +5324,7 @@ function createDimensionOverlay(
         // Titel
         const titleText = new Text({
           text: 'Details',
-          style: new TextStyle({ fontSize: 7, fill: 0xffffff, fontFamily: 'Arial', fontWeight: 'bold' }),
+          style: new TextStyle({ fontSize: 8, fill: 0xffffff, fontFamily: 'Arial', fontWeight: 'bold' }),
         });
         titleText.resolution = 4;
         titleText.position.set(pad * px, pad * px);
@@ -5025,6 +5387,13 @@ function createDimensionOverlay(
               symG.stroke({ color: entry.color, width: 1.5 });
               dx += dashLen + gapLen;
             }
+          } else if (entry.symbol === 'radius') {
+            // Eckenradius: Viertelkreis-Bogen als Symbol
+            const arcR = 1.8 * px;
+            const arcCX = (pad + 1) * px;
+            const arcCY = symCenterY + arcR * 0.3;
+            symG.arc(arcCX, arcCY, arcR, -Math.PI / 2, 0);
+            symG.stroke({ color: entry.color, width: 1.5 });
           } else if (entry.symbol === 'routing') {
             // Fräskontur: halbtransparenter Fräserbreite-Streifen + dünne Mittellinie
             // (exakt wie in der Hauptzeichnung)
@@ -5051,7 +5420,7 @@ function createDimensionOverlay(
           // Text — vertikal auf Symbolmitte ausgerichtet
           const txt = new Text({
             text: entry.label,
-            style: new TextStyle({ fontSize: 5, fill: entry.color, fontFamily: 'Arial' }),
+            style: new TextStyle({ fontSize: 6, fill: entry.color, fontFamily: 'Arial' }),
           });
           txt.resolution = 4;
           txt.anchor.set(0, 0.5); // Links ausrichten, vertikal zentriert

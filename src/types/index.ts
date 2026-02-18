@@ -528,6 +528,11 @@ export interface Panel {
   routingConfig: RoutingConfig;
   /** Bemaßungs-Überschreibungen (Label-Positionen, Maßlinien-Abstände) */
   dimensionOverrides?: DimensionOverrides;
+  /** Zeichnungsvorschau-Konfiguration (Panel-Position + Massstab für Canvas + PDF) */
+  drawingPreviewConfig?: DrawingPreviewConfig;
+  /** Manueller PDF-Massstab-Override (z.B. 0.5 = 2:1 Vergrösserung, 2 = 1:2 Verkleinerung)
+   *  Wenn nicht gesetzt oder 0: Automatische Berechnung (wie bisher) */
+  pdfScaleOverride?: number;
   /** Zeichnungsnummer für PDF-Titelblock */
   drawingNumber?: string;
   /** Gezeichnet von (Name/Kürzel) */
@@ -637,6 +642,30 @@ export interface DimensionOverrides {
   ordinateAxisOffset?: { x: number; y: number };
   /** Fräskonturen-Bemaßung in der Ordinatenbemaßung ausblenden */
   hideRoutingDimensions?: boolean;
+}
+
+// ============================================================================
+// Zeichnungsvorschau-Konfiguration (Canvas + PDF)
+// ============================================================================
+
+/**
+ * Konfiguration für die Zeichnungsvorschau im Canvas
+ *
+ * Speichert die Position des Panels auf dem "Papier" und den Massstab.
+ * Diese Werte werden vom Canvas-Drawing-Preview verwendet und
+ * beim PDF-Export als Panel-Positionierung übernommen.
+ */
+export interface DrawingPreviewConfig {
+  /** Panel-Position in mm vom linken Papierrand */
+  panelOffsetX: number;
+  /** Panel-Position in mm vom oberen Papierrand (Canvas Y-down) */
+  panelOffsetY: number;
+  /** ISO 5455 Massstab-Verhältnis (1, 1.5, 2, 2.5, 3, 4, 5, 10, 20) */
+  scaleRatio: number;
+  /** Papierbreite in mm (297 = A4 quer) */
+  paperWidth: number;
+  /** Papierhöhe in mm (210 = A4 quer) */
+  paperHeight: number;
 }
 
 // ============================================================================

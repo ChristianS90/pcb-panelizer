@@ -31,8 +31,9 @@ import {
   Spline,
   Pencil,
   RotateCw,
+  FileText,
 } from 'lucide-react';
-import { usePanelStore, useBoards, useActiveTool, useShowDimensions, useOutlineDefineState } from '@/stores/panel-store';
+import { usePanelStore, useBoards, useActiveTool, useShowDimensions, useShowDrawingPreview, useOutlineDefineState } from '@/stores/panel-store';
 import { cn } from '@/lib/utils';
 import { getAllLayerTypes, getLayerColor } from '@/lib/gerber';
 import type { Tool, GerberLayerType } from '@/types';
@@ -602,24 +603,6 @@ const simpleTools: { id: Tool; label: string; icon: React.ReactNode; description
 ];
 
 /**
- * Untereinträge im Marker-Dropdown (Fiducial + Badmark)
- */
-const markerSubTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
-  {
-    id: 'place-fiducial',
-    label: 'Fiducial',
-    icon: <CircleDot className="w-4 h-4" />,
-    description: 'Fiducial-Marker platzieren',
-  },
-  {
-    id: 'place-badmark',
-    label: 'Badmark',
-    icon: <Square className="w-4 h-4" />,
-    description: 'Badmark platzieren',
-  },
-];
-
-/**
  * Untereinträge im Tab/Mousebite-Dropdown
  */
 const tabSubTools: { id: Tool; label: string; icon: React.ReactNode; description: string }[] = [
@@ -670,10 +653,6 @@ export function Toolbar() {
   const activeTool = useActiveTool();
   const setActiveTool = usePanelStore((state) => state.setActiveTool);
 
-  // Dropdown-Status für Marker (Fiducial/Badmark)
-  const [markerDropdownOpen, setMarkerDropdownOpen] = useState(false);
-  const markerDropdownRef = useRef<HTMLDivElement>(null);
-
   // Dropdown-Status für Tab/Mousebite
   const [tabDropdownOpen, setTabDropdownOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -682,9 +661,6 @@ export function Toolbar() {
   const [routeDropdownOpen, setRouteDropdownOpen] = useState(false);
   const routeDropdownRef = useRef<HTMLDivElement>(null);
 
-  // Aktuell gewähltes Marker-Sub-Tool merken
-  const [selectedMarkerSubTool, setSelectedMarkerSubTool] = useState<Tool>('place-fiducial');
-
   // Aktuell gewähltes Sub-Tool merken (Tab oder Mousebite)
   const [selectedTabSubTool, setSelectedTabSubTool] = useState<Tool>('place-tab');
 
@@ -692,21 +668,16 @@ export function Toolbar() {
   const [selectedRouteSubTool, setSelectedRouteSubTool] = useState<Tool>('route-free-draw');
 
   // Das aktive Sub-Tool-Objekt finden (für Icon + Label im Button)
-  const activeMarkerSubTool = markerSubTools.find((t) => t.id === selectedMarkerSubTool) || markerSubTools[0];
   const activeSubTool = tabSubTools.find((t) => t.id === selectedTabSubTool) || tabSubTools[0];
   const activeRouteSubTool = routeSubTools.find((t) => t.id === selectedRouteSubTool) || routeSubTools[0];
 
   // Ist eines der Sub-Tools gerade aktiv?
-  const isMarkerGroupActive = activeTool === 'place-fiducial' || activeTool === 'place-badmark';
   const isTabGroupActive = activeTool === 'place-tab' || activeTool === 'place-mousebite';
   const isRouteGroupActive = activeTool === 'route-follow-outline' || activeTool === 'route-free-draw';
 
   // Dropdown schliessen wenn man ausserhalb klickt
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (markerDropdownRef.current && !markerDropdownRef.current.contains(e.target as Node)) {
-        setMarkerDropdownOpen(false);
-      }
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
         setTabDropdownOpen(false);
       }
@@ -714,11 +685,11 @@ export function Toolbar() {
         setRouteDropdownOpen(false);
       }
     };
-    if (markerDropdownOpen || tabDropdownOpen || routeDropdownOpen) {
+    if (tabDropdownOpen || routeDropdownOpen) {
       document.addEventListener('mousedown', handleClickOutside);
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
-  }, [markerDropdownOpen, tabDropdownOpen, routeDropdownOpen]);
+  }, [tabDropdownOpen, routeDropdownOpen]);
 
   return (
     <div className="bg-white border-b border-gray-200 px-3 py-1.5 flex items-center gap-1">
@@ -747,84 +718,49 @@ export function Toolbar() {
         </button>
       ))}
 
-      {/* Marker (Fiducial / Badmark) - Dropdown-Button */}
-      <div className="relative" ref={markerDropdownRef}>
-        <div className="flex items-center">
-          {/* Hauptbutton: Aktiviert das zuletzt gewählte Marker-Sub-Tool */}
-          <button
-            onClick={() => {
-              setActiveTool(selectedMarkerSubTool);
-              setMarkerDropdownOpen(false);
-            }}
-            className={cn(
-              'flex items-center gap-2 px-3 py-1.5 rounded-l-lg transition-colors text-sm font-medium',
-              isMarkerGroupActive
-                ? 'bg-green-100 text-green-700'
-                : 'hover:bg-gray-100 text-gray-600'
-            )}
-            title={activeMarkerSubTool.description}
-          >
-            <div
-              className={cn(
-                'p-1 rounded',
-                isMarkerGroupActive ? 'bg-green-200' : 'bg-gray-100'
-              )}
-            >
-              {activeMarkerSubTool.icon}
-            </div>
-            {activeMarkerSubTool.label}
-          </button>
-
-          {/* Dropdown-Pfeil */}
-          <button
-            onClick={() => setMarkerDropdownOpen(!markerDropdownOpen)}
-            className={cn(
-              'px-1.5 py-1.5 rounded-r-lg border-l transition-colors',
-              isMarkerGroupActive
-                ? 'bg-green-100 text-green-700 border-green-200'
-                : 'hover:bg-gray-100 text-gray-600 border-gray-200'
-            )}
-            title="Marker-Typ wählen"
-          >
-            <ChevronDown className="w-3 h-3" />
-          </button>
-        </div>
-
-        {/* Dropdown-Menü */}
-        {markerDropdownOpen && (
-          <div className="absolute top-full left-0 mt-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 min-w-[200px]">
-            {markerSubTools.map((sub) => (
-              <button
-                key={sub.id}
-                onClick={() => {
-                  setSelectedMarkerSubTool(sub.id);
-                  setActiveTool(sub.id);
-                  setMarkerDropdownOpen(false);
-                }}
-                className={cn(
-                  'w-full flex items-center gap-3 px-3 py-2 text-sm transition-colors text-left',
-                  activeTool === sub.id
-                    ? 'bg-green-50 text-green-700'
-                    : 'hover:bg-gray-50 text-gray-700'
-                )}
-              >
-                <div
-                  className={cn(
-                    'p-1 rounded',
-                    activeTool === sub.id ? 'bg-green-200' : 'bg-gray-100'
-                  )}
-                >
-                  {sub.icon}
-                </div>
-                <div>
-                  <div className="font-medium">{sub.label}</div>
-                  <div className="text-xs text-gray-400">{sub.description}</div>
-                </div>
-              </button>
-            ))}
-          </div>
+      {/* Fiducial - Eigener Button */}
+      <button
+        onClick={() => setActiveTool('place-fiducial')}
+        className={cn(
+          'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium',
+          activeTool === 'place-fiducial'
+            ? 'bg-green-100 text-green-700'
+            : 'hover:bg-gray-100 text-gray-600'
         )}
-      </div>
+        title="Fiducial-Marker platzieren"
+      >
+        <div
+          className={cn(
+            'p-1 rounded',
+            activeTool === 'place-fiducial' ? 'bg-green-200' : 'bg-gray-100'
+          )}
+        >
+          <CircleDot className="w-4 h-4" />
+        </div>
+        Fiducial
+      </button>
+
+      {/* Badmark - Eigener Button */}
+      <button
+        onClick={() => setActiveTool('place-badmark')}
+        className={cn(
+          'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium',
+          activeTool === 'place-badmark'
+            ? 'bg-amber-100 text-amber-700'
+            : 'hover:bg-gray-100 text-gray-600'
+        )}
+        title="Badmark platzieren"
+      >
+        <div
+          className={cn(
+            'p-1 rounded',
+            activeTool === 'place-badmark' ? 'bg-amber-200' : 'bg-gray-100'
+          )}
+        >
+          <Square className="w-4 h-4" />
+        </div>
+        Badmark
+      </button>
 
       {/* Tab / Mousebite - Dropdown-Button */}
       <div className="relative" ref={dropdownRef}>
@@ -984,9 +920,11 @@ export function Toolbar() {
         )}
       </div>
 
-      {/* Trennlinie + Maße-Button */}
+      {/* Trennlinie + Maße-Button + Zeichnungs-Button */}
       <div className="w-px h-6 bg-gray-200 mx-1" />
       <DimensionToggleButton />
+      <div className="w-px h-6 bg-gray-200 mx-1" />
+      <DrawingPreviewToggleButton />
 
       {/* Tastenkürzel-Hinweis */}
       <div className="ml-auto flex items-center gap-3 text-xs text-gray-400">
@@ -1056,5 +994,37 @@ function DimensionToggleButton() {
         </button>
       )}
     </div>
+  );
+}
+
+/**
+ * Button zum Ein-/Ausschalten der Zeichnungsvorschau im Canvas.
+ * Zeigt ein Dokument-Icon und wird grün hervorgehoben wenn aktiv.
+ */
+function DrawingPreviewToggleButton() {
+  const showDrawingPreview = useShowDrawingPreview();
+  const toggleDrawingPreview = usePanelStore((state) => state.toggleDrawingPreview);
+
+  return (
+    <button
+      onClick={toggleDrawingPreview}
+      className={cn(
+        'flex items-center gap-2 px-3 py-1.5 rounded-lg transition-colors text-sm font-medium',
+        showDrawingPreview
+          ? 'bg-green-100 text-green-700'
+          : 'hover:bg-gray-100 text-gray-600'
+      )}
+      title="Zeichnungsvorschau ein-/ausblenden"
+    >
+      <div
+        className={cn(
+          'p-1 rounded',
+          showDrawingPreview ? 'bg-green-200' : 'bg-gray-100'
+        )}
+      >
+        <FileText className="w-4 h-4" />
+      </div>
+      Zeichnungsvorschau
+    </button>
   );
 }
