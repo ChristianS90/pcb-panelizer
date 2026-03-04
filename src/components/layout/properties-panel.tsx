@@ -27,14 +27,13 @@ import {
   Scissors,
   Eye,
   EyeOff,
-  ArrowLeftRight,
   Ruler,
   Plus,
   X,
   FileText,
   Users,
 } from 'lucide-react';
-import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useSelectedBadmarkId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard } from '@/stores/panel-store';
+import { usePanelStore, usePanel, useGrid, useActiveTool, useSelectedTabId, useSelectedFreeMousebiteId, useSelectedVScoreLineId, useSelectedRoutingContourId, useSelectedBadmarkId, useShowVScoreLines, useShowRoutingContours, countArcsInBoard, useRouteSegmentSelectState } from '@/stores/panel-store';
 import { cn, formatMM } from '@/lib/utils';
 import type { Tab, VScoreLine, RoutingContour, Badmark } from '@/types';
 import { getUsers, addUser, removeUser, type User } from '@/lib/utils/user-management';
@@ -478,9 +477,8 @@ function ArrayConfig() {
 
   const boards = usePanelStore((state) => state.panel.boards);
   const instances = usePanelStore((state) => state.panel.instances);
-  const createBoardArray = usePanelStore((state) => state.createBoardArray);
   const rotatePanelCCW = usePanelStore((state) => state.rotatePanelCCW);
-  const setPanelSize = usePanelStore((state) => state.setPanelSize);
+  const applyArrayChange = usePanelStore((state) => state.applyArrayChange);
   const frame = usePanelStore((state) => state.panel.frame);
 
   // Board-Größe (erstes Board)
@@ -493,7 +491,9 @@ function ArrayConfig() {
   const calculatedHeight = frame.bottom + (rows * boardHeight) + ((rows - 1) * gapY) + frame.top;
 
   /**
-   * Erstellt das Array und passt die Panel-Größe an
+   * Erstellt das Array und passt die Panel-Größe an.
+   * Verwendet applyArrayChange für einen einzigen Undo-Schritt,
+   * der Panel-Grösse + Board-Array + Repositionierung aller Elemente kombiniert.
    */
   const handleCreateArray = () => {
     if (!board) {
@@ -501,14 +501,13 @@ function ArrayConfig() {
       return;
     }
 
-    // Panel-Größe setzen
-    setPanelSize(calculatedWidth, calculatedHeight);
-
-    // Array erstellen, Start nach dem linken/unteren Nutzenrand
-    createBoardArray(
+    // Alles in einem Schritt: Panel-Grösse + Array + Repositionierung
+    applyArrayChange(
       board.id,
       { columns, rows, gapX, gapY },
-      { x: frame.left, y: frame.bottom }
+      calculatedWidth,
+      calculatedHeight,
+      frame
     );
   };
 
@@ -1334,16 +1333,20 @@ function VScoreLineItem({
 
 function RoutingContoursConfig() {
   const panel = usePanel();
+  const activeTool = useActiveTool();
   const setRoutingConfig = usePanelStore((state) => state.setRoutingConfig);
   const autoGenerateRoutingContours = usePanelStore((state) => state.autoGenerateRoutingContours);
   const clearAllRoutingContours = usePanelStore((state) => state.clearAllRoutingContours);
   const removeRoutingContour = usePanelStore((state) => state.removeRoutingContour);
   const toggleRoutingContourVisibility = usePanelStore((state) => state.toggleRoutingContourVisibility);
-  const toggleRoutingContourFlipOffset = usePanelStore((state) => state.toggleRoutingContourFlipOffset);
+  const setRoutingContourOffsetSide = usePanelStore((state) => state.setRoutingContourOffsetSide);
   const toggleRoutingDimensions = usePanelStore((state) => state.toggleRoutingDimensions);
   const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
   const selectedRoutingContourId = useSelectedRoutingContourId();
   const updateRoutingContourEndpoints = usePanelStore((state) => state.updateRoutingContourEndpoints);
+  const segState = useRouteSegmentSelectState();
+  const finalizeSegmentSelection = usePanelStore((state) => state.finalizeSegmentSelection);
+  const setActiveTool = usePanelStore((state) => state.setActiveTool);
 
   const { routingConfig, routingContours } = panel;
   const contourCount = routingContours.length;
@@ -1498,6 +1501,35 @@ function RoutingContoursConfig() {
         </p>
       )}
 
+      {/* Info-Box: Segment-Auswahl aktiv (route-follow-outline Modus) */}
+      {activeTool === 'route-follow-outline' && segState.boardInstanceId && (
+        <div className="border-t pt-3 mt-3 space-y-2">
+          <div className="bg-green-50 border border-green-200 rounded p-2 space-y-2">
+            <div className="text-xs font-medium text-green-700">
+              {segState.selectedSegmentIndices.length} Segment{segState.selectedSegmentIndices.length !== 1 ? 'e' : ''} ausgewählt
+              <span className="text-green-500 font-normal ml-1">
+                (von {segState.outlineSegments.length})
+              </span>
+            </div>
+            <button
+              onClick={() => {
+                finalizeSegmentSelection();
+                if (usePanelStore.getState().routeSegmentSelectState.boardInstanceId === null) {
+                  setActiveTool('select');
+                }
+              }}
+              disabled={segState.selectedSegmentIndices.length === 0}
+              className="w-full bg-green-600 text-white text-xs py-1.5 px-2 rounded hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              Fräskontur erstellen (Enter)
+            </button>
+            <p className="text-[10px] text-green-600">
+              Fenster ziehen = Bereich auswählen, Ctrl+Fenster = Abwählen
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Liste der Fräskonturen */}
       {contourCount > 0 && (
         <div className="border-t pt-3 mt-3 space-y-2">
@@ -1513,7 +1545,7 @@ function RoutingContoursConfig() {
                 isSelected={contour.id === selectedRoutingContourId}
                 onSelect={() => selectRoutingContour(contour.id)}
                 onToggleVisibility={() => toggleRoutingContourVisibility(contour.id)}
-                onFlipOffset={() => toggleRoutingContourFlipOffset(contour.id)}
+                onSetOffsetSide={(side) => setRoutingContourOffsetSide(contour.id, side)}
                 onRemove={() => removeRoutingContour(contour.id)}
                 onUpdateEndpoints={(start, end) => updateRoutingContourEndpoints(contour.id, start, end)}
               />
@@ -1537,7 +1569,7 @@ interface RoutingContourItemProps {
   isSelected: boolean;
   onSelect: () => void;
   onToggleVisibility: () => void;
-  onFlipOffset: () => void;
+  onSetOffsetSide: (side: 'none' | 'left' | 'right') => void;
   onRemove: () => void;
   onUpdateEndpoints: (start?: { x: number; y: number }, end?: { x: number; y: number }) => void;
 }
@@ -1549,7 +1581,7 @@ function RoutingContourItem({
   isSelected,
   onSelect,
   onToggleVisibility,
-  onFlipOffset,
+  onSetOffsetSide,
   onRemove,
   onUpdateEndpoints,
 }: RoutingContourItemProps) {
@@ -1629,21 +1661,40 @@ function RoutingContourItem({
               <EyeOff className="w-3.5 h-3.5" />
             )}
           </button>
-          {/* Seite wechseln - nur bei manuellen Konturen (nicht auto, nicht Sync-Kopien) */}
+          {/* Offset-Seite wählen - nur bei manuellen Konturen (nicht auto, nicht Sync-Kopien) */}
           {!contour.isSyncCopy && contour.creationMethod !== 'auto' && (
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onFlipOffset();
-              }}
-              className={cn(
-                "hover:text-blue-600 text-xs",
-                contour.flipOffset ? "text-blue-500" : "text-gray-400"
-              )}
-              title={contour.flipOffset ? 'Offset-Seite zurücksetzen' : 'Offset-Seite wechseln'}
-            >
-              <ArrowLeftRight className="w-3.5 h-3.5" />
-            </button>
+            <div className="flex items-center border rounded overflow-hidden">
+              <button
+                onClick={(e) => { e.stopPropagation(); onSetOffsetSide('left'); }}
+                className={cn(
+                  "px-1 py-0.5 text-[10px] leading-none",
+                  (contour.offsetSide || 'none') === 'left'
+                    ? "bg-blue-500 text-white"
+                    : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                )}
+                title="Fräser links von der Kontur"
+              >L</button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onSetOffsetSide('none'); }}
+                className={cn(
+                  "px-1 py-0.5 text-[10px] leading-none border-x",
+                  (contour.offsetSide || 'none') === 'none'
+                    ? "bg-blue-500 text-white"
+                    : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                )}
+                title="Fräser direkt auf der Kontur (kein Offset)"
+              >M</button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onSetOffsetSide('right'); }}
+                className={cn(
+                  "px-1 py-0.5 text-[10px] leading-none",
+                  (contour.offsetSide || 'none') === 'right'
+                    ? "bg-blue-500 text-white"
+                    : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                )}
+                title="Fräser rechts von der Kontur"
+              >R</button>
+            </div>
           )}
           {/* Löschen - bei Sync-Kopien ausgeblendet (werden automatisch verwaltet) */}
           {!contour.isSyncCopy && (
@@ -1667,10 +1718,10 @@ function RoutingContourItem({
         </div>
       )}
 
-      {/* Badge wenn Offset geflippt */}
-      {contour.flipOffset && (
+      {/* Badge wenn Offset aktiv (links oder rechts) */}
+      {contour.offsetSide && contour.offsetSide !== 'none' && (
         <span className="px-1 py-0.5 rounded text-[10px] bg-blue-50 text-blue-600">
-          Geflippt
+          {contour.offsetSide === 'left' ? 'Links' : 'Rechts'}
         </span>
       )}
 
@@ -2019,6 +2070,8 @@ function BadmarksConfig() {
 
   const addBadmark = usePanelStore((state) => state.addBadmark);
   const removeBadmark = usePanelStore((state) => state.removeBadmark);
+  const setActiveTool = usePanelStore((state) => state.setActiveTool);
+  const activeTool = useActiveTool();
   const clearAllBadmarks = usePanelStore((state) => state.clearAllBadmarks);
   const updateBadmarkPosition = usePanelStore((state) => state.updateBadmarkPosition);
   const selectBadmark = usePanelStore((state) => state.selectBadmark);
@@ -2055,6 +2108,25 @@ function BadmarksConfig() {
           className="w-full mt-1"
         />
       </div>
+
+      {/* Board-Badmark platzieren (aktiviert das Klick-Werkzeug) */}
+      <button
+        onClick={() => setActiveTool('place-badmark')}
+        className={cn(
+          'w-full text-sm py-2 px-3 rounded-lg transition-colors border',
+          activeTool === 'place-badmark'
+            ? 'bg-amber-100 text-amber-700 border-amber-300 font-semibold'
+            : 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200'
+        )}
+      >
+        <div className="flex items-center justify-center gap-2">
+          <Square className="w-4 h-4" />
+          {activeTool === 'place-badmark' ? 'Board-Badmark platzieren (aktiv)' : 'Board-Badmark platzieren'}
+        </div>
+        <div className="text-[10px] text-amber-500 mt-0.5">
+          Klick auf Nutzenrand neben Board
+        </div>
+      </button>
 
       {/* Master-Badmark platzieren */}
       <button
@@ -2260,14 +2332,20 @@ function ToolingConfig() {
   const holeCount = panel.toolingHoles.length;
 
   /**
-   * Fügt Tooling-Bohrungen in den Ecken hinzu
+   * Fügt Tooling-Bohrungen in den Ecken hinzu.
+   * Eine Bohrung (unten-rechts) wird weiter nach innen versetzt,
+   * damit die Orientierung des Panels eindeutig erkennbar ist
+   * (ähnlich wie bei den Fiducials auf den Stirnseiten).
    */
   const addCornerHoles = () => {
+    // Versetzter Abstand für die Orientierungs-Bohrung (doppelt so weit innen)
+    const insetOffset = offset * 2;
+
     const positions = [
-      { x: offset, y: offset },
-      { x: panel.width - offset, y: offset },
-      { x: offset, y: panel.height - offset },
-      { x: panel.width - offset, y: panel.height - offset },
+      { x: offset, y: offset },                                          // unten-links: normal
+      { x: panel.width - insetOffset, y: offset },                       // unten-rechts: weiter innen (Orientierung)
+      { x: offset, y: panel.height - offset },                           // oben-links: normal
+      { x: panel.width - offset, y: panel.height - offset },             // oben-rechts: normal
     ];
 
     positions.forEach((position) => {
@@ -2345,9 +2423,15 @@ function ToolingConfig() {
           </label>
         </div>
 
+        {/* Hinweis zur asymmetrischen Platzierung */}
+        <div className="text-xs text-blue-600 bg-blue-50 p-2 rounded mt-2">
+          Eine Bohrung (unten-rechts) wird weiter innen platziert,
+          damit die <strong>Orientierung</strong> des Panels eindeutig ist.
+        </div>
+
         <button
           onClick={addCornerHoles}
-          className="w-full btn-secondary text-sm mt-3"
+          className="w-full btn-secondary text-sm mt-2"
         >
           4 Eck-Bohrungen hinzufügen
         </button>

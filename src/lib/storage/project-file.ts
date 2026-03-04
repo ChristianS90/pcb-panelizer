@@ -187,6 +187,29 @@ export async function deserializeProject(
     }
   }
 
+  // 6a. Migration: flipOffset → offsetSide für ältere Projekte
+  // Alte Projekte hatten flipOffset (boolean), neue haben offsetSide ('none'|'left'|'right').
+  // Bei alten Konturen ist der Offset bereits in den Segmenten eingebrannt.
+  if (panel.routingContours) {
+    for (const contour of panel.routingContours) {
+      const c = contour as any;
+      if (c.offsetSide === undefined) {
+        if (c.flipOffset === true) {
+          // flipOffset war aktiv → Offset war auf der "geflippten" Seite
+          c.offsetSide = 'left';
+        } else {
+          // flipOffset war false/undefined → normaler Zustand
+          // Bei alten Konturen war der Offset bereits in den Segmenten,
+          // daher 'none' wäre falsch — diese hatten bereits einen Offset eingebaut.
+          // Da wir nicht wissen ob alt+Offset oder neu+keineOffset: 'none' setzen
+          c.offsetSide = 'none';
+        }
+        // Altes Feld entfernen
+        delete c.flipOffset;
+      }
+    }
+  }
+
   // 6b. Migration: badmarks-Array für ältere Projekte setzen
   if (!(panel as any).badmarks) {
     (panel as any).badmarks = [];

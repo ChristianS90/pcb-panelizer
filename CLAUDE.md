@@ -218,7 +218,7 @@ Der `usePanelStore` enthält:
 - [x] **Erweiterte Fräskonturen** (3 Erstellungsmethoden)
   - **Auto-Generierung** (wie bisher, jetzt mit `creationMethod: 'auto'`)
   - **Frei zeichnen** (`route-free-draw`): Polyline per Klick, Doppelklick zum Abschliessen
-  - **Kontur folgen** (`route-follow-outline`): Fräspfad entlang Board-Outline zwischen Start/Endpunkt
+  - **Kontur folgen** (`route-follow-outline`): Segment-Auswahl per Klick/Rubber-Band, 1:1 Segment-Übernahme, Ketten-Reparatur, Gruppierung
 - [x] **Fräskontur-Dropdown** in der Toolbar (cyan, analog Tab/Mousebite)
 - [x] **Start-/Endpunkt-Bearbeitung** für manuelle Konturen
   - Grüner Handle am Start, roter Handle am Ende (nur bei Auswahl)
@@ -276,6 +276,9 @@ Der `usePanelStore` enthält:
   - Farbcode-Erklärung + Detailparameter (V-Score Tiefe/Winkel, Fiducial Ø, Bohrung Ø, Fräser Ø)
   - Per Drag & Drop verschiebbar, per Rechtsklick ausblendbar
   - Offset in `panel.dimensionOverrides.labelOffsets["routing-legend"]` gespeichert
+  - **Zeichnungsvorschau**: Legende an der fixen PDF-Position (rechts oben über Titelblock, rechtsbündig am Seitenrahmen)
+  - Position wird von Seiten-Koordinaten in panelTarget-lokale Koordinaten umgerechnet (inkl. scaleRatio-Kompensation)
+  - In normaler Ansicht (ohne Vorschau) weiterhin panel-relativ mit Drag-Offset
 - [x] **Rechtsklick zum Ausblenden** — Einzelne Tick-Marks oder Legende per Rechtsklick entfernen
   - Ausgeblendete Elemente in `panel.dimensionOverrides.hiddenElements` gespeichert
   - Keys: `ord-x-*` für X-Achse, `ord-y-*` für Y-Achse, `routing-legend` für Legende
@@ -298,15 +301,20 @@ Der `usePanelStore` enthält:
   - **History-Limit**: Max. 50 Schritte, ältere werden automatisch verworfen
   - Alle wichtigen Aktionen speichern einen Snapshot: Board/Instanz-Änderungen, Panel-Drehung, V-Score, Fiducials, Tooling Holes, Mousebites, Fräskonturen, Bemaßungen
   - **Drag & Drop**: Bei jedem Drag-Start (Fiducials, Tooling Holes, Tabs, V-Score, Fräskonturen-Handles, Bemaßungs-Labels) wird ein Snapshot gespeichert
-- [x] **Fräskontur: Offset-Seite wechseln (Flip Offset)**
-  - Neues Feld `flipOffset` auf `RoutingContour`
-  - Button (Doppelpfeil-Symbol) pro Kontur in der Seitenleiste
-  - Badge "Geflippt" wird angezeigt wenn aktiv
-  - Geometrische Neuberechnung: Segmente werden um `2 * toolRadius` verschoben, Bogen-Radius angepasst
-  - Flip-Status wird bei Master-Board-Synchronisation korrekt übertragen
-- [x] **Verbesserte Offset-Berechnung (Winding Direction)**
-  - Neue Methode: **Shoelace-Formel** (`computeOutlineWindingSign`) statt Board-Mitte-Heuristik
-  - Funktioniert korrekt bei konkaven Board-Formen und Einbuchtungen
+- [x] **Fräskontur: Offset-Seite wählen (Links/Mitte/Rechts)**
+  - Feld `offsetSide` auf `RoutingContour`: `'none'` | `'left'` | `'right'`
+  - 3-Zustand-Buttons (L/M/R) pro Kontur in der Seitenleiste
+  - Badge "Links" oder "Rechts" wird angezeigt wenn Offset aktiv
+  - "Kontur folgen" schlägt automatisch Offset-Seite vor (gegen aussen der Leiterplatte, basierend auf Board-Zentrum)
+  - Offset kann nachträglich über `setRoutingContourOffsetSide` geändert werden
+  - **CNC-Standard Fräskompensation** (wie Mastercam G41/G42):
+    - "Links"/"Rechts" relativ zur **Fahrtrichtung** (Start→End) jedes Segments
+    - Linien: Links-Normale = `(dy, -dx)/len` in Screen-Koordinaten (Y-down)
+    - Bögen: CW → links = Radius vergrößern, CCW → links = Radius verkleinern
+    - Keine Abhängigkeit von Winding-Direction oder Board-Zentrum
+  - **Gerichtete Kette**: `mergeGroupToRoutingSegments` stellt sicher, dass End[i] ≈ Start[i+1] (rückwärts laufende Segmente werden automatisch umgedreht)
+  - Offset-Seite wird bei Master-Board-Synchronisation korrekt übertragen
+  - Migration: Alte Projekte mit `flipOffset` werden automatisch auf `offsetSide` migriert
 - [x] **Fräskonturen-Bemaßung ein-/ausblenden**
   - Neues Feld `hideRoutingDimensions` in `DimensionOverrides`
   - Lineal-Button in der Fräskonturen-Kopfzeile
@@ -321,7 +329,7 @@ Der `usePanelStore` enthält:
   - Auto-Scroll zur ausgewählten Kontur
   - Tastatur-Fix: `stopPropagation` verhindert Canvas-Löschung bei Eingabe
 - [x] **Canvas-Legende: Typspezifische Symbole**
-  - Durchgezogene/gestrichelte Linien, Fiducial-Ring, Bohrungs-Kreuz, Fräser-Streifen
+  - Durchgezogene/gestrichelte Linien, Fiducial-Ring, Bohrungs-Kreuz, Fräser 3-Linien, Eckenradius Viertelkreis-Bogen
 
 ### Phase 10 - Erledigt
 
@@ -390,15 +398,70 @@ Der `usePanelStore` enthält:
   - Massstab wird sowohl im PDF-Export als auch in der Canvas-Vorschau berücksichtigt
   - Neues Feld `pdfScaleOverride` auf Panel-Typ
 - [x] **Eckenverrundung bemasst**
-  - **Leader-Line mit Pfeilspitze** am abgerundeten Eck (technische Zeichnung, R-Wert)
+  - **Leader-Line mit Pfeilspitze** an der unteren rechten Ecke (technische Zeichnung, R-Wert)
   - Im Canvas und PDF identisch dargestellt
   - **Detail-Legende**: "Eckenradius: R X.X" Eintrag mit Viertelkreis-Symbol
+  - **Default: 2mm Eckenradius** bei neuen Panels
 - [x] **Vergrösserte Schriften in Detail-Legende** (besser lesbar auf gedruckter Zeichnung)
   - PDF: Titel 4→5pt bold, Einträge 3.5→4.5pt, Zeilenhöhe 5→6mm, Breite 50→58mm
   - Canvas: Titel 7→8px, Einträge 5→6px, Zeilenhöhe 4→5mm, Breite 40→48mm
 - [x] **Vergrösserte Schriften im Zeichnungskopf**
   - Werte 6→7pt, Benennung/Zeichnungs-Nr 8→9pt, Massstab/Blatt 7→8pt
   - **Zentrierte Darstellung** von Datum und Name in Gezeichn./Freigabe-Zellen (`drawCenteredInCell()` Helper)
+
+### Phase 13 - Erledigt
+
+- [x] **Automatische Repositionierung aller Panel-Elemente bei Nutzenrand-/Array-Änderungen**
+  - **Smart Anchor Algorithmus**: Elemente in der linken/unteren Panel-Hälfte folgen der linken/unteren Kante, Elemente in der rechten/oberen Hälfte folgen der rechten/oberen Kante
+  - `smartAnchorReposition()` — Reine Hilfsfunktion für positionsbasierte Zuordnung
+  - `generateAutoRoutingContours()` — Reine Funktion (extrahiert aus Store-Action) für Wiederverwendung
+  - **`setFrame`-Action erweitert**: Bei Nutzenrand-Änderungen werden ALLE Elemente automatisch repositioniert:
+    - Board-Instanzen: Shift (dx, dy) — wie bisher
+    - Fiducials + Tooling Holes: Smart Anchor
+    - V-Score Linien: Endpunkte auf neue Panel-Kanten angepasst (0→0, width→newWidth)
+    - Tabs + Free Mousebites: Geleert (müssen neu verteilt werden)
+    - Board-Badmarks: Shift (dx, dy) mit Boards
+    - Master-Badmarks: Smart Anchor
+    - Manuelle Routing-Konturen: Segmente shift inkl. arc.center
+    - Auto Routing-Konturen: Regeneriert via `generateAutoRoutingContours()`
+    - Sync-Kopien: Automatisch via `syncMasterContours` / `syncMasterBadmarks`
+  - **Guard**: Wenn nur `cornerRadius` geändert wird (alle Deltas = 0), werden nur Auto-Konturen regeneriert
+  - **`applyArrayChange`-Action** (neu): Kombiniert Panel-Grösse + Board-Array + Repositionierung in einem Undo-Schritt
+    - V-Scores werden komplett neu generiert (Tiefe/Winkel übernommen)
+    - Board-Badmarks + manuelle Konturen auf neue Master-Instanz übertragen (relative Position beibehalten)
+    - Master-Badmarks per Smart Anchor repositioniert
+    - Properties Panel `handleCreateArray` nutzt jetzt `applyArrayChange` statt separate Aufrufe
+- [x] **Tooling Holes: Asymmetrische Eck-Platzierung**
+  - Bei "4 Eck-Bohrungen hinzufügen" wird die **unten-rechte Bohrung** weiter innen platziert (doppelter Offset)
+  - Dient als **Orientierungshilfe** in der Fertigung (wie bei Fiducials auf Stirnseiten)
+  - Hinweistext im Properties Panel erklärt die asymmetrische Platzierung
+- [x] **Badmarks: Board-Badmark-Button im Properties Panel**
+  - Neuer Button **"Board-Badmark platzieren"** in der Badmarks-Sektion
+  - Aktiviert das `place-badmark`-Werkzeug direkt aus dem Properties Panel
+  - Zeigt aktiven Zustand (amber Hervorhebung) und Bedienungshinweis
+- [x] **Default-Eckenradius 2mm**
+  - Neues Panel startet mit `cornerRadius: 2` statt 0
+  - Eckenradius-Bemaßung erscheint automatisch bei jedem neuen Panel
+- [x] **Eckenradius-Bemaßung an unterer rechter Ecke**
+  - Leader-Line mit Pfeilspitze und R-Wert jetzt an der **unteren rechten Ecke** (nicht mehr am Nullpunkt)
+  - Vermeidet Überlappung mit Ordinatenachsen und Nullpunkt-Marker
+  - Im Canvas und PDF identisch dargestellt
+
+### Phase 14 - Erledigt
+
+- [x] **Fräskonturen-Darstellung überarbeitet (Canvas + PDF)**
+  - **3-Linien-Darstellung**: Mittellinie + zwei tangentiale Außenlinien (statt gefülltem Fräserbreite-Streifen)
+  - **Start-/Endkreise**: Fräserdurchmesser nur als Kreise am Start- und Endpunkt (statt pro Segment)
+  - Bögen: Zwei konzentrische Bögen mit Radius ± Fräserradius
+  - Geraden: Normalenvektor für parallele Außenlinien
+  - Canvas und PDF identisch dargestellt
+- [x] **Auto-Offset bei "Kontur folgen"**
+  - Offset-Seite wird automatisch vorgeschlagen (gegen außen der Leiterplatte)
+  - Berechnung: Board-Zentrum → Segment-Mittelpunkt = Außenrichtung, Links-Normale mit Dot-Product verglichen
+  - Kann nachträglich manuell umgestellt werden (L/M/R Buttons)
+- [x] **Eckenradius-Symbol in Legende (Canvas + PDF)**
+  - Nur ein Viertelkreis-Bogen als Symbol (Außenradius)
+  - Identisch in Canvas und PDF dargestellt
 
 ### Noch offen
 
@@ -449,6 +512,10 @@ Der `usePanelStore` enthält:
 2. Rechts unter **"Array"** Spalten und Reihen einstellen
 3. Abstände (Gap) konfigurieren
 4. **"Array erstellen"** klicken
+   - Panel-Grösse, Board-Instanzen und Repositionierung aller Elemente in **einem Undo-Schritt**
+   - Fiducials, Tooling Holes, Master-Badmarks passen sich automatisch an die neue Panel-Grösse an
+   - V-Scores werden automatisch neu generiert (Tiefe/Winkel übernommen)
+   - Board-Badmarks und manuelle Fräskonturen werden auf die neue Master-Instanz übertragen
 
 ### Fiducials hinzufügen
 1. Rechts **"Fiducials"** aufklappen
@@ -466,6 +533,7 @@ Der `usePanelStore` enthält:
 2. Durchmesser und PTH/NPTH im Panel einstellen
 3. **Per Klick** im Canvas platzieren (Multi-Platzierung)
 4. Oder: Rechts **"4 Eck-Bohrungen hinzufügen"** klicken
+   - Eine Bohrung (unten-rechts) wird **weiter innen platziert** (doppelter Offset) für Orientierung
 5. Bohrungen im Canvas anklicken um sie auszuwählen (orange Glow)
 6. Bohrungen per **Drag & Drop** im Canvas verschieben
 7. X/Y, Durchmesser und PTH/NPTH rechts im Properties Panel anpassen
@@ -492,13 +560,17 @@ Der `usePanelStore` enthält:
 3. **Doppelklick** zum Abschliessen → Fräskontur wird erstellt
 4. ESC: Abbrechen (Tool bleibt aktiv)
 
-**Kontur folgen:**
+**Kontur folgen (Segment-Auswahl):**
 1. **Fräskontur-Dropdown** in der Toolbar → **"Kontur folgen"** wählen
-2. Klick auf Board-Outline = Startpunkt (grüner Marker)
-3. Maus bewegen: Grüne Vorschau zeigt den Pfad entlang der Outline (inkl. echte Bögen)
-4. Zweiter Klick = Endpunkt → Fräskontur wird entlang der Outline erstellt
-5. **Bögen werden automatisch erkannt** und als echte Kreisbögen in die Kontur übernommen
-6. Endpunkte per Drag & Drop entlang der Outline verschiebbar (Bogen ↔ Gerade nahtlos)
+2. **Klick auf Board-Outline** → Board wird erkannt, Outline-Segmente erscheinen farbig (grau=nicht gewählt, grün=gewählt, gelb=hover)
+3. **Einzelklick** auf Segment = Toggle (an/aus)
+4. **Fenster ziehen** über Segmente = alle im Fenster werden ausgewählt (grün)
+5. **Ctrl+Fenster ziehen** = Segmente im Fenster werden abgewählt
+6. **Enter** = Fräskontur(en) erstellen (zusammenhängende Segmente werden gruppiert, viele kleine Linien werden zu sauberen Kreisbögen zusammengefasst)
+7. **ESC** = Auswahl abbrechen (Tool bleibt aktiv)
+8. **Statusbar** zeigt Bedienungshinweise, **Properties Panel** zeigt Auswahl-Status mit Button
+9. Nicht-zusammenhängende Segmente → separate Konturen pro Gruppe
+10. Endpunkte per Drag & Drop entlang der Outline verschiebbar (Bogen ↔ Gerade nahtlos)
 
 **Endpunkte bearbeiten (nur manuelle Konturen, nicht bei Kopien):**
 1. Kontur im Canvas auswählen (Klick auf die Linie)
@@ -567,7 +639,7 @@ Der `usePanelStore` enthält:
    - **V-Score Linien** (gestrichelt pink)
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
    - **Fiducials** und **Tooling Holes** als Symbole
-   - **Fräskonturen** (Cyan=Board, Orange=Panel) mit Fräserbreite-Streifen
+   - **Fräskonturen** (Cyan=Board, Orange=Panel) mit 3 Linien (Mittellinie + tangentiale Außenlinien) und Start-/Endkreisen
    - **Eckenverrundung** mit Leader-Line, Pfeilspitze und R-Wert
    - **Ordinatenbemaßung**: X-Achse, Y-Achse, Nullpunkt, Tick-Marks, Hilfslinien
    - **Detail-Legende** mit Farbcode, Parametern und Eckenradius (feste Grösse, massstabsunabhängig)
@@ -583,14 +655,14 @@ Der `usePanelStore` enthält:
 
 | Sektion | Inhalt |
 |---------|--------|
-| **Nutzenrand** | Rahmenbreite (4 Seiten), Eckenradius, einheitliche Breite |
+| **Nutzenrand** | Rahmenbreite (4 Seiten, Default 5mm), Eckenradius (Default 2mm), einheitliche Breite |
 | **Array** | Spalten, Reihen, Gap X/Y, Panel-Rotation |
 | **Tabs** | Tab-Breite, Bohr-Ø, Abstand, Auto-Verteilung, Mousebites an Rundungen |
 | **V-Score** | Tiefe %, Winkel °, Auto-Generierung, manuelle H/V-Linien, editierbare Positionen |
 | **Fräskonturen** | Fräser-Ø, Sicherheitsabstand, Board-/Panel-Konturen, Gap-Warnung |
 | **Fiducials** | Pad-Ø, Mask-Ø, 3/4 Stirnseiten-Platzierung, Drag&Drop, Koordinaten |
-| **Badmarks** | Badmark-Größe (0.5–3mm), Master-Badmark-Button, Board-Badmark-Liste, Kopien-Badges |
-| **Tooling** | Durchmesser, PTH/NPTH, 4 Eck-Bohrungen, Durchmesser nachträglich editierbar |
+| **Badmarks** | Badmark-Größe (0.5–3mm), Board-Badmark-Button (aktiviert Klick-Tool), Master-Badmark-Button, Board-Badmark-Liste, Kopien-Badges |
+| **Tooling** | Durchmesser, PTH/NPTH, 4 Eck-Bohrungen (asymmetrisch für Orientierung), Durchmesser nachträglich editierbar |
 | **Dimensionen** | Panel-Größe, Grid, Einheit, Statistiken |
 
 ---
@@ -637,7 +709,7 @@ npm start
 - **Tooling Holes** (mit Kupferring wenn plated, ausgewählt: orange Glow, **Drag & Drop**)
 - **Tabs** (farbcodiert nach Typ)
 - **V-Score Linien** (gestrichelt pink)
-- **Fräskonturen** (Segmente mit Tabs, Sync-Kopien halbtransparent alpha 0.5)
+- **Fräskonturen** (3 Linien: Mittellinie + tangentiale Außenlinien für Fräserdurchmesser, Start-/Endkreise, Sync-Kopien halbtransparent alpha 0.5, Bögen mit clockwise-korrigierter Winkel-Interpolation)
 - **Bemaßungs-Overlay** (optional, Toggle "Maße") — Ordinatenbemaßung (VSM/ISO 129):
   - Nullpunkt-Marker bei (0,0)
   - X-Achse (unterhalb) und Y-Achse (links) mit farbigen Tick-Marks + Werten
@@ -697,11 +769,13 @@ Gemeinsamer PixiJS-Container auf `app.stage` für:
 **Wichtig:** Im `handleMouseMove` darf der Container nur gelöscht werden wenn das aktive Tool WEDER `place-mousebite` NOCH `measure` ist. Sonst verschwindet das Overlay.
 
 ### Bogen-Erkennung (`panel-store.ts`)
-Zwei Wege, die IMMER BEIDE geprüft werden:
+Zwei Wege für Snap-Punkte und Mousebites (IMMER BEIDE geprüft):
 1. **Echte Gerber-Arcs** (`nativeArcs`) - direkt aus Gerber-Dateien
 2. **Linien-Bögen** (`detectArcsFromPoints`) - Kreise aus kleinen Liniensegmenten erkannt via Circumcenter + Least-Squares Circle Fit
 
 Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat wie ein nativer Arc (< 0.5 mm Differenz), wird er übersprungen.
+
+**Wichtig:** `detectArcsFromPoints` wird NICHT in `mergeGroupToRoutingSegments` verwendet (erzeugt falsche Bögen bei tangentialen Übergängen Gerade→Bogen). Fräskonturen übernehmen Outline-Segmente 1:1.
 
 ### Follow-Outline Architektur (`pixi-panel-canvas.tsx`)
 
@@ -750,6 +824,51 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 - Lokale Suche (Input-Stabilität) + Segment-Hints (Konsistenz) + Kürzester Pfad (Richtung)
 - Die Outline-Daten und der feste Endpunkt werden beim Drag-Start gecacht und NICHT
   bei jedem Frame neu berechnet (verhindert Oszillation an Ecken)
+
+**Segment-Auswahl (Rubber-Band + Klick):**
+- Klick auf Segment = Toggle (an/aus), kein Shift nötig
+- Fenster ziehen (Rubber-Band) = alle Segmente im Rechteck hinzufügen
+- Ctrl+Fenster = Segmente im Rechteck abwählen
+- `findOutlineSegmentsInRect()` arbeitet auf Panel-Koordinaten (Liang-Barsky für Linien, 8-Punkt-Sampling für Bögen)
+- Enter-Taste / Button → `finalizeSegmentSelection()`:
+  1. `groupConsecutiveIndices()` gruppiert zusammenhängende Indizes (mit zyklischem Wrap-Around)
+  2. `mergeGroupToRoutingSegments()` pro Gruppe: 1:1 Kopie + Ketten-Reparatur
+  3. Pro Gruppe eine RoutingContour via `addRoutingContour()` (mit Master-Sync)
+- **1:1 Segment-Übernahme**: Outline-Segmente werden exakt übernommen (Linien bleiben Linien, Bögen bleiben Bögen). Keine `detectArcsFromPoints` in diesem Kontext (erzeugt falsche Bögen bei tangentialen Übergängen Gerade→Bogen).
+- **Gerichtete Kette**: Rückwärts laufende Segmente werden automatisch umgedreht (Start↔End, clockwise invertiert) damit End[i] ≈ Start[i+1]. Nötig für korrekte CNC-Fräskompensation.
+- **Arc-Zusammenführung**: Nur echte Gerber-Bögen mit gleichem Center/Radius werden zusammengefasst (Schritt 1 in `mergeGroupToRoutingSegments`)
+- Statusbar zeigt kontextabhängige Bedienungshinweise
+- Properties Panel zeigt Auswahl-Status + "Fräskontur erstellen"-Button
+
+### Smart Anchor Repositionierung (`panel-store.ts`)
+
+**Konzept:** Bei Nutzenrand- oder Array-Änderungen werden alle Panel-Elemente automatisch an die neue Grösse angepasst. Jedes Element wird anhand seiner Position relativ zur Panel-Mitte einer Seite zugeordnet.
+
+**Kernfunktionen:**
+- `smartAnchorReposition(point, oldW, oldH, dx, dy, widthDiff, heightDiff)` → Neue Position
+  - `point.x <= oldW/2` → Element folgt linker Kante (+dx)
+  - `point.x > oldW/2` → Element folgt rechter Kante (+widthDiff)
+  - Analog für Y-Achse mit `oldH/2`
+- `generateAutoRoutingContours(panel)` → Reine Funktion, gibt Auto-Konturen zurück (kein State-Mutation)
+- `applyArrayChange(boardId, config, newWidth, newHeight, frame)` → Kombiniert setPanelSize + createBoardArray + Repositionierung aller Elemente in einem Undo-Schritt
+
+**setFrame-Repositionierung (bei Nutzenrand-Änderungen):**
+| Element | Methode |
+|---------|---------|
+| Board-Instanzen | Shift (dx, dy) |
+| Fiducials, Tooling Holes | Smart Anchor |
+| V-Score Linien | Endpunkte auf neue Panel-Kanten (0→0, width→newWidth) |
+| Tabs, Free Mousebites | Geleert |
+| Board-Badmarks | Shift (dx, dy) |
+| Master-Badmarks | Smart Anchor |
+| Manuelle Routing-Konturen | Segmente shift inkl. arc.center |
+| Auto Routing-Konturen | Regeneriert via generateAutoRoutingContours() |
+| Sync-Kopien | Via syncMasterContours / syncMasterBadmarks |
+
+**applyArrayChange-Repositionierung (bei Array-Änderungen):**
+- Board-Badmarks + manuelle Konturen: Auf neue Master-Instanz übertragen (relative Position beibehalten)
+- V-Scores: Komplett neu generiert basierend auf neuen Board-Positionen
+- Tabs + Mousebites: Geleert (neue boardInstanceIds)
 
 ### Master-Board Fräskonturen-Synchronisation (`panel-store.ts`)
 
@@ -814,6 +933,13 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 - `dragItemTypeRef = 'dimensionLabel'` — nur für die Detail-Legende
 - Keine Drag-Möglichkeit für Ordinate-Tick-Marks (fixierte Positionen)
 - Rechtsklick auf Tick-Mark → `hideDimensionElement(key)` → wird in `hiddenElements` gespeichert
+
+**Zeichnungsvorschau-Position der Legende:**
+- Bei aktiver Zeichnungsvorschau (`drawingPreviewConfig`): Legende an fixer PDF-Seitenposition statt panel-relativ
+- Seiten-Position: rechtsbündig am inneren Rahmen (`borderRight - legendW`), über Titelblock (`titleBlockTopY - 2.82mm - legendH`)
+- Umrechnung in panelTarget-lokale Koordinaten: `localMm = (pageMm - panelOffset) * scaleRatio`
+- Skalierungs-Kompensation: `legendContainer.scale = scaleRatio` (hebt panelTargets `1/scaleRatio` auf → Legende bleibt in fester mm-Grösse)
+- In normaler Ansicht (ohne Vorschau): weiterhin panel-relativ `(panel.width + 10 + offset.dx, offset.dy)`
 
 **PDF-Export (`dimension-drawing.ts`):**
 - Liest `panel.dimensionOverrides` für Offsets und ausgeblendete Elemente

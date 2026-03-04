@@ -1309,32 +1309,41 @@ export async function generateDimensionDrawing(
             dx += dashLen + gapLen;
           }
         } else if (entry.symbol === 'routing') {
+          // Fräskontur: Mittellinie + zwei Außenlinien (wie in der Hauptzeichnung)
           const lineStartX = lx + legendPad * legendScale;
           const lineEndX = lx + (legendPad + 10) * legendScale;
-          const toolWidthPt = (entry.toolDiameter || 2) * legendScale;
-          page.drawLine({
-            start: { x: lineStartX, y: lineCenterY },
-            end: { x: lineEndX, y: lineCenterY },
-            color: entry.color, thickness: toolWidthPt, opacity: 0.15,
-          });
+          const toolHalfPt = ((entry.toolDiameter || 2) / 2) * legendScale;
+          // Mittellinie
           page.drawLine({
             start: { x: lineStartX, y: lineCenterY },
             end: { x: lineEndX, y: lineCenterY },
             color: entry.color, thickness: 0.8,
           });
+          // Obere Außenlinie
+          page.drawLine({
+            start: { x: lineStartX, y: lineCenterY + toolHalfPt },
+            end: { x: lineEndX, y: lineCenterY + toolHalfPt },
+            color: entry.color, thickness: 0.3, opacity: 0.35,
+          });
+          // Untere Außenlinie
+          page.drawLine({
+            start: { x: lineStartX, y: lineCenterY - toolHalfPt },
+            end: { x: lineEndX, y: lineCenterY - toolHalfPt },
+            color: entry.color, thickness: 0.3, opacity: 0.35,
+          });
         } else if (entry.symbol === 'radius') {
-          // Eckenradius: Viertelkreis-Bogen als Symbol
-          const arcR = 1.5 * legendScale;
-          const arcCX = lx + (legendPad + 1) * legendScale;
-          const arcCY = lineCenterY - arcR * 0.3;
-          // PDF-Bogen: Approximation als 3 kurze Linien (Viertelkreis von 0° bis 90°)
-          const segments = 6;
-          for (let s = 0; s < segments; s++) {
-            const a0 = (s / segments) * (Math.PI / 2);
-            const a1 = ((s + 1) / segments) * (Math.PI / 2);
+          // Eckenradius: Nur ein Viertelkreis-Bogen (Außenradius)
+          const arcR = 2.5 * legendScale;
+          const cX = symCenterX;
+          const cY = lineCenterY - arcR * 0.3;
+          // Viertelbogen von 0° bis 90° (rechts nach oben)
+          const arcSegs = 8;
+          for (let s = 0; s < arcSegs; s++) {
+            const a0 = (s / arcSegs) * (Math.PI / 2);
+            const a1 = ((s + 1) / arcSegs) * (Math.PI / 2);
             page.drawLine({
-              start: { x: arcCX + arcR * Math.cos(a0), y: arcCY + arcR * Math.sin(a0) },
-              end: { x: arcCX + arcR * Math.cos(a1), y: arcCY + arcR * Math.sin(a1) },
+              start: { x: cX + arcR * Math.cos(a0), y: cY + arcR * Math.sin(a0) },
+              end: { x: cX + arcR * Math.cos(a1), y: cY + arcR * Math.sin(a1) },
               color: entry.color, thickness: 0.8,
             });
           }
@@ -1636,41 +1645,61 @@ function drawVScoreDetail(
 
   // --- Bemaßungen ---
 
-  // Winkel-Bogen oben (kleiner Bogen am V-Einschnitt)
-  const arcR = 12;
   // Winkel-Annotation: "30°" neben dem V
   page.drawText(`${angle}°`, {
     x: centerX + topCutWidth + 4, y: topY - cutDepthTop / 2 - 2,
     size: 5, font, color: COLORS.vscore,
   });
 
-  // Tiefe-Annotation rechts
+  // Tiefe-Annotation rechts — 3 Zonen: oberer Schnitt, Restdicke, unterer Schnitt
   const dimX = pcbX + pcbW + 5;
+  // Y-Positionen der Zonen
+  const topEdge = pcbY + pcbH;         // Oberkante PCB
+  const topTipEdge = topY - cutDepthTop;  // Spitze oberer V-Schnitt
+  const bottomTipEdge = bottomTipY;       // Spitze unterer V-Schnitt
+  const bottomEdge = pcbY;             // Unterkante PCB
 
-  // Gesamthöhe = PCB
-  // Pfeil oben
+  // Hilfslinien (horizontal) an Ober-/Unterkante und V-Spitzen
+  const hlExt = dimX + 8; // Hilfslinie endet rechts von den Maßlinien
+  [topEdge, topTipEdge, bottomTipEdge, bottomEdge].forEach((yPos) => {
+    page.drawLine({
+      start: { x: pcbX + pcbW, y: yPos },
+      end: { x: hlExt, y: yPos },
+      color: COLORS.vscore, thickness: 0.3,
+    });
+  });
+
+  // Masslinie und Text: Oberer Einschnitt (z.B. 33%)
+  const dim1X = dimX + 2;
   page.drawLine({
-    start: { x: dimX, y: pcbY },
-    end: { x: dimX, y: pcbY + pcbH },
+    start: { x: dim1X, y: topEdge },
+    end: { x: dim1X, y: topTipEdge },
     color: COLORS.vscore, thickness: 0.4,
   });
-  // Hilfslinie oben
-  page.drawLine({
-    start: { x: pcbX + pcbW, y: pcbY + pcbH },
-    end: { x: dimX + 3, y: pcbY + pcbH },
-    color: COLORS.vscore, thickness: 0.3,
-  });
-  // Hilfslinie unten
-  page.drawLine({
-    start: { x: pcbX + pcbW, y: pcbY },
-    end: { x: dimX + 3, y: pcbY },
-    color: COLORS.vscore, thickness: 0.3,
+  // Pfeilspitzen oben
+  page.drawLine({ start: { x: dim1X - 1.5, y: topEdge - 2 }, end: { x: dim1X, y: topEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X + 1.5, y: topEdge - 2 }, end: { x: dim1X, y: topEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X - 1.5, y: topTipEdge + 2 }, end: { x: dim1X, y: topTipEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X + 1.5, y: topTipEdge + 2 }, end: { x: dim1X, y: topTipEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawText(`${depth}%`, {
+    x: dim1X + 3, y: (topEdge + topTipEdge) / 2 - 2,
+    size: 4, font, color: COLORS.vscore,
   });
 
-  // Tiefe-Text rechts
+  // Masslinie und Text: Unterer Einschnitt (z.B. 33%)
+  page.drawLine({
+    start: { x: dim1X, y: bottomTipEdge },
+    end: { x: dim1X, y: bottomEdge },
+    color: COLORS.vscore, thickness: 0.4,
+  });
+  // Pfeilspitzen unten
+  page.drawLine({ start: { x: dim1X - 1.5, y: bottomTipEdge - 2 }, end: { x: dim1X, y: bottomTipEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X + 1.5, y: bottomTipEdge - 2 }, end: { x: dim1X, y: bottomTipEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X - 1.5, y: bottomEdge + 2 }, end: { x: dim1X, y: bottomEdge }, color: COLORS.vscore, thickness: 0.4 });
+  page.drawLine({ start: { x: dim1X + 1.5, y: bottomEdge + 2 }, end: { x: dim1X, y: bottomEdge }, color: COLORS.vscore, thickness: 0.4 });
   page.drawText(`${depth}%`, {
-    x: dimX + 2, y: pcbY + pcbH / 2 - 2,
-    size: 5, font: fontBold, color: COLORS.vscore,
+    x: dim1X + 3, y: (bottomTipEdge + bottomEdge) / 2 - 2,
+    size: 4, font, color: COLORS.vscore,
   });
 
   // Label "Tiefe" und "Winkel" unten
@@ -2163,20 +2192,26 @@ function drawElementDescriptions(
     });
   }
 
-  // ---- Eckenradius-Bemaßung (Führungslinie + R-Wert an der oberen linken Ecke) ----
+  // ---- Eckenradius-Bemaßung (Führungslinie + R-Wert an der unteren rechten Ecke) ----
+  // Nicht am Nullpunkt (oben links) bemassen, da dort Ordinatenachsen stören.
   {
     const cr = panel.frame.cornerRadius || 0;
     if (cr > 0) {
-      // Punkt auf dem Bogen (45°-Position der oberen linken Ecke)
-      // Bogenzentrum bei (cr, cr) vom Panel-Ursprung, Bogen von 180° bis 270°
-      // 45°-Mitte = 225° = 5*PI/4
-      const angle = (5 * Math.PI) / 4;
-      const arcPtX = cr + cr * Math.cos(angle); // mm
-      const arcPtY = cr + cr * Math.sin(angle); // mm (Panel-Y: 0=oben)
+      const w = panel.width;
+      const h = panel.height;
 
-      // Führungslinie: vom Bogen nach links oben raus
-      const leaderEndX = arcPtX - cr * 0.8;
-      const leaderEndY = arcPtY - cr * 0.8;
+      // Punkt auf dem Bogen (45°-Position der unteren rechten Ecke)
+      // Ecke unten rechts (Canvas: Y nach unten): Bogenzentrum bei (w - cr, h - cr)
+      // Bogen von 0° bis 90°, 45°-Mitte = PI/4
+      const angle = Math.PI / 4;
+      const centerX = w - cr;
+      const centerY = h - cr;
+      const arcPtX = centerX + cr * Math.cos(angle); // mm Panel-Koordinaten
+      const arcPtY = centerY + cr * Math.sin(angle); // mm Panel-Koordinaten
+
+      // Führungslinie: vom Bogen diagonal nach rechts unten raus (weg vom Panel)
+      const leaderEndX = arcPtX + cr * 0.8;
+      const leaderEndY = arcPtY + cr * 0.8;
 
       // In PDF-Koordinaten umrechnen
       const pdfArcX = toX(arcPtX);
@@ -2191,7 +2226,7 @@ function drawElementDescriptions(
         color: rgb(0.3, 0.3, 0.3), thickness: 0.5,
       });
 
-      // Pfeilspitze am Bogen-Ende
+      // Pfeilspitze am Bogen-Ende (zeigt zum Bogen hin)
       const arrowLen = 2 * MM_TO_PT; // 2mm Pfeil
       const arrowAngle = Math.atan2(pdfArcY - pdfEndY, pdfArcX - pdfEndX);
       const a1 = arrowAngle + 0.4;
@@ -2207,9 +2242,9 @@ function drawElementDescriptions(
         color: rgb(0.3, 0.3, 0.3), thickness: 0.5,
       });
 
-      // Text "R X.X" am Ende der Führungslinie
+      // Text "R X.X" am Ende der Führungslinie (rechts davon)
       page.drawText(`R ${cr.toFixed(1)}`, {
-        x: pdfEndX - 12 * MM_TO_PT, y: pdfEndY + 1,
+        x: pdfEndX + 1, y: pdfEndY - 2,
         size: 5, font: fontBold, color: rgb(0.2, 0.2, 0.2),
       });
     }
@@ -2756,68 +2791,93 @@ function drawRoutingContours(
       drawRoutingSegmentPdf(page, seg, toX, toY, scale, color, lineThickness, baseOpacity);
     }
 
-    // 2. Fräserbreite-Streifen (halbtransparent, zeigt Materialabtrag)
-    const toolWidthPt = contour.toolDiameter * scale;
-    if (toolWidthPt > 0.5) {
-      for (const seg of contour.segments) {
-        drawRoutingSegmentPdf(page, seg, toX, toY, scale, color, toolWidthPt, baseOpacity * 0.12);
+    // 2. Tangentiale Außenlinien (zwei dünne Linien links/rechts der Mittellinie)
+    const toolRadiusMm = contour.toolDiameter / 2;
+    const outerThickness = 0.3;
+    const outerOpacity = baseOpacity * 0.35;
+    for (const seg of contour.segments) {
+      if (seg.arc) {
+        // Bogen: Zwei konzentrische Bögen mit Radius ± Fräserradius
+        const cxMm = seg.arc.center.x;
+        const cyMm = seg.arc.center.y;
+        const rInnerMm = seg.arc.radius - toolRadiusMm;
+        const rOuterMm = seg.arc.radius + toolRadiusMm;
+        let sA = seg.arc.startAngle;
+        let eA = seg.arc.endAngle;
+        if (seg.arc.clockwise) {
+          while (eA >= sA) eA -= Math.PI * 2;
+        } else {
+          while (eA <= sA) eA += Math.PI * 2;
+        }
+        const steps = Math.max(8, Math.ceil(Math.abs(eA - sA) / (Math.PI / 16)));
+        // Äußerer Bogen
+        for (let s = 0; s < steps; s++) {
+          const t1 = sA + (eA - sA) * (s / steps);
+          const t2 = sA + (eA - sA) * ((s + 1) / steps);
+          page.drawLine({
+            start: { x: toX(cxMm + Math.cos(t1) * rOuterMm), y: toY(cyMm + Math.sin(t1) * rOuterMm) },
+            end: { x: toX(cxMm + Math.cos(t2) * rOuterMm), y: toY(cyMm + Math.sin(t2) * rOuterMm) },
+            color, thickness: outerThickness, opacity: outerOpacity,
+          });
+        }
+        // Innerer Bogen (nur wenn Radius positiv)
+        if (rInnerMm > 0.1) {
+          for (let s = 0; s < steps; s++) {
+            const t1 = sA + (eA - sA) * (s / steps);
+            const t2 = sA + (eA - sA) * ((s + 1) / steps);
+            page.drawLine({
+              start: { x: toX(cxMm + Math.cos(t1) * rInnerMm), y: toY(cyMm + Math.sin(t1) * rInnerMm) },
+              end: { x: toX(cxMm + Math.cos(t2) * rInnerMm), y: toY(cyMm + Math.sin(t2) * rInnerMm) },
+              color, thickness: outerThickness, opacity: outerOpacity,
+            });
+          }
+        }
+      } else {
+        // Gerade Linie: Zwei parallele Linien im Abstand des Fräserradius
+        const dx = seg.end.x - seg.start.x;
+        const dy = seg.end.y - seg.start.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 0.001) continue;
+        // Normalenvektor (senkrecht zur Fahrtrichtung)
+        const nx = (dy / len) * toolRadiusMm;
+        const ny = (-dx / len) * toolRadiusMm;
+        // Linke Außenlinie
+        page.drawLine({
+          start: { x: toX(seg.start.x + nx), y: toY(seg.start.y + ny) },
+          end: { x: toX(seg.end.x + nx), y: toY(seg.end.y + ny) },
+          color, thickness: outerThickness, opacity: outerOpacity,
+        });
+        // Rechte Außenlinie
+        page.drawLine({
+          start: { x: toX(seg.start.x - nx), y: toY(seg.start.y - ny) },
+          end: { x: toX(seg.end.x - nx), y: toY(seg.end.y - ny) },
+          color, thickness: outerThickness, opacity: outerOpacity,
+        });
       }
     }
 
-    // 3. Tab-Übergangskreise an offenen Segment-Enden
+    // 3. Fräser-Radius nur am Start- und Endpunkt der gesamten Kontur
     const toolRadiusPt = (contour.toolDiameter / 2) * scale;
-    const TOLERANCE = 0.05; // mm Toleranz für Punkt-Vergleich
     const segments = contour.segments;
-
-    for (let i = 0; i < segments.length; i++) {
-      const seg = segments[i];
-
-      // Prüfe ob Start-/Endpunkt an ein anderes Segment anschliesst
-      let startConnected = false;
-      let endConnected = false;
-
-      for (let j = 0; j < segments.length; j++) {
-        if (i === j) continue;
-        const other = segments[j];
-        if (!startConnected) {
-          if ((Math.abs(seg.start.x - other.end.x) < TOLERANCE && Math.abs(seg.start.y - other.end.y) < TOLERANCE) ||
-              (Math.abs(seg.start.x - other.start.x) < TOLERANCE && Math.abs(seg.start.y - other.start.y) < TOLERANCE)) {
-            startConnected = true;
-          }
-        }
-        if (!endConnected) {
-          if ((Math.abs(seg.end.x - other.start.x) < TOLERANCE && Math.abs(seg.end.y - other.start.y) < TOLERANCE) ||
-              (Math.abs(seg.end.x - other.end.x) < TOLERANCE && Math.abs(seg.end.y - other.end.y) < TOLERANCE)) {
-            endConnected = true;
-          }
-        }
-        if (startConnected && endConnected) break;
-      }
-
-      // Offene Enden = Tab-Übergänge → Kreis mit Fräser-Radius zeichnen
-      if (!startConnected) {
+    if (segments.length > 0) {
+      const firstSeg = segments[0];
+      const lastSeg = segments[segments.length - 1];
+      // Startpunkt-Kreis
+      page.drawCircle({
+        x: toX(firstSeg.start.x), y: toY(firstSeg.start.y),
+        size: toolRadiusPt, color, opacity: baseOpacity * 0.10,
+        borderColor: color, borderWidth: 0.5, borderOpacity: baseOpacity * 0.6,
+      });
+      // Endpunkt-Kreis (nur wenn Kontur nicht geschlossen)
+      const dist = Math.sqrt(
+        (lastSeg.end.x - firstSeg.start.x) ** 2 +
+        (lastSeg.end.y - firstSeg.start.y) ** 2
+      );
+      if (dist > 0.05) {
         page.drawCircle({
-          x: toX(seg.start.x),
-          y: toY(seg.start.y),
-          size: toolRadiusPt,
-          color: color,
-          opacity: baseOpacity * 0.10,
-          borderColor: color,
-          borderWidth: 0.5,
-          borderOpacity: baseOpacity * 0.6,
-        });
-      }
-
-      if (!endConnected) {
-        page.drawCircle({
-          x: toX(seg.end.x),
-          y: toY(seg.end.y),
-          size: toolRadiusPt,
-          color: color,
-          opacity: baseOpacity * 0.10,
-          borderColor: color,
-          borderWidth: 0.5,
-          borderOpacity: baseOpacity * 0.6,
+          x: toX(lastSeg.end.x), y: toY(lastSeg.end.y),
+          size: toolRadiusPt, color, opacity: baseOpacity * 0.10,
+          borderColor: color, borderWidth: 0.5, borderOpacity: baseOpacity * 0.6,
         });
       }
     }
@@ -2845,8 +2905,15 @@ function drawRoutingSegmentPdf(
     const cxMm = seg.arc.center.x;
     const cyMm = seg.arc.center.y;
     const rMm = seg.arc.radius;
-    const sA = seg.arc.startAngle;
-    const eA = seg.arc.endAngle;
+    let sA = seg.arc.startAngle;
+    let eA = seg.arc.endAngle;
+    // Winkel korrigieren damit lineare Interpolation in die richtige Richtung geht
+    // (gleiche Logik wie im Canvas drawSegmentPath)
+    if (seg.arc.clockwise) {
+      while (eA >= sA) eA -= Math.PI * 2;
+    } else {
+      while (eA <= sA) eA += Math.PI * 2;
+    }
     const steps = Math.max(8, Math.ceil(Math.abs(eA - sA) / (Math.PI / 16)));
 
     for (let s = 0; s < steps; s++) {

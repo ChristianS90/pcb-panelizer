@@ -355,9 +355,11 @@ export function Header() {
       <div className="flex items-center gap-4">
         {/* Logo/Icon */}
         <div className="flex items-center gap-2">
-          <div className="w-8 h-8 bg-primary-600 rounded-lg flex items-center justify-center">
-            <span className="text-white font-bold text-sm">PCB</span>
-          </div>
+          <img
+            src="/logo-smtec-s.png"
+            alt="SMTEC"
+            className="w-8 h-8"
+          />
           <span className="font-semibold text-gray-900">Panelizer</span>
         </div>
 
@@ -494,7 +496,7 @@ export function Header() {
         {/* Gerber importieren */}
         <button
           onClick={() => setIsImportOpen(true)}
-          className="btn-secondary flex items-center gap-2"
+          className="bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition-colors"
           title="Gerber-Dateien importieren (ZIP)"
         >
           <Upload className="w-4 h-4" />

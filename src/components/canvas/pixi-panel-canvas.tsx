@@ -126,6 +126,9 @@ export function PixiPanelCanvas() {
   const setRouteSegmentSelectState = usePanelStore((state) => state.setRouteSegmentSelectState);
   const toggleSegmentSelection = usePanelStore((state) => state.toggleSegmentSelection);
   const clearSegmentSelectState = usePanelStore((state) => state.clearSegmentSelectState);
+  const addSegmentsToSelection = usePanelStore((state) => state.addSegmentsToSelection);
+  const removeSegmentsFromSelection = usePanelStore((state) => state.removeSegmentsFromSelection);
+  const finalizeSegmentSelection = usePanelStore((state) => state.finalizeSegmentSelection);
   const toggleOutlineCommand = usePanelStore((state) => state.toggleOutlineCommand);
 
   // Lokaler State
@@ -296,96 +299,17 @@ export function PixiPanelCanvas() {
         return;
       }
 
-      // Enter-Taste: Ausgewählte Outline-Segmente als Fräskontur erstellen
+      // Enter-Taste: Ausgewählte Outline-Segmente als Fräskontur(en) erstellen
+      // Zusammenhängende Segmente werden gruppiert, Arc-Detection wird durchgeführt,
+      // und pro Gruppe eine saubere Kontur mit zusammengefassten Bögen erstellt.
       if (e.key === 'Enter' && activeToolRef.current === 'route-follow-outline') {
         const state = usePanelStore.getState();
         const segState = state.routeSegmentSelectState;
-        if (segState.boardInstanceId && segState.selectedSegmentIndices.length > 0 && segState.outlineSegments.length > 0) {
-          const outlineSegs = segState.outlineSegments;
-          const inst = state.panel.instances.find((i: any) => i.id === segState.boardInstanceId);
-          const brd = inst ? state.panel.boards.find((b: any) => b.id === inst.boardId) : null;
+        if (segState.boardInstanceId && segState.selectedSegmentIndices.length > 0) {
+          // Store-Action aufrufen: Gruppierung + Arc-Merge + Kontur-Erstellung
+          finalizeSegmentSelection();
 
-          if (brd && inst) {
-            const toolRadius = state.panel.routingConfig.toolDiameter / 2;
-
-            // Umlaufrichtung (Winding) bestimmt zuverlässig die Außenseite
-            const wSign = computeOutlineWindingSign(outlineSegs);
-
-            // Offset-Hilfsfunktionen (identisch zu getOutlineSubpath, Winding-basiert)
-            const offsetLinePoint = (pt: Point, seg: OutlinePathSegment): Point => {
-              const dx = seg.end.x - seg.start.x;
-              const dy = seg.end.y - seg.start.y;
-              const len = Math.sqrt(dx * dx + dy * dy);
-              if (len < 0.001) return pt;
-              const nx = wSign > 0 ? dy / len : -dy / len;
-              const ny = wSign > 0 ? -dx / len : dx / len;
-              return { x: pt.x + nx * toolRadius, y: pt.y + ny * toolRadius };
-            };
-
-            const getArcOffsetSign = (arc: NonNullable<OutlinePathSegment['arc']>): number => {
-              const outlineCW = wSign > 0;
-              return (outlineCW === arc.clockwise) ? 1 : -1;
-            };
-
-            // Pro ausgewähltes Segment eine EIGENE Fräskontur erstellen
-            // So hat jede Kontur eigene Start-/Endpunkte zum Verschieben per Drag & Drop
-            const sortedIndices = [...segState.selectedSegmentIndices].sort((a, b) => a - b);
-
-            for (const segIdx of sortedIndices) {
-              const seg = outlineSegs[segIdx];
-              if (!seg) continue;
-
-              let routingSeg: RoutingSegment | null = null;
-
-              if (seg.arc) {
-                const arc = seg.arc;
-                const sign = getArcOffsetSign(arc);
-                const offsetRadius = arc.radius + sign * toolRadius;
-                if (offsetRadius < 0.01) continue;
-
-                const oStart: Point = {
-                  x: arc.center.x + Math.cos(arc.startAngle) * offsetRadius,
-                  y: arc.center.y + Math.sin(arc.startAngle) * offsetRadius,
-                };
-                const oEnd: Point = {
-                  x: arc.center.x + Math.cos(arc.endAngle) * offsetRadius,
-                  y: arc.center.y + Math.sin(arc.endAngle) * offsetRadius,
-                };
-
-                routingSeg = {
-                  start: oStart,
-                  end: oEnd,
-                  arc: {
-                    center: arc.center,
-                    radius: offsetRadius,
-                    startAngle: arc.startAngle,
-                    endAngle: arc.endAngle,
-                    clockwise: arc.clockwise,
-                  },
-                };
-              } else {
-                const oStart = offsetLinePoint(seg.start, seg);
-                const oEnd = offsetLinePoint(seg.end, seg);
-                const len = Math.sqrt((oEnd.x - oStart.x) ** 2 + (oEnd.y - oStart.y) ** 2);
-                if (len <= 0.001) continue;
-                routingSeg = { start: oStart, end: oEnd };
-              }
-
-              if (routingSeg) {
-                addRoutingContour({
-                  contourType: 'boardOutline',
-                  boardInstanceId: segState.boardInstanceId!,
-                  segments: [routingSeg],
-                  toolDiameter: state.panel.routingConfig.toolDiameter,
-                  visible: true,
-                  creationMethod: 'follow-outline',
-                });
-              }
-            }
-          }
-
-          // State zurücksetzen und auf Auswählen-Werkzeug wechseln
-          clearSegmentSelectState();
+          // Visuals aufräumen
           hoveredOutlineSegRef.current = null;
           if (snapPreviewRef.current) snapPreviewRef.current.removeChildren();
           setActiveTool('select');
@@ -1636,63 +1560,50 @@ export function PixiPanelCanvas() {
         return;
       }
 
-      // --- Follow-Outline Fräskontur: Segment per Klick auswählen ---
+      // --- Follow-Outline Fräskontur: Segment per Klick/Rubber-Band auswählen ---
       if (currentTool === 'route-follow-outline') {
         const currentState = usePanelStore.getState();
         const segState = currentState.routeSegmentSelectState;
 
         if (!segState.boardInstanceId) {
           // Erster Klick: Board finden und Outline-Segmente cachen
-          const nearestResult = findNearestOutlinePoint(currentState.panel, mmX, mmY, 3.0);
+          // Größerer Suchradius (20mm) damit Rubber-Band auch funktioniert wenn
+          // der Startpunkt nicht direkt auf der Outline liegt
+          const nearestResult = findNearestOutlinePoint(currentState.panel, mmX, mmY, 20.0);
           if (nearestResult) {
             const inst = currentState.panel.instances.find((i: any) => i.id === nearestResult.instanceId);
             const brd = inst ? currentState.panel.boards.find((b: any) => b.id === inst.boardId) : null;
             if (brd && inst) {
               const outlineSegs = buildOutlineSegments(brd, inst);
               if (outlineSegs.length > 0) {
-                // Nächstes Segment zum Klickpunkt finden
-                let bestIdx = 0;
-                let bestDist = Infinity;
-                for (let i = 0; i < outlineSegs.length; i++) {
-                  const seg = outlineSegs[i];
-                  const d = seg.arc
-                    ? nearestPointOnArc(mmX, mmY, seg.arc, seg.start, seg.end).distance
-                    : nearestPointOnSegment(mmX, mmY, seg.start, seg.end).distance;
-                  if (d < bestDist) { bestDist = d; bestIdx = i; }
-                }
-                if (bestDist < 3.0) {
-                  setRouteSegmentSelectState({
-                    boardInstanceId: nearestResult.instanceId,
-                    selectedSegmentIndices: [bestIdx],
-                    outlineSegments: outlineSegs,
-                  });
+                // Board sofort registrieren (ohne Segment-Auswahl — das passiert in mouseUp
+                // falls kein Rubber-Band gezogen wurde, oder per Rubber-Band falls gezogen)
+                setRouteSegmentSelectState({
+                  boardInstanceId: nearestResult.instanceId,
+                  selectedSegmentIndices: [],
+                  outlineSegments: outlineSegs,
+                });
+                // Rubber-Band sofort starten damit der User direkt ein Fenster ziehen kann
+                const rect2 = containerRef.current?.getBoundingClientRect();
+                if (rect2) {
+                  outlineRubberBandRef.current = {
+                    startScreenX: e.clientX - rect2.left,
+                    startScreenY: e.clientY - rect2.top,
+                    active: false,
+                  };
                 }
               }
             }
           }
         } else {
-          // Weitere Klicks: Segment an-/abwählen
-          const outlineSegs = segState.outlineSegments;
-          let bestIdx = -1;
-          let bestDist = Infinity;
-          for (let i = 0; i < outlineSegs.length; i++) {
-            const seg = outlineSegs[i];
-            const d = seg.arc
-              ? nearestPointOnArc(mmX, mmY, seg.arc, seg.start, seg.end).distance
-              : nearestPointOnSegment(mmX, mmY, seg.start, seg.end).distance;
-            if (d < bestDist) { bestDist = d; bestIdx = i; }
-          }
-          if (bestIdx >= 0 && bestDist < 3.0) {
-            if (e.shiftKey) {
-              // Shift+Klick: Toggle (an-/abwählen)
-              toggleSegmentSelection(bestIdx);
-            } else {
-              // Normaler Klick: Nur dieses Segment wählen
-              setRouteSegmentSelectState({
-                ...segState,
-                selectedSegmentIndices: [bestIdx],
-              });
-            }
+          // Board bereits gewählt: Rubber-Band starten (Einzelklick wird in mouseUp behandelt)
+          const rect2 = containerRef.current?.getBoundingClientRect();
+          if (rect2) {
+            outlineRubberBandRef.current = {
+              startScreenX: e.clientX - rect2.left,
+              startScreenY: e.clientY - rect2.top,
+              active: false, // Wird erst aktiv wenn Maus > 5px bewegt wird
+            };
           }
         }
         return;
@@ -1764,7 +1675,10 @@ export function PixiPanelCanvas() {
           outlineRubberBandGraphicsRef.current = rbG;
         }
       }
-      return; // Kein anderes Drag-Handling im Outline-Define-Modus
+      // Im Outline-Define-Modus: kein anderes Drag-Handling
+      // Bei route-follow-outline: weiter, damit die Segment-Vorschau gezeichnet wird
+      const currentOutlineDefine2 = usePanelStore.getState().outlineDefineState;
+      if (currentOutlineDefine2.active) return;
     }
 
     // === Drawing-Panel Drag: Panel auf dem Zeichnungsblatt verschieben ===
@@ -1960,7 +1874,7 @@ export function PixiPanelCanvas() {
             const result = getOutlineSubpath(
               currentState.panel, contour.boardInstanceId,
               fromPt, toPt, toolRadius, savedDirection, fromHint, toHint,
-              contour.flipOffset
+              contour.offsetSide
             );
 
             if (result.segments.length > 0) {
@@ -2128,6 +2042,8 @@ export function PixiPanelCanvas() {
       // Segment-Auswahl Vorschau: Alle Outline-Segmente mit Farb-Kodierung zeichnen
       if (snapPreviewRef.current) {
         const preview = snapPreviewRef.current;
+        // Rubber-Band-Grafik sichern bevor alle Kinder entfernt werden
+        const savedRbG = outlineRubberBandGraphicsRef.current;
         preview.removeChildren();
 
         const state = usePanelStore.getState();
@@ -2162,8 +2078,14 @@ export function PixiPanelCanvas() {
               const cx = seg.arc.center.x * PIXELS_PER_MM;
               const cy = seg.arc.center.y * PIXELS_PER_MM;
               const r = seg.arc.radius * PIXELS_PER_MM;
-              const sA = seg.arc.startAngle;
-              const eA = seg.arc.endAngle;
+              let sA = seg.arc.startAngle;
+              let eA = seg.arc.endAngle;
+              // Winkel korrigieren damit lineare Interpolation in die richtige Richtung geht
+              if (seg.arc.clockwise) {
+                while (eA >= sA) eA -= Math.PI * 2;
+              } else {
+                while (eA <= sA) eA += Math.PI * 2;
+              }
               const steps = Math.max(8, Math.ceil(Math.abs(eA - sA) / (Math.PI / 16)));
               for (let s = 0; s < steps; s++) {
                 const t1 = sA + (eA - sA) * (s / steps);
@@ -2201,6 +2123,10 @@ export function PixiPanelCanvas() {
           }
 
           preview.addChild(g);
+        }
+        // Rubber-Band-Rechteck wieder hinzufügen (über der Segment-Vorschau)
+        if (savedRbG) {
+          preview.addChild(savedRbG);
         }
       }
     } else if (activeToolRef.current !== 'measure' && snapPreviewRef.current && snapPreviewRef.current.children.length > 0) {
@@ -2302,6 +2228,68 @@ export function PixiPanelCanvas() {
                   toggleOutlineCommand(nearestKey);
                   break;
                 }
+              }
+            }
+          }
+        }
+      }
+      // === Route-Follow-Outline: Rubber-Band oder Einzelklick für Segment-Auswahl ===
+      else if (activeToolRef.current === 'route-follow-outline') {
+        const segState = usePanelStore.getState().routeSegmentSelectState;
+        if (segState.boardInstanceId && segState.outlineSegments.length > 0) {
+          const vp = viewportRef.current;
+          const rect = containerRef.current?.getBoundingClientRect();
+
+          if (rect) {
+            if (rb.active) {
+              // === RUBBER-BAND: Outline-Segmente im Rechteck finden ===
+              const currentScreenX = e.clientX - rect.left;
+              const currentScreenY = e.clientY - rect.top;
+
+              // Screen → Panel-mm für beide Ecken
+              const mm1x = (rb.startScreenX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const mm1y = (rb.startScreenY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+              const mm2x = (currentScreenX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const mm2y = (currentScreenY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+              const rMinX = Math.min(mm1x, mm2x);
+              const rMinY = Math.min(mm1y, mm2y);
+              const rMaxX = Math.max(mm1x, mm2x);
+              const rMaxY = Math.max(mm1y, mm2y);
+
+              // Segmente im Rechteck finden (Panel-Koordinaten)
+              const indicesInRect = findOutlineSegmentsInRect(
+                segState.outlineSegments, rMinX, rMinY, rMaxX, rMaxY
+              );
+
+              if (indicesInRect.length > 0) {
+                if (e.ctrlKey || e.metaKey) {
+                  // Ctrl+Fenster: Segmente abwählen
+                  usePanelStore.getState().removeSegmentsFromSelection(indicesInRect);
+                } else {
+                  // Normales Fenster: Segmente hinzufügen
+                  usePanelStore.getState().addSegmentsToSelection(indicesInRect);
+                }
+              }
+            } else {
+              // === EINZELKLICK: Segment togglen ===
+              const mouseX = rb.startScreenX;
+              const mouseY = rb.startScreenY;
+              const mmX2 = (mouseX - vp.offsetX) / (vp.scale * PIXELS_PER_MM);
+              const mmY2 = (mouseY - vp.offsetY) / (vp.scale * PIXELS_PER_MM);
+
+              let bestIdx = -1;
+              let bestDist = Infinity;
+              for (let i = 0; i < segState.outlineSegments.length; i++) {
+                const seg = segState.outlineSegments[i];
+                const d = seg.arc
+                  ? nearestPointOnArc(mmX2, mmY2, seg.arc, seg.start, seg.end).distance
+                  : nearestPointOnSegment(mmX2, mmY2, seg.start, seg.end).distance;
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
+              }
+              if (bestIdx >= 0 && bestDist < 3.0) {
+                // Immer Toggle (an/aus)
+                toggleSegmentSelection(bestIdx);
               }
             }
           }
@@ -2595,8 +2583,8 @@ function getOutlineSubpath(
   // zuordnet als der Aufrufer (was bei Ecken zu Sprüngen führt).
   fromSegHint?: { segIndex: number; t: number },
   toSegHint?: { segIndex: number; t: number },
-  // Wenn true: Winding-Sign negieren → Offset auf die andere Seite der Outline
-  flipOffset?: boolean
+  // Offset-Seite: 'none' = kein Offset (toolRadius=0), 'left' = normal, 'right' = negierter wSign
+  offsetSide?: 'none' | 'left' | 'right'
 ): { segments: RoutingSegment[]; direction: 'forward' | 'reverse' } {
   const emptyResult = { segments: [] as RoutingSegment[], direction: 'forward' as const };
 
@@ -2612,9 +2600,11 @@ function getOutlineSubpath(
 
   // Umlaufrichtung (Winding) der Outline berechnen — bestimmt zuverlässig die Außenseite,
   // auch bei Einbuchtungen/konkaven Formen (anders als die alte Board-Mitte-Heuristik)
-  // Wenn flipOffset gesetzt: Sign negieren → Offset auf die andere Seite
+  // offsetSide: 'none' = kein Offset (toolRadius auf 0), 'left' = normaler wSign, 'right' = negierter wSign
   const rawWSign = computeOutlineWindingSign(outlineSegs);
-  const wSign = flipOffset ? -rawWSign : rawWSign;
+  const wSign = offsetSide === 'right' ? -rawWSign : rawWSign;
+  // Bei 'none' wird der toolRadius auf 0 gesetzt → kein Versatz
+  const effectiveToolRadius = offsetSide === 'none' ? 0 : toolRadius;
 
   // --- Punkt auf Outline lokalisieren: Segment-Index + t-Parameter (0..1) ---
   const findOnOutline = (pt: Point): { segIndex: number; t: number; point: Point } | null => {
@@ -2704,7 +2694,7 @@ function getOutlineSubpath(
     if (len < 0.001) return pt;
     const nx = wSign > 0 ? dy / len : -dy / len;
     const ny = wSign > 0 ? -dx / len : dx / len;
-    return { x: pt.x + nx * toolRadius, y: pt.y + ny * toolRadius };
+    return { x: pt.x + nx * effectiveToolRadius, y: pt.y + ny * effectiveToolRadius };
   };
 
   // Bogen: Radius vergrößern/verkleinern basierend auf Winding Direction
@@ -2744,7 +2734,7 @@ function getOutlineSubpath(
       // Bogen-Segment (oder Teilbogen)
       const arc = seg.arc;
       const sign = getArcOffsetSign(arc);
-      const offsetRadius = arc.radius + sign * toolRadius;
+      const offsetRadius = arc.radius + sign * effectiveToolRadius;
       if (offsetRadius < 0.01) return null;
 
       const startAngle = arcAngleAtT(arc, tStart);
@@ -3092,6 +3082,107 @@ function findCommandsInRect(
   }
 
   return keys;
+}
+
+// ============================================================================
+// Outline-Segment Rechteck-Test (für route-follow-outline Rubber-Band)
+// ============================================================================
+
+/**
+ * Findet alle Outline-Segmente die (teilweise) innerhalb eines Rechtecks liegen.
+ * Arbeitet direkt auf Panel-Koordinaten (OutlinePathSegment[]).
+ *
+ * Für Linien: Liang-Barsky Intersection.
+ * Für Bögen: 8-Punkt-Sampling entlang des Bogens + Start/End-Check.
+ *
+ * @param outlineSegs - Die Outline-Segmente in Panel-Koordinaten
+ * @param minX - Linke Kante des Rechtecks (mm)
+ * @param minY - Obere Kante des Rechtecks (mm)
+ * @param maxX - Rechte Kante des Rechtecks (mm)
+ * @param maxY - Untere Kante des Rechtecks (mm)
+ * @returns Array der Segment-Indizes die im Rechteck liegen
+ */
+function findOutlineSegmentsInRect(
+  outlineSegs: OutlinePathSegment[],
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number
+): number[] {
+  const result: number[] = [];
+
+  const pointInRect = (px: number, py: number) =>
+    px >= minX && px <= maxX && py >= minY && py <= maxY;
+
+  // Liang-Barsky Intersection Test
+  const segmentIntersectsRect = (ax: number, ay: number, bx: number, by: number) => {
+    if (pointInRect(ax, ay) || pointInRect(bx, by)) return true;
+
+    const dx = bx - ax;
+    const dy = by - ay;
+    let tMin = 0, tMax = 1;
+
+    const edges = [
+      { p: -dx, q: ax - minX },
+      { p: dx, q: maxX - ax },
+      { p: -dy, q: ay - minY },
+      { p: dy, q: maxY - ay },
+    ];
+
+    for (const { p, q } of edges) {
+      if (Math.abs(p) < 1e-10) {
+        if (q < 0) return false;
+      } else {
+        const t = q / p;
+        if (p < 0) {
+          tMin = Math.max(tMin, t);
+        } else {
+          tMax = Math.min(tMax, t);
+        }
+        if (tMin > tMax) return false;
+      }
+    }
+    return true;
+  };
+
+  for (let i = 0; i < outlineSegs.length; i++) {
+    const seg = outlineSegs[i];
+
+    if (seg.arc) {
+      // Bogen: Start/Endpunkt prüfen + 8-Punkt-Sampling
+      if (pointInRect(seg.start.x, seg.start.y) || pointInRect(seg.end.x, seg.end.y)) {
+        result.push(i);
+        continue;
+      }
+
+      const arc = seg.arc;
+      let sweep = arc.endAngle - arc.startAngle;
+      if (arc.clockwise) {
+        if (sweep > 0) sweep -= 2 * Math.PI;
+        if (sweep === 0) sweep = -2 * Math.PI;
+      } else {
+        if (sweep < 0) sweep += 2 * Math.PI;
+        if (sweep === 0) sweep = 2 * Math.PI;
+      }
+
+      let found = false;
+      const steps = 8;
+      for (let s = 1; s < steps; s++) {
+        const angle = arc.startAngle + (sweep * s) / steps;
+        const px = arc.center.x + arc.radius * Math.cos(angle);
+        const py = arc.center.y + arc.radius * Math.sin(angle);
+        if (pointInRect(px, py)) { found = true; break; }
+      }
+      if (found) result.push(i);
+    } else {
+      // Linie: Liang-Barsky Intersection
+      if (segmentIntersectsRect(seg.start.x, seg.start.y, seg.end.x, seg.end.y)) {
+        result.push(i);
+      }
+    }
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -3930,8 +4021,15 @@ function createRoutingContourGraphics(
       const cx = seg.arc.center.x * PIXELS_PER_MM;
       const cy = seg.arc.center.y * PIXELS_PER_MM;
       const r = seg.arc.radius * PIXELS_PER_MM;
-      const sA = seg.arc.startAngle;
-      const eA = seg.arc.endAngle;
+      let sA = seg.arc.startAngle;
+      let eA = seg.arc.endAngle;
+      // Winkel korrigieren damit lineare Interpolation in die richtige Richtung geht:
+      // CW: Winkel müssen abnehmen (eA < sA), CCW: Winkel müssen zunehmen (eA > sA)
+      if (seg.arc.clockwise) {
+        while (eA >= sA) eA -= Math.PI * 2;
+      } else {
+        while (eA <= sA) eA += Math.PI * 2;
+      }
       const steps = Math.max(8, Math.ceil(Math.abs(eA - sA) / (Math.PI / 16)));
       for (let s = 0; s < steps; s++) {
         const t1 = sA + (eA - sA) * (s / steps);
@@ -3962,11 +4060,65 @@ function createRoutingContourGraphics(
     container.addChild(glowGraphics);
   }
 
-  // Halbtransparenter Streifen für Fräserbreite (Materialabtrag-Visualisierung)
+  // Tangentiale Außenlinien: Zwei dünne Linien links und rechts der Mittellinie
+  // im Abstand des Fräserradius — zeigen die tatsächliche Fräsbreite
   const stripGraphics = new Graphics();
-  const toolWidthPx = contour.toolDiameter * PIXELS_PER_MM;
+  const toolRadiusMm = contour.toolDiameter / 2;
+  const outerAlpha = 0.35;
+  const outerWidth = 1;
   for (const seg of contour.segments) {
-    drawSegmentPath(stripGraphics, seg, lineColor, toolWidthPx, 0.12);
+    if (seg.arc) {
+      // Bogen: Zwei konzentrische Bögen mit Radius ± Fräserradius
+      const cx = seg.arc.center.x * PIXELS_PER_MM;
+      const cy = seg.arc.center.y * PIXELS_PER_MM;
+      const rInner = (seg.arc.radius - toolRadiusMm) * PIXELS_PER_MM;
+      const rOuter = (seg.arc.radius + toolRadiusMm) * PIXELS_PER_MM;
+      let sA = seg.arc.startAngle;
+      let eA = seg.arc.endAngle;
+      if (seg.arc.clockwise) {
+        while (eA >= sA) eA -= Math.PI * 2;
+      } else {
+        while (eA <= sA) eA += Math.PI * 2;
+      }
+      const steps = Math.max(8, Math.ceil(Math.abs(eA - sA) / (Math.PI / 16)));
+      // Äußerer Bogen
+      for (let s = 0; s < steps; s++) {
+        const t1 = sA + (eA - sA) * (s / steps);
+        const t2 = sA + (eA - sA) * ((s + 1) / steps);
+        stripGraphics.moveTo(cx + Math.cos(t1) * rOuter, cy + Math.sin(t1) * rOuter)
+          .lineTo(cx + Math.cos(t2) * rOuter, cy + Math.sin(t2) * rOuter)
+          .stroke({ color: lineColor, width: outerWidth, alpha: outerAlpha });
+      }
+      // Innerer Bogen (nur wenn Radius positiv)
+      if (rInner > 0.5) {
+        for (let s = 0; s < steps; s++) {
+          const t1 = sA + (eA - sA) * (s / steps);
+          const t2 = sA + (eA - sA) * ((s + 1) / steps);
+          stripGraphics.moveTo(cx + Math.cos(t1) * rInner, cy + Math.sin(t1) * rInner)
+            .lineTo(cx + Math.cos(t2) * rInner, cy + Math.sin(t2) * rInner)
+            .stroke({ color: lineColor, width: outerWidth, alpha: outerAlpha });
+        }
+      }
+    } else {
+      // Gerade Linie: Zwei parallele Linien im Abstand des Fräserradius
+      const dx = seg.end.x - seg.start.x;
+      const dy = seg.end.y - seg.start.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len < 0.001) continue;
+      // Normalenvektor (senkrecht zur Fahrtrichtung)
+      const nx = (dy / len) * toolRadiusMm * PIXELS_PER_MM;
+      const ny = (-dx / len) * toolRadiusMm * PIXELS_PER_MM;
+      const sx = seg.start.x * PIXELS_PER_MM;
+      const sy = seg.start.y * PIXELS_PER_MM;
+      const ex = seg.end.x * PIXELS_PER_MM;
+      const ey = seg.end.y * PIXELS_PER_MM;
+      // Linke Außenlinie
+      stripGraphics.moveTo(sx + nx, sy + ny).lineTo(ex + nx, ey + ny)
+        .stroke({ color: lineColor, width: outerWidth, alpha: outerAlpha });
+      // Rechte Außenlinie
+      stripGraphics.moveTo(sx - nx, sy - ny).lineTo(ex - nx, ey - ny)
+        .stroke({ color: lineColor, width: outerWidth, alpha: outerAlpha });
+    }
   }
   container.addChild(stripGraphics);
 
@@ -3977,57 +4129,27 @@ function createRoutingContourGraphics(
   }
   container.addChild(lineGraphics);
 
-  // Fräser-Radius an Tab-Übergängen anzeigen
-  // Die Fräskontur liegt bereits auf der Fräser-Mittellinie (im Gap versetzt).
-  // An jedem offenen Segment-Ende (= Tab-Übergang) zeichnen wir einen Kreis
-  // mit dem Fräser-Radius, der den Auslauf des Fräsers zeigt.
+  // Fräser-Radius nur am Start- und Endpunkt der gesamten Kontur anzeigen
   const radiusGraphics = new Graphics();
   const toolRadiusPx = (contour.toolDiameter / 2) * PIXELS_PER_MM;
   const segments = contour.segments;
+  if (contour.segments.length > 0) {
+    const firstSeg = contour.segments[0];
+    const lastSeg = contour.segments[contour.segments.length - 1];
 
-  const TOLERANCE = 0.05; // mm Toleranz für Punkt-Vergleich
+    // Startpunkt
+    const sx = firstSeg.start.x * PIXELS_PER_MM;
+    const sy = firstSeg.start.y * PIXELS_PER_MM;
+    radiusGraphics.circle(sx, sy, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
+    radiusGraphics.circle(sx, sy, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
 
-  const isConnected = (p1: { x: number; y: number }, p2: { x: number; y: number }): boolean => {
-    return Math.abs(p1.x - p2.x) < TOLERANCE && Math.abs(p1.y - p2.y) < TOLERANCE;
-  };
-
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-
-    // Prüfe ob der Startpunkt an ein anderes Segment anschliesst
-    let startConnected = false;
-    for (let j = 0; j < segments.length; j++) {
-      if (i === j) continue;
-      if (isConnected(seg.start, segments[j].end) || isConnected(seg.start, segments[j].start)) {
-        startConnected = true;
-        break;
-      }
-    }
-
-    // Prüfe ob der Endpunkt an ein anderes Segment anschliesst
-    let endConnected = false;
-    for (let j = 0; j < segments.length; j++) {
-      if (i === j) continue;
-      if (isConnected(seg.end, segments[j].start) || isConnected(seg.end, segments[j].end)) {
-        endConnected = true;
-        break;
-      }
-    }
-
-    // Offene Enden = Tab-Übergänge → Fräser-Radius zeichnen
-    // Kreis direkt am Segment-Ende (Linie liegt bereits auf Fräser-Mittellinie)
-    if (!startConnected) {
-      const px = seg.start.x * PIXELS_PER_MM;
-      const py = seg.start.y * PIXELS_PER_MM;
-      radiusGraphics.circle(px, py, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
-      radiusGraphics.circle(px, py, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
-    }
-
-    if (!endConnected) {
-      const px = seg.end.x * PIXELS_PER_MM;
-      const py = seg.end.y * PIXELS_PER_MM;
-      radiusGraphics.circle(px, py, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
-      radiusGraphics.circle(px, py, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
+    // Endpunkt (nur wenn nicht gleicher Punkt wie Start = geschlossene Kontur)
+    const ex = lastSeg.end.x * PIXELS_PER_MM;
+    const ey = lastSeg.end.y * PIXELS_PER_MM;
+    const dist = Math.sqrt((ex - sx) ** 2 + (ey - sy) ** 2);
+    if (dist > 0.05 * PIXELS_PER_MM) {
+      radiusGraphics.circle(ex, ey, toolRadiusPx).fill({ color: lineColor, alpha: 0.10 });
+      radiusGraphics.circle(ex, ey, toolRadiusPx).stroke({ color: lineColor, width: 1, alpha: 0.6 });
     }
   }
   container.addChild(radiusGraphics);
@@ -5189,19 +5311,25 @@ function createDimensionOverlay(
     overlay.addChild(tickContainer);
   }
 
-  // === 3b. Eckenradius-Bemaßung (Führungslinie + R-Wert an der Ecke oben links) ===
+  // === 3b. Eckenradius-Bemaßung (Führungslinie + R-Wert an der Ecke unten rechts) ===
+  // Nicht am Nullpunkt (oben links) bemassen, da dort Ordinatenachsen und Nullpunkt-Marker stören.
   if (panel.frame.cornerRadius && panel.frame.cornerRadius > 0) {
     const cr = panel.frame.cornerRadius;
-    // Punkt auf dem Bogen (45°-Position der oberen linken Ecke)
-    // Ecke oben links: Bogenzentrum ist bei (cr, cr), Bogen geht von 180° bis 270°
-    // 45°-Mitte des Bogens = 225° = 5*PI/4
-    const angle = (5 * Math.PI) / 4;
-    const arcPointX = cr + cr * Math.cos(angle); // Punkt AUF dem Bogen
-    const arcPointY = cr + cr * Math.sin(angle);
+    const w = panel.width;
+    const h = panel.height;
 
-    // Führungslinie: vom Bogen diagonal nach links oben raus
-    const leaderEndX = arcPointX - cr * 0.8;
-    const leaderEndY = arcPointY - cr * 0.8;
+    // Punkt auf dem Bogen (45°-Position der unteren rechten Ecke)
+    // Ecke unten rechts: Bogenzentrum bei (w - cr, h - cr), Bogen von 0° bis 90°
+    // 45°-Mitte des Bogens = PI/4
+    const angle = Math.PI / 4;
+    const centerX = w - cr;
+    const centerY = h - cr;
+    const arcPointX = centerX + cr * Math.cos(angle); // Punkt AUF dem Bogen
+    const arcPointY = centerY + cr * Math.sin(angle);
+
+    // Führungslinie: vom Bogen diagonal nach rechts unten raus (weg vom Panel)
+    const leaderEndX = arcPointX + cr * 0.8;
+    const leaderEndY = arcPointY + cr * 0.8;
 
     // Führungslinie zeichnen
     lineGraphics.moveTo(arcPointX * px, arcPointY * px);
@@ -5220,14 +5348,14 @@ function createDimensionOverlay(
     lineGraphics.lineTo((arcPointX - arrowLen * Math.cos(a2)) * px, (arcPointY - arrowLen * Math.sin(a2)) * px);
     lineGraphics.stroke({ color: COLOR_PANEL, width: 1 });
 
-    // Text "R X.X"
+    // Text "R X.X" — links oben vom Führungslinien-Ende verankern (Text zeigt nach aussen)
     const radiusText = new Text({
       text: `R ${cr.toFixed(1)}`,
       style: new TextStyle({ fontSize: 6, fill: COLOR_PANEL, fontFamily: 'Arial', fontWeight: 'bold' }),
     });
     radiusText.resolution = 4;
-    radiusText.anchor.set(1, 1); // Rechts unten verankern (Text endet an der Führungslinie)
-    radiusText.position.set(leaderEndX * px, leaderEndY * px - 1);
+    radiusText.anchor.set(0, 1); // Links unten verankern (Text beginnt am Führungslinien-Ende)
+    radiusText.position.set(leaderEndX * px + 1, leaderEndY * px - 1);
     overlay.addChild(radiusText);
   }
 
@@ -5306,13 +5434,40 @@ function createDimensionOverlay(
         const titleH = 6;
         const legendH = pad * 2 + allEntries.length * lineH + titleH;
 
-        // Standard-Position: rechts neben dem Panel
-        const legendX = (panel.width + 10 + legendOffset.dx) * px;
-        const legendY = (0 + legendOffset.dy) * px;
-
         const legendContainer = new Container();
         legendContainer.label = legendKey;
-        legendContainer.position.set(legendX, legendY);
+
+        // Zeichnungsvorschau: Legende an der fixen PDF-Position (rechts oben über Titelblock)
+        const drawingConfig = panel.drawingPreviewConfig;
+        if (drawingConfig) {
+          // Seitenrahmen-Konstanten in mm (identisch zu createDrawingFrame)
+          const FRAME_MARGIN = 7;
+          const FRAME_INNER = 2;
+          const TB_HEIGHT = 46;       // Titelblock-Höhe in mm
+          const GAP_MM = 8 / (72 / 25.4); // 8pt Abstand wie im PDF ≈ 2.82mm
+
+          // Ziel-Position auf der Seite in mm (vom Page-Ursprung oben links)
+          const borderRight = drawingConfig.paperWidth - FRAME_MARGIN - FRAME_INNER;
+          const titleBlockTopY = drawingConfig.paperHeight - FRAME_MARGIN - FRAME_INNER - TB_HEIGHT;
+          const pageX = borderRight - legendW;          // Rechts am Seitenrand
+          const pageY = titleBlockTopY - GAP_MM - legendH; // Über dem Titelblock
+
+          // Umrechnung in panelTarget-lokale Koordinaten
+          // panelTarget hat position=(panelOffsetX, panelOffsetY) und scale=1/scaleRatio
+          // → lokale mm = (seiten-mm - panelOffset) * scaleRatio
+          const localX = (pageX - drawingConfig.panelOffsetX) * drawingConfig.scaleRatio;
+          const localY = (pageY - drawingConfig.panelOffsetY) * drawingConfig.scaleRatio;
+          legendContainer.position.set(localX * px, localY * px);
+
+          // Skalierung kompensieren: panelTarget skaliert mit 1/scaleRatio,
+          // aber die Legende soll feste Grösse auf der Seite haben (wie im PDF)
+          legendContainer.scale.set(drawingConfig.scaleRatio);
+        } else {
+          // Normale Ansicht: rechts neben dem Panel, mit Drag-Offset
+          const legendX = (panel.width + 10 + legendOffset.dx) * px;
+          const legendY = (0 + legendOffset.dy) * px;
+          legendContainer.position.set(legendX, legendY);
+        }
 
         // Hintergrund
         const bg = new Graphics();
@@ -5388,26 +5543,29 @@ function createDimensionOverlay(
               dx += dashLen + gapLen;
             }
           } else if (entry.symbol === 'radius') {
-            // Eckenradius: Viertelkreis-Bogen als Symbol
-            const arcR = 1.8 * px;
-            const arcCX = (pad + 1) * px;
-            const arcCY = symCenterY + arcR * 0.3;
-            symG.arc(arcCX, arcCY, arcR, -Math.PI / 2, 0);
+            // Eckenradius: Nur ein Viertelkreis-Bogen (Außenradius)
+            const arcR = 2 * px;
+            const cX = (pad + 2) * px;
+            const cY = symCenterY + 1 * px;
+            symG.arc(cX, cY, arcR, -Math.PI / 2, 0, false);
             symG.stroke({ color: entry.color, width: 1.5 });
           } else if (entry.symbol === 'routing') {
-            // Fräskontur: halbtransparenter Fräserbreite-Streifen + dünne Mittellinie
-            // (exakt wie in der Hauptzeichnung)
+            // Fräskontur: Mittellinie + zwei Außenlinien (wie in der Hauptzeichnung)
             const lineStartX = pad * px;
             const lineEndX = (pad + 6) * px;
-            // Fräserbreite-Streifen (halbtransparent, proportional zum toolDiameter)
-            const toolWidthPx = (entry.toolDiameter || 2) * px;
-            symG.moveTo(lineStartX, symCenterY);
-            symG.lineTo(lineEndX, symCenterY);
-            symG.stroke({ color: entry.color, width: toolWidthPx, alpha: 0.15 });
-            // Dünne Mittellinie (wie in der Hauptzeichnung)
+            const toolHalfPx = ((entry.toolDiameter || 2) / 2) * px;
+            // Mittellinie
             symG.moveTo(lineStartX, symCenterY);
             symG.lineTo(lineEndX, symCenterY);
             symG.stroke({ color: entry.color, width: 1.5 });
+            // Obere Außenlinie
+            symG.moveTo(lineStartX, symCenterY - toolHalfPx);
+            symG.lineTo(lineEndX, symCenterY - toolHalfPx);
+            symG.stroke({ color: entry.color, width: 0.8, alpha: 0.35 });
+            // Untere Außenlinie
+            symG.moveTo(lineStartX, symCenterY + toolHalfPx);
+            symG.lineTo(lineEndX, symCenterY + toolHalfPx);
+            symG.stroke({ color: entry.color, width: 0.8, alpha: 0.35 });
           } else {
             // Standard: einfache farbige Linie
             symG.moveTo(pad * px, symCenterY);

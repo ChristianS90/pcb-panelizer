@@ -404,8 +404,11 @@ export interface RoutingContour {
   creationMethod: 'auto' | 'follow-outline' | 'free-draw';
   /** Richtung entlang der Outline (nur bei follow-outline): forward = steigende Indizes, reverse = fallende */
   outlineDirection?: 'forward' | 'reverse';
-  /** Offset-Seite geflippt: true = Fräskontur auf der gegenüberliegenden Seite der Outline */
-  flipOffset?: boolean;
+  /** Offset-Seite der Fräskontur relativ zur Outline:
+   *  'none' = direkt auf der Outline (kein Offset, Default)
+   *  'left' = Fräser um toolRadius nach links versetzt
+   *  'right' = Fräser um toolRadius nach rechts versetzt */
+  offsetSide?: 'none' | 'left' | 'right';
   /** ID der Master-Kontur (nur bei synchronisierten Kopien gesetzt) */
   masterContourId?: string;
   /** true = diese Kontur ist eine synchronisierte Kopie vom Master-Board (schreibgeschützt) */

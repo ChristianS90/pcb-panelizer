@@ -12,7 +12,7 @@
 'use client';
 
 import { useState } from 'react';
-import { usePanelStore, useViewport, useGrid, usePanel, useCursorPosition } from '@/stores/panel-store';
+import { usePanelStore, useViewport, useGrid, usePanel, useCursorPosition, useActiveTool, useRouteSegmentSelectState } from '@/stores/panel-store';
 import { formatNumber } from '@/lib/utils';
 import {
   ZoomIn,
@@ -37,6 +37,10 @@ export function Statusbar() {
 
   // Mausposition aus dem Store (wird vom Canvas bei Mausbewegung aktualisiert)
   const cursorPosition = useCursorPosition();
+
+  // Aktives Werkzeug und Segment-Auswahl-State für Bedienungshinweise
+  const activeTool = useActiveTool();
+  const segState = useRouteSegmentSelectState();
 
   // Zoom in Prozent
   const zoomPercent = Math.round(viewport.scale * 100);
@@ -117,18 +121,39 @@ export function Statusbar() {
       </div>
 
       {/* ----------------------------------------------------------------
-          Mittlerer Bereich: Mausposition
+          Mittlerer Bereich: Bedienungshinweise oder Mausposition
           ---------------------------------------------------------------- */}
-      <div className="flex items-center gap-2 text-gray-500 font-mono">
-        <MousePointer className="w-3 h-3" />
-        <span>
-          X: {formatNumber(cursorPosition.x, 3)} {unit}
-        </span>
-        <span>|</span>
-        <span>
-          Y: {formatNumber(cursorPosition.y, 3)} {unit}
-        </span>
-      </div>
+      {activeTool === 'route-follow-outline' && segState.boardInstanceId ? (
+        /* Bedienungshinweise für Segment-Auswahl */
+        <div className="flex items-center gap-2 text-gray-500 text-[10px]">
+          <span className="bg-gray-100 px-1.5 py-0.5 rounded font-medium">Klick</span>
+          <span>= Segment an/ab</span>
+          <span className="text-gray-300">|</span>
+          <span className="bg-gray-100 px-1.5 py-0.5 rounded font-medium">Fenster</span>
+          <span>= Bereich</span>
+          <span className="text-gray-300">|</span>
+          <span className="bg-gray-100 px-1.5 py-0.5 rounded font-medium">Ctrl+Fenster</span>
+          <span>= Abwählen</span>
+          <span className="text-gray-300">|</span>
+          <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded font-medium">Enter</span>
+          <span>= Erstellen</span>
+          <span className="text-gray-300">|</span>
+          <span className="bg-gray-100 px-1.5 py-0.5 rounded font-medium">ESC</span>
+          <span>= Abbrechen</span>
+        </div>
+      ) : (
+        /* Mausposition (Standard) */
+        <div className="flex items-center gap-2 text-gray-500 font-mono">
+          <MousePointer className="w-3 h-3" />
+          <span>
+            X: {formatNumber(cursorPosition.x, 3)} {unit}
+          </span>
+          <span>|</span>
+          <span>
+            Y: {formatNumber(cursorPosition.y, 3)} {unit}
+          </span>
+        </div>
+      )}
 
       {/* ----------------------------------------------------------------
           Rechter Bereich: Panel-Info

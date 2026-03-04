@@ -216,6 +216,10 @@ interface PanelStore {
   /** Erstellt ein Array von Board-Instanzen */
   createBoardArray: (boardId: string, config: BoardArray, startPosition: Point) => void;
 
+  /** Kombiniert Panel-Grösse setzen + Board-Array erstellen + alle Elemente repositionieren
+   *  in einem einzigen Undo-Schritt. Wird vom Properties Panel bei "Array erstellen" verwendet. */
+  applyArrayChange: (boardId: string, config: BoardArray, newWidth: number, newHeight: number, frame: PanelFrame) => void;
+
   // --------------------------------------------------------------------------
   // Auswahl-Aktionen
   // --------------------------------------------------------------------------
@@ -401,8 +405,8 @@ interface PanelStore {
   /** Schaltet die Sichtbarkeit einer Fräskontur um */
   toggleRoutingContourVisibility: (contourId: string) => void;
 
-  /** Wechselt die Offset-Seite einer Fräskontur (flipOffset toggeln + Segmente neu berechnen) */
-  toggleRoutingContourFlipOffset: (contourId: string) => void;
+  /** Setzt die Offset-Seite einer Fräskontur ('none' | 'left' | 'right') und berechnet Segmente neu */
+  setRoutingContourOffsetSide: (contourId: string, side: 'none' | 'left' | 'right') => void;
 
   /** Aktualisiert die Fräskonturen-Konfiguration */
   setRoutingConfig: (config: Partial<RoutingConfig>) => void;
@@ -436,6 +440,15 @@ interface PanelStore {
 
   /** Setzt den Segment-Auswahl-State zurück (Abbrechen) */
   clearSegmentSelectState: () => void;
+
+  /** Fügt mehrere Segment-Indizes zur Auswahl hinzu (für Rubber-Band) */
+  addSegmentsToSelection: (indices: number[]) => void;
+
+  /** Entfernt mehrere Segment-Indizes aus der Auswahl (für Ctrl+Rubber-Band) */
+  removeSegmentsFromSelection: (indices: number[]) => void;
+
+  /** Erstellt Fräskontur(en) aus den ausgewählten Segmenten (Enter-Taste) */
+  finalizeSegmentSelection: () => void;
 
   // --------------------------------------------------------------------------
   // Bemaßungs-Overlay Aktionen
@@ -581,7 +594,7 @@ function createEmptyPanel(): Panel {
       right: 5,
       top: 5,
       bottom: 5,
-      cornerRadius: 0,
+      cornerRadius: 2,
     },
     width: 100,
     height: 100,
@@ -833,7 +846,7 @@ function syncMasterContours(panel: Panel): RoutingContour[] {
         visible: masterContour.visible,
         creationMethod: masterContour.creationMethod,
         outlineDirection: masterContour.outlineDirection,
-        flipOffset: masterContour.flipOffset, // Flip-Status vom Master übernehmen
+        offsetSide: masterContour.offsetSide, // Offset-Seite vom Master übernehmen
         masterContourId: masterContour.id,
         isSyncCopy: true,
       });
@@ -918,6 +931,209 @@ function syncMasterBadmarks(panel: Panel): Badmark[] {
   }
 
   return [...nonCopyBadmarks, ...newCopies];
+}
+
+// ============================================================================
+// Smart Anchor Repositionierung
+// ============================================================================
+
+/**
+ * Repositioniert einen Punkt anhand seiner Position relativ zur Panel-Mitte.
+ *
+ * Punkte in der linken/unteren Hälfte des Panels folgen der linken/unteren Kante
+ * (werden um dx/dy verschoben, z.B. wenn der linke Nutzenrand grösser wird).
+ * Punkte in der rechten/oberen Hälfte folgen der rechten/oberen Kante
+ * (werden um die gesamte Breitenänderung verschoben).
+ *
+ * Beispiel: Ein Fiducial am rechten Rand bleibt am rechten Rand,
+ * auch wenn der linke Nutzenrand verbreitert wird.
+ *
+ * @param point - Aktuelle Position des Elements
+ * @param oldW - Alte Panel-Breite (vor der Änderung)
+ * @param oldH - Alte Panel-Höhe (vor der Änderung)
+ * @param dx - Verschiebung durch linke/untere Randänderung (= newFrame.left - oldFrame.left)
+ * @param dy - Verschiebung durch untere/obere Randänderung (= newFrame.bottom - oldFrame.bottom)
+ * @param widthDiff - Gesamte Breitenänderung des Panels
+ * @param heightDiff - Gesamte Höhenänderung des Panels
+ * @returns Neue Position des Elements
+ */
+function smartAnchorReposition(
+  point: Point,
+  oldW: number,
+  oldH: number,
+  dx: number,
+  dy: number,
+  widthDiff: number,
+  heightDiff: number
+): Point {
+  return {
+    // Linke Hälfte → verschiebt sich mit dx (linker Rand), Rechte Hälfte → folgt rechtem Rand
+    x: point.x <= oldW / 2 ? point.x + dx : point.x + widthDiff,
+    // Untere Hälfte → verschiebt sich mit dy (unterer Rand), Obere Hälfte → folgt oberem Rand
+    y: point.y <= oldH / 2 ? point.y + dy : point.y + heightDiff,
+  };
+}
+
+// ============================================================================
+// Reine Funktion: Auto-Routing-Konturen generieren
+// ============================================================================
+
+/**
+ * Generiert automatische Fräskonturen basierend auf dem aktuellen Panel-Zustand.
+ * Dies ist eine reine Funktion (kein saveHistory, kein set()), die nur das
+ * Kontur-Array zurückgibt. Wird sowohl von autoGenerateRoutingContours als auch
+ * von applyArrayChange verwendet.
+ *
+ * @param panel - Der aktuelle Panel-Zustand
+ * @returns Array mit den generierten Auto-Routing-Konturen
+ */
+function generateAutoRoutingContours(panel: Panel): RoutingContour[] {
+  const { routingConfig } = panel;
+  const newContours: RoutingContour[] = [];
+
+  // === A) Board-Outline-Konturen ===
+  if (routingConfig.generateBoardOutlines) {
+    const toolRadius = routingConfig.toolDiameter / 2;
+
+    for (const instance of panel.instances) {
+      const board = panel.boards.find((b) => b.id === instance.boardId);
+      if (!board) continue;
+
+      // Board-Größe berechnen (berücksichtigt Layer-Rotation + Instanz-Rotation)
+      const layerRotation = board.layerRotation || 0;
+      const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+      const effectiveW = isLayerRotated ? board.height : board.width;
+      const effectiveH = isLayerRotated ? board.width : board.height;
+      const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
+      const displayW = isInstanceRotated ? effectiveH : effectiveW;
+      const displayH = isInstanceRotated ? effectiveW : effectiveH;
+
+      // Board-Position in absoluten Panel-Koordinaten
+      const bx = instance.position.x;
+      const by = instance.position.y;
+
+      // Versetzte Ecken (Fräser-Mittellinie im Gap)
+      const ox1 = bx - toolRadius;
+      const oy1 = by - toolRadius;
+      const ox2 = bx + displayW + toolRadius;
+      const oy2 = by + displayH + toolRadius;
+
+      // 4 Kanten der VERSETZTEN Kontur (Fräser-Mittellinie)
+      const edges: Array<{
+        start: { x: number; y: number };
+        end: { x: number; y: number };
+        edgeName: 'bottom' | 'right' | 'top' | 'left';
+        boardEdgeLength: number;
+      }> = [
+        { start: { x: ox1, y: oy1 }, end: { x: ox2, y: oy1 }, edgeName: 'bottom', boardEdgeLength: displayW },
+        { start: { x: ox2, y: oy1 }, end: { x: ox2, y: oy2 }, edgeName: 'right', boardEdgeLength: displayH },
+        { start: { x: ox2, y: oy2 }, end: { x: ox1, y: oy2 }, edgeName: 'top', boardEdgeLength: displayW },
+        { start: { x: ox1, y: oy2 }, end: { x: ox1, y: oy1 }, edgeName: 'left', boardEdgeLength: displayH },
+      ];
+
+      // Alle Tabs für diese Board-Instanz holen
+      const instanceTabs = panel.tabs.filter(
+        (t) => t.boardInstanceId === instance.id
+      );
+
+      const segments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+
+      for (const edge of edges) {
+        const tabEdge = edge.edgeName;
+
+        // Tabs an dieser Kante finden (nur nicht-vscore Tabs)
+        const edgeTabs = instanceTabs.filter(
+          (t) => t.edge === tabEdge && t.type !== 'vscore'
+        );
+
+        if (edgeTabs.length === 0) {
+          segments.push({ start: edge.start, end: edge.end });
+          continue;
+        }
+
+        const offsetEdgeLength = edge.boardEdgeLength + 2 * toolRadius;
+
+        const gaps = edgeTabs
+          .map((t) => {
+            const tabCenterOnOffset = (t.position * edge.boardEdgeLength + toolRadius) / offsetEdgeLength;
+            const halfWidth = t.width / 2 / offsetEdgeLength;
+            return {
+              start: Math.max(0, tabCenterOnOffset - halfWidth),
+              end: Math.min(1, tabCenterOnOffset + halfWidth),
+            };
+          })
+          .sort((a, b) => a.start - b.start);
+
+        let currentPos = 0;
+
+        for (const gap of gaps) {
+          if (gap.start > currentPos) {
+            const segStart = interpolatePoint(edge.start, edge.end, currentPos);
+            const segEnd = interpolatePoint(edge.start, edge.end, gap.start);
+            segments.push({ start: segStart, end: segEnd });
+          }
+          currentPos = gap.end;
+        }
+
+        if (currentPos < 1) {
+          const segStart = interpolatePoint(edge.start, edge.end, currentPos);
+          segments.push({ start: segStart, end: edge.end });
+        }
+      }
+
+      newContours.push({
+        id: uuidv4(),
+        contourType: 'boardOutline',
+        boardInstanceId: instance.id,
+        segments,
+        toolDiameter: routingConfig.toolDiameter,
+        visible: true,
+        creationMethod: 'auto',
+      });
+    }
+  }
+
+  // === B) Panel-Außenkontur ===
+  if (routingConfig.generatePanelOutline) {
+    const w = panel.width;
+    const h = panel.height;
+    const r = panel.frame.cornerRadius;
+    const panelSegments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
+
+    if (r > 0) {
+      const cornerSegments = 4;
+
+      const blCorner = approximateCorner(r, 0, 0, r, Math.PI, Math.PI * 1.5, cornerSegments);
+      const brCorner = approximateCorner(w - r, 0, w, r, Math.PI * 1.5, Math.PI * 2, cornerSegments);
+      const trCorner = approximateCorner(w, h - r, w - r, h, 0, Math.PI * 0.5, cornerSegments);
+      const tlCorner = approximateCorner(r, h, 0, h - r, Math.PI * 0.5, Math.PI, cornerSegments);
+
+      panelSegments.push(...blCorner);
+      panelSegments.push({ start: { x: r, y: 0 }, end: { x: w - r, y: 0 } });
+      panelSegments.push(...brCorner);
+      panelSegments.push({ start: { x: w, y: r }, end: { x: w, y: h - r } });
+      panelSegments.push(...trCorner);
+      panelSegments.push({ start: { x: w - r, y: h }, end: { x: r, y: h } });
+      panelSegments.push(...tlCorner);
+      panelSegments.push({ start: { x: 0, y: h - r }, end: { x: 0, y: r } });
+    } else {
+      panelSegments.push({ start: { x: 0, y: 0 }, end: { x: w, y: 0 } }); // bottom
+      panelSegments.push({ start: { x: w, y: 0 }, end: { x: w, y: h } }); // right
+      panelSegments.push({ start: { x: w, y: h }, end: { x: 0, y: h } }); // top
+      panelSegments.push({ start: { x: 0, y: h }, end: { x: 0, y: 0 } }); // left
+    }
+
+    newContours.push({
+      id: uuidv4(),
+      contourType: 'panelOutline',
+      segments: panelSegments,
+      toolDiameter: routingConfig.toolDiameter,
+      visible: true,
+      creationMethod: 'auto',
+    });
+  }
+
+  return newContours;
 }
 
 // ============================================================================
@@ -1412,6 +1628,217 @@ export function computeOutlineWindingSign(outlineSegs: OutlinePathSegment[]): nu
 
   // area > 0 = CW (Screen-Koordinaten Y-down), area < 0 = CCW
   return area > 0 ? 1 : -1;
+}
+
+/**
+ * Gruppiert ausgewählte Segment-Indizes in zusammenhängende Gruppen.
+ *
+ * Sortiert die Indizes aufsteigend und fasst aufeinanderfolgende Indizes
+ * zu Gruppen zusammen. Berücksichtigt auch den zyklischen Wrap-Around
+ * (Board-Outline ist geschlossen: letztes Segment ist Nachbar des ersten).
+ *
+ * Beispiel: [1,2,3,7,8] bei 10 Segmenten → [[1,2,3],[7,8]]
+ * Mit Wrap: [0,1,8,9] bei 10 Segmenten → [[8,9,0,1]] (eine zusammenhängende Gruppe)
+ *
+ * @param indices - Ausgewählte Segment-Indizes
+ * @param totalSegments - Gesamtzahl der Outline-Segmente (für Wrap-Around)
+ * @returns Array von Gruppen, jede Gruppe ist ein Array zusammenhängender Indizes
+ */
+export function groupConsecutiveIndices(indices: number[], totalSegments: number): number[][] {
+  if (indices.length === 0) return [];
+  if (indices.length === 1) return [[indices[0]]];
+
+  // Sortieren
+  const sorted = [...indices].sort((a, b) => a - b);
+
+  // Gruppen bilden
+  const groups: number[][] = [];
+  let currentGroup: number[] = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === sorted[i - 1] + 1) {
+      // Aufeinanderfolgend → zur aktuellen Gruppe hinzufügen
+      currentGroup.push(sorted[i]);
+    } else {
+      // Lücke → neue Gruppe beginnen
+      groups.push(currentGroup);
+      currentGroup = [sorted[i]];
+    }
+  }
+  groups.push(currentGroup);
+
+  // Zyklischer Wrap-Around: Wenn erste und letzte Gruppe am Rand anstossen
+  // (Index 0 in erster Gruppe UND Index totalSegments-1 in letzter Gruppe),
+  // dann zu einer einzigen Gruppe zusammenführen
+  if (groups.length >= 2 && totalSegments > 0) {
+    const firstGroup = groups[0];
+    const lastGroup = groups[groups.length - 1];
+    if (firstGroup[0] === 0 && lastGroup[lastGroup.length - 1] === totalSegments - 1) {
+      // Zusammenführen: lastGroup + firstGroup (damit die Reihenfolge stimmt)
+      const merged = [...lastGroup, ...firstGroup];
+      groups.pop();        // Letzte Gruppe entfernen
+      groups[0] = merged;  // Erste Gruppe durch zusammengeführte ersetzen
+    }
+  }
+
+  return groups;
+}
+
+/**
+ * Konvertiert eine Gruppe zusammenhängender Outline-Segmente in RoutingSegments.
+ *
+ * Wenn mehrere aufeinanderfolgende Segmente echte Bögen mit gleichem
+ * Mittelpunkt + Radius sind, werden sie zu einem einzigen Bogen zusammengefasst.
+ * Ansonsten werden alle Segmente 1:1 übernommen — Linien bleiben Linien,
+ * Bögen bleiben Bögen. Keine Arc-Detection aus Linien-Segmenten.
+ *
+ * KEIN Offset: Die Segmente werden 1:1 von der Outline übernommen.
+ * Der Offset (links/rechts) wird erst nachträglich über setRoutingContourOffsetSide angewendet.
+ *
+ * @param outlineSegs - Alle Outline-Segmente des Boards
+ * @param groupIndices - Die Indizes der zusammenhängenden Gruppe
+ * @returns Array von RoutingSegments ohne Offset (direkt auf der Outline)
+ */
+export function mergeGroupToRoutingSegments(
+  outlineSegs: OutlinePathSegment[],
+  groupIndices: number[],
+): RoutingSegment[] {
+  if (groupIndices.length === 0) return [];
+
+  // Sammle die Segmente der Gruppe
+  const groupSegs = groupIndices.map((idx) => outlineSegs[idx]).filter(Boolean);
+  if (groupSegs.length === 0) return [];
+
+  // --- Schritt 1: Prüfe ob ALLE Segmente Bögen mit gleichem Center/Radius sind ---
+  // In diesem Fall werden sie zu einem einzigen Bogen zusammengefasst (z.B. Halbkreis
+  // der in der Gerber-Datei als mehrere kleine Arc-Segmente gespeichert wurde).
+  const allArcs = groupSegs.every((s) => s.arc != null);
+  if (allArcs && groupSegs.length > 1) {
+    const firstArc = groupSegs[0].arc!;
+    const sameCenter = groupSegs.every((s) => {
+      const a = s.arc!;
+      return Math.abs(a.center.x - firstArc.center.x) < 0.1 &&
+             Math.abs(a.center.y - firstArc.center.y) < 0.1 &&
+             Math.abs(a.radius - firstArc.radius) < 0.1;
+    });
+
+    if (sameCenter) {
+      // Alle Bögen haben gleichen Center/Radius → zu einem einzigen Bogen zusammenfassen
+      const rawSA = groupSegs[0].arc!.startAngle;
+      const rawEA = groupSegs[groupSegs.length - 1].arc!.endAngle;
+      const cw = firstArc.clockwise;
+
+      // Winkel werden hier NICHT angepasst — das Rendering (drawSegmentPath)
+      // korrigiert die Winkel selbst basierend auf dem clockwise-Flag.
+      const arcStart: Point = {
+        x: firstArc.center.x + Math.cos(rawSA) * firstArc.radius,
+        y: firstArc.center.y + Math.sin(rawSA) * firstArc.radius,
+      };
+      const arcEnd: Point = {
+        x: firstArc.center.x + Math.cos(rawEA) * firstArc.radius,
+        y: firstArc.center.y + Math.sin(rawEA) * firstArc.radius,
+      };
+
+      return [{
+        start: arcStart,
+        end: arcEnd,
+        arc: {
+          center: firstArc.center,
+          radius: firstArc.radius,
+          startAngle: rawSA,
+          endAngle: rawEA,
+          clockwise: cw,
+        },
+      }];
+    }
+  }
+
+  // --- Schritt 2: Gerichtete Kette bilden ---
+  // Die Outline-Segmente können in inkonsistenten Richtungen vorliegen
+  // (z.B. linke Seite geht "runter", rechte Seite geht auch "runter" statt "rauf").
+  // Für korrekte CNC-Fräskompensation (G41/G42) muss die Kette eine konsistente
+  // Fahrtrichtung haben: End[i] ≈ Start[i+1]. Rückwärts laufende Segmente werden umgedreht.
+  //
+  // Analogie: Wie bei CNC-Maschinen (Mastercam, SolidWorks CAM) wird "links"/"rechts"
+  // relativ zur Fahrtrichtung des Fräsers bestimmt — dafür muss die Richtung stimmen.
+
+  // Kopiere Segmente als RoutingSegments
+  const rawResult: RoutingSegment[] = [];
+  for (const seg of groupSegs) {
+    if (seg.arc) {
+      rawResult.push({
+        start: { ...seg.start },
+        end: { ...seg.end },
+        arc: {
+          center: seg.arc.center,
+          radius: seg.arc.radius,
+          startAngle: seg.arc.startAngle,
+          endAngle: seg.arc.endAngle,
+          clockwise: seg.arc.clockwise,
+        },
+      });
+    } else {
+      const len = Math.sqrt((seg.end.x - seg.start.x) ** 2 + (seg.end.y - seg.start.y) ** 2);
+      if (len > 0.001) {
+        rawResult.push({ start: { ...seg.start }, end: { ...seg.end } });
+      }
+    }
+  }
+
+  if (rawResult.length <= 1) return rawResult;
+
+  // Kette reparieren: Prüfe für jedes Paar ob End[i] ≈ Start[i+1].
+  // Wenn nicht, aber End[i] ≈ End[i+1], dann ist Segment[i+1] rückwärts → umdrehen.
+  const CHAIN_TOL = 0.5; // Toleranz in mm für "gleicher Punkt"
+  const dist = (a: Point, b: Point) => Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+
+  for (let i = 0; i < rawResult.length - 1; i++) {
+    const curr = rawResult[i];
+    const next = rawResult[i + 1];
+
+    // Prüfe ob curr.end ≈ next.start → OK, Kette stimmt
+    if (dist(curr.end, next.start) < CHAIN_TOL) continue;
+
+    // Prüfe ob curr.end ≈ next.end → next ist rückwärts, umdrehen
+    if (dist(curr.end, next.end) < CHAIN_TOL) {
+      // Segment umdrehen: Start ↔ End, bei Bögen clockwise invertieren
+      const flipped: RoutingSegment = {
+        start: { ...next.end },
+        end: { ...next.start },
+      };
+      if (next.arc) {
+        flipped.arc = {
+          center: next.arc.center,
+          radius: next.arc.radius,
+          startAngle: next.arc.endAngle,
+          endAngle: next.arc.startAngle,
+          clockwise: !next.arc.clockwise,
+        };
+      }
+      rawResult[i + 1] = flipped;
+      continue;
+    }
+
+    // Prüfe ob curr.start ≈ next.start → curr ist rückwärts, umdrehen
+    if (dist(curr.start, next.start) < CHAIN_TOL) {
+      const flipped: RoutingSegment = {
+        start: { ...curr.end },
+        end: { ...curr.start },
+      };
+      if (curr.arc) {
+        flipped.arc = {
+          center: curr.arc.center,
+          radius: curr.arc.radius,
+          startAngle: curr.arc.endAngle,
+          endAngle: curr.arc.startAngle,
+          clockwise: !curr.arc.clockwise,
+        };
+      }
+      rawResult[i] = flipped;
+    }
+  }
+
+  return rawResult;
 }
 
 /**
@@ -2516,6 +2943,254 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     get().recalculateDrawingConfig();
   },
 
+  // Kombiniert Panel-Grösse + Board-Array + Repositionierung aller Elemente
+  // in einem einzigen Undo-Schritt. Wird vom Properties Panel bei "Array erstellen" verwendet.
+  applyArrayChange: (boardId, config, newWidth, newHeight, frame) => {
+    saveHistory();
+    set((state) => {
+      const panel = state.panel;
+      const oldW = panel.width;
+      const oldH = panel.height;
+
+      // Board finden
+      const board = panel.boards.find((b) => b.id === boardId);
+      if (!board) return state;
+
+      // --- Neue Board-Instanzen erstellen ---
+      const otherInstances = panel.instances.filter((i) => i.boardId !== boardId);
+      const newInstances: BoardInstance[] = [];
+      const startPosition = { x: frame.left, y: frame.bottom };
+
+      for (let row = 0; row < config.rows; row++) {
+        for (let col = 0; col < config.columns; col++) {
+          const x = startPosition.x + col * (board.width + config.gapX);
+          const y = startPosition.y + row * (board.height + config.gapY);
+
+          newInstances.push({
+            id: uuidv4(),
+            boardId,
+            position: { x, y },
+            rotation: 0,
+            selected: false,
+          });
+        }
+      }
+
+      const allInstances = [...otherInstances, ...newInstances];
+
+      // --- Deltas berechnen (alte vs. neue Panel-Grösse) ---
+      const widthDiff = newWidth - oldW;
+      const heightDiff = newHeight - oldH;
+      // dx/dy: Wie stark haben sich die Boards verschoben?
+      // Bei Array-Änderung verschieben sich Boards zum neuen frame.left/frame.bottom
+      const dx = frame.left - panel.frame.left;
+      const dy = frame.bottom - panel.frame.bottom;
+
+      // --- Fiducials + Tooling Holes: Smart Anchor ---
+      const newFiducials = panel.fiducials.map((f) => ({
+        ...f,
+        position: smartAnchorReposition(f.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+      }));
+
+      const newToolingHoles = panel.toolingHoles.map((h) => ({
+        ...h,
+        position: smartAnchorReposition(h.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+      }));
+
+      // --- V-Scores: Komplett neu generieren wenn welche existierten ---
+      let newVScoreLines: VScoreLine[] = [];
+      if (panel.vscoreLines.length > 0) {
+        // Tiefe und Winkel von bestehenden V-Scores übernehmen
+        const depth = panel.vscoreLines[0].depth;
+        const angle = panel.vscoreLines[0].angle;
+
+        // Board-Kanten-Positionen sammeln (gleiche Logik wie autoDistributeVScoreLines)
+        const xPositions = new Set<number>();
+        const yPositions = new Set<number>();
+
+        for (const instance of allInstances) {
+          const instBoard = panel.boards.find((b) => b.id === instance.boardId);
+          if (!instBoard) continue;
+
+          const layerRotation = instBoard.layerRotation || 0;
+          const isLayerRotated = layerRotation === 90 || layerRotation === 270;
+          const effectiveW = isLayerRotated ? instBoard.height : instBoard.width;
+          const effectiveH = isLayerRotated ? instBoard.width : instBoard.height;
+          const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
+          const displayW = isInstanceRotated ? effectiveH : effectiveW;
+          const displayH = isInstanceRotated ? effectiveW : effectiveH;
+
+          const left = Math.round(instance.position.x * 1000) / 1000;
+          const right = Math.round((instance.position.x + displayW) * 1000) / 1000;
+          const bottom = Math.round(instance.position.y * 1000) / 1000;
+          const top = Math.round((instance.position.y + displayH) * 1000) / 1000;
+
+          xPositions.add(left);
+          xPositions.add(right);
+          yPositions.add(bottom);
+          yPositions.add(top);
+        }
+
+        // Prüfen ob alte V-Scores die äusseren Kanten enthielten
+        const oldHadOuterEdges = panel.vscoreLines.some(l =>
+          Math.abs(l.start.x) < 0.001 || Math.abs(l.start.y) < 0.001
+        );
+
+        const sortedX = Array.from(xPositions).sort((a, b) => a - b);
+        const sortedY = Array.from(yPositions).sort((a, b) => a - b);
+        const filteredX = oldHadOuterEdges ? sortedX : sortedX.slice(1, -1);
+        const filteredY = oldHadOuterEdges ? sortedY : sortedY.slice(1, -1);
+
+        // Horizontale V-Scores (für jede Y-Position)
+        for (const y of filteredY) {
+          newVScoreLines.push({
+            id: uuidv4(),
+            start: { x: 0, y },
+            end: { x: newWidth, y },
+            depth,
+            angle,
+          });
+        }
+
+        // Vertikale V-Scores (für jede X-Position)
+        for (const x of filteredX) {
+          newVScoreLines.push({
+            id: uuidv4(),
+            start: { x, y: 0 },
+            end: { x, y: newHeight },
+            depth,
+            angle,
+          });
+        }
+      }
+
+      // --- Badmarks: Master per Smart Anchor, Board-Badmarks auf neue Instanzen übertragen ---
+      const newBadmarks: Badmark[] = [];
+
+      // Master-Badmarks: Smart Anchor (Panel-Rand-Elemente)
+      panel.badmarks
+        .filter(b => !b.isSyncCopy && b.isMasterBadmark)
+        .forEach((b) => {
+          newBadmarks.push({
+            ...b,
+            position: smartAnchorReposition(b.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+          });
+        });
+
+      // Board-Badmarks: Auf die neue Master-Instanz übertragen
+      // Die Badmark-Position wird relativ zur alten Board-Instanz berechnet
+      // und dann auf die neue Master-Instanz umgerechnet.
+      const oldMasterBoardBadmarks = panel.badmarks.filter(b =>
+        !b.isSyncCopy && !b.isMasterBadmark && b.boardInstanceId
+      );
+
+      if (oldMasterBoardBadmarks.length > 0 && newInstances.length > 0) {
+        // Alte Master-Instanz finden (die Instanz, der die Badmarks zugeordnet waren)
+        const oldMasterInst = panel.instances.find(inst =>
+          inst.id === oldMasterBoardBadmarks[0].boardInstanceId
+        );
+        // Neue Master-Instanz = nächste zum Nullpunkt
+        const newMasterInst = getMasterInstance(allInstances);
+
+        if (oldMasterInst && newMasterInst) {
+          for (const bm of oldMasterBoardBadmarks) {
+            // Relative Position zur alten Instanz berechnen
+            const relX = bm.position.x - oldMasterInst.position.x;
+            const relY = bm.position.y - oldMasterInst.position.y;
+
+            // Auf neue Master-Instanz übertragen
+            newBadmarks.push({
+              ...bm,
+              boardInstanceId: newMasterInst.id,
+              position: {
+                x: newMasterInst.position.x + relX,
+                y: newMasterInst.position.y + relY,
+              },
+            });
+          }
+        }
+      }
+
+      // --- Tabs + Mousebites: Leeren (neue Board-Instanzen) ---
+
+      // --- Manuelle Routing-Konturen: Auf neue Master-Instanz übertragen ---
+      const manualContours = panel.routingContours.filter(
+        (c) => c.creationMethod !== 'auto' && c.creationMethod !== undefined && !c.isSyncCopy
+      );
+      const transferredContours: RoutingContour[] = [];
+
+      if (manualContours.length > 0 && newInstances.length > 0) {
+        // Für jede manuelle Kontur: alte Instanz-Position finden, auf neue Master umrechnen
+        const newMasterInst = getMasterInstance(allInstances);
+        if (newMasterInst) {
+          for (const contour of manualContours) {
+            const oldInst = panel.instances.find(inst => inst.id === contour.boardInstanceId);
+            if (oldInst) {
+              // Relative Verschiebung von alter Instanz-Position zur neuen Master-Position
+              const shiftX = newMasterInst.position.x - oldInst.position.x;
+              const shiftY = newMasterInst.position.y - oldInst.position.y;
+
+              transferredContours.push({
+                ...contour,
+                boardInstanceId: newMasterInst.id,
+                segments: contour.segments.map((seg) => ({
+                  start: { x: seg.start.x + shiftX, y: seg.start.y + shiftY },
+                  end: { x: seg.end.x + shiftX, y: seg.end.y + shiftY },
+                  ...(seg.arc ? {
+                    arc: {
+                      ...seg.arc,
+                      center: { x: seg.arc.center.x + shiftX, y: seg.arc.center.y + shiftY },
+                    },
+                  } : {}),
+                })),
+              });
+            }
+          }
+        }
+      }
+
+      // Auto-Konturen: Regenerieren wenn welche existierten
+      const hadAutoContours = panel.routingContours.some(c => c.creationMethod === 'auto');
+
+      // Panel mit neuen Daten zusammenbauen
+      const updatedPanel: Panel = {
+        ...panel,
+        width: newWidth,
+        height: newHeight,
+        frame,
+        instances: allInstances,
+        fiducials: newFiducials,
+        toolingHoles: newToolingHoles,
+        vscoreLines: newVScoreLines,
+        tabs: [], // Tabs müssen neu verteilt werden
+        freeMousebites: [], // Mousebites müssen neu erstellt werden
+        badmarks: newBadmarks,
+        routingContours: transferredContours, // Manuelle Konturen auf neue Master-Instanz übertragen
+        modifiedAt: new Date(),
+      };
+
+      // Auto-Konturen regenerieren wenn welche existierten
+      if (hadAutoContours) {
+        updatedPanel.routingContours = generateAutoRoutingContours(updatedPanel);
+      }
+
+      // Sync-Kopien aktualisieren
+      updatedPanel.badmarks = syncMasterBadmarks(updatedPanel);
+
+      return {
+        panel: updatedPanel,
+        selectedInstances: [],
+        selectedRoutingContourId: null,
+        selectedVScoreLineId: null,
+        selectedTabId: null,
+        selectedFreeMousebiteId: null,
+        selectedBadmarkId: null,
+      };
+    });
+    // Zeichnungsvorschau-Config aktualisieren
+    get().recalculateDrawingConfig();
+  },
+
   // --------------------------------------------------------------------------
   // Auswahl-Aktionen
   // --------------------------------------------------------------------------
@@ -2579,7 +3254,8 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   setFrame: (frame) => {
     saveHistory();
     const currentState = get();
-    const oldFrame = currentState.panel.frame;
+    const oldPanel = currentState.panel;
+    const oldFrame = oldPanel.frame;
     const newFrame = { ...oldFrame, ...frame };
 
     // Wie viel hat sich links/unten geändert?
@@ -2591,26 +3267,178 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     const widthDiff = (newFrame.left - oldFrame.left) + (newFrame.right - oldFrame.right);
     const heightDiff = (newFrame.top - oldFrame.top) + (newFrame.bottom - oldFrame.bottom);
 
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        frame: newFrame,
-        // Panel-Größe direkt anpassen (min. 10mm)
-        width: Math.max(10, state.panel.width + widthDiff),
-        height: Math.max(10, state.panel.height + heightDiff),
-        // Boards verschieben wenn sich links oder unten ändert
-        instances: (dx !== 0 || dy !== 0)
-          ? state.panel.instances.map((inst) => ({
-              ...inst,
+    // Guard: Wenn nur cornerRadius geändert wird (alle Deltas = 0), keine Repositionierung nötig
+    const needsReposition = dx !== 0 || dy !== 0 || widthDiff !== 0 || heightDiff !== 0;
+
+    const oldW = oldPanel.width;
+    const oldH = oldPanel.height;
+    const newWidth = Math.max(10, oldW + widthDiff);
+    const newHeight = Math.max(10, oldH + heightDiff);
+
+    set((state) => {
+      const panel = state.panel;
+
+      if (!needsReposition) {
+        // Nur cornerRadius geändert → nur Frame und ggf. Auto-Konturen aktualisieren
+        const updatedPanel = {
+          ...panel,
+          frame: newFrame,
+          modifiedAt: new Date(),
+        };
+
+        // Auto-Konturen regenerieren wenn welche existieren (wegen Eckenradius)
+        const hadAutoContours = panel.routingContours.some(c => c.creationMethod === 'auto');
+        if (hadAutoContours) {
+          const manualContours = panel.routingContours.filter(
+            (c) => c.creationMethod !== 'auto' && c.creationMethod !== undefined
+          );
+          const newAutoContours = generateAutoRoutingContours(updatedPanel);
+          updatedPanel.routingContours = [...manualContours, ...newAutoContours];
+        }
+
+        return { panel: updatedPanel };
+      }
+
+      // === Alle Elemente repositionieren ===
+
+      // 1. Board-Instanzen: Shift (dx, dy) — wie bisher
+      const newInstances = panel.instances.map((inst) => ({
+        ...inst,
+        position: {
+          x: inst.position.x + dx,
+          y: inst.position.y + dy,
+        },
+      }));
+
+      // 2. Fiducials: Smart Anchor
+      const newFiducials = panel.fiducials.map((f) => ({
+        ...f,
+        position: smartAnchorReposition(f.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+      }));
+
+      // 3. Tooling Holes: Smart Anchor
+      const newToolingHoles = panel.toolingHoles.map((h) => ({
+        ...h,
+        position: smartAnchorReposition(h.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+      }));
+
+      // 4. V-Score Linien: Position shift (dx, dy), Endpunkte auf neue Panel-Kanten
+      const newVScoreLines = panel.vscoreLines.map((l) => {
+        // V-Score Endpunkte auf Panel-Kanten anpassen:
+        // Start/End die auf 0 lagen bleiben auf 0, die auf width/height gehen auf newWidth/newHeight
+        const adjustEndpoint = (p: Point): Point => {
+          let x = p.x;
+          let y = p.y;
+
+          // X-Koordinate: 0 bleibt 0, alte width → neue width, sonst shift
+          if (Math.abs(x) < 0.001) {
+            x = 0;
+          } else if (Math.abs(x - oldW) < 0.001) {
+            x = newWidth;
+          } else {
+            x = x + dx;
+          }
+
+          // Y-Koordinate: 0 bleibt 0, alte height → neue height, sonst shift
+          if (Math.abs(y) < 0.001) {
+            y = 0;
+          } else if (Math.abs(y - oldH) < 0.001) {
+            y = newHeight;
+          } else {
+            y = y + dy;
+          }
+
+          return { x, y };
+        };
+
+        return {
+          ...l,
+          start: adjustEndpoint(l.start),
+          end: adjustEndpoint(l.end),
+        };
+      });
+
+      // 5. Tabs: Leeren (müssen nach Repositionierung neu verteilt werden)
+      // Gleich wie bei rotatePanelCCW
+      const newTabs: Tab[] = [];
+
+      // 6. Free Mousebites: Leeren (Board-Positionen haben sich geändert)
+      const newFreeMousebites: FreeMousebite[] = [];
+
+      // 7. Badmarks: Board-Badmarks mit Boards verschieben (dx, dy),
+      //    Master-Badmarks per Smart Anchor
+      const newBadmarks = panel.badmarks
+        .filter(b => !b.isSyncCopy) // Sync-Kopien werden via syncMasterBadmarks neu erstellt
+        .map((b) => {
+          if (b.isMasterBadmark) {
+            // Master-Badmarks: Smart Anchor (am Panel-Rand positioniert)
+            return {
+              ...b,
+              position: smartAnchorReposition(b.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
+            };
+          } else {
+            // Board-Badmarks: Verschieben mit Boards (dx, dy)
+            return {
+              ...b,
               position: {
-                x: inst.position.x + dx,
-                y: inst.position.y + dy,
+                x: b.position.x + dx,
+                y: b.position.y + dy,
               },
-            }))
-          : state.panel.instances,
+            };
+          }
+        });
+
+      // 8. Manuelle Routing-Konturen: Segmente shift (dx, dy) inkl. arc.center
+      //    Auto-Konturen: Entfernen + regenerieren
+      const manualContours = panel.routingContours.filter(
+        (c) => c.creationMethod !== 'auto' && c.creationMethod !== undefined
+      );
+      const shiftedManualContours = manualContours
+        .filter(c => !c.isSyncCopy) // Sync-Kopien werden via syncMasterContours neu erstellt
+        .map((c) => ({
+          ...c,
+          segments: c.segments.map((seg) => ({
+            start: { x: seg.start.x + dx, y: seg.start.y + dy },
+            end: { x: seg.end.x + dx, y: seg.end.y + dy },
+            ...(seg.arc ? {
+              arc: {
+                ...seg.arc,
+                center: { x: seg.arc.center.x + dx, y: seg.arc.center.y + dy },
+              },
+            } : {}),
+          })),
+        }));
+
+      // Panel mit neuer Grösse zusammenbauen (für Auto-Konturen-Regenerierung)
+      const updatedPanel: Panel = {
+        ...panel,
+        frame: newFrame,
+        width: newWidth,
+        height: newHeight,
+        instances: newInstances,
+        fiducials: newFiducials,
+        toolingHoles: newToolingHoles,
+        vscoreLines: newVScoreLines,
+        tabs: newTabs,
+        freeMousebites: newFreeMousebites,
+        badmarks: newBadmarks,
+        routingContours: shiftedManualContours,
         modifiedAt: new Date(),
-      },
-    }));
+      };
+
+      // Auto-Konturen regenerieren wenn welche existierten
+      const hadAutoContours = panel.routingContours.some(c => c.creationMethod === 'auto');
+      if (hadAutoContours) {
+        const newAutoContours = generateAutoRoutingContours(updatedPanel);
+        updatedPanel.routingContours = [...shiftedManualContours, ...newAutoContours];
+      }
+
+      // Sync-Kopien für Routing-Konturen und Badmarks aktualisieren
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+      updatedPanel.badmarks = syncMasterBadmarks(updatedPanel);
+
+      return { panel: updatedPanel };
+    });
     // Zeichnungsvorschau-Config aktualisieren (Massstab ggf. neu berechnen)
     get().recalculateDrawingConfig();
   },
@@ -3641,97 +4469,139 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       },
     })),
 
-  // Wechselt die Offset-Seite einer Fräskontur:
-  // 1. flipOffset-Flag toggeln
-  // 2. Segmente geometrisch auf die andere Seite verschieben (2 * toolRadius)
-  // 3. Master-Board-Synchronisation aufrufen
-  toggleRoutingContourFlipOffset: (contourId) => {
+  // Setzt die Offset-Seite einer Fräskontur und berechnet Segmente neu:
+  // 'none' = direkt auf der Outline (kein Offset)
+  // 'left' = Fräser um toolRadius nach links versetzt
+  // 'right' = Fräser um toolRadius nach rechts versetzt
+  //
+  // Strategie: Erst Original-Koordinaten (ohne Offset) zurückrechnen,
+  // dann neuen Offset anwenden falls side !== 'none'.
+  setRoutingContourOffsetSide: (contourId, side) => {
     saveHistory();
     set((state) => {
       const contour = state.panel.routingContours.find((c) => c.id === contourId);
       if (!contour || contour.isSyncCopy || contour.creationMethod === 'auto') return state;
+      // Wenn die Seite gleich bleibt, nichts tun
+      const currentSide = contour.offsetSide || 'none';
+      if (currentSide === side) return state;
 
       const instance = state.panel.instances.find((i) => i.id === contour.boardInstanceId);
       if (!instance) return state;
       const board = state.panel.boards.find((b) => b.id === instance.boardId);
       if (!board) return state;
 
-      // Outline-Segmente und Winding-Direction für dieses Board holen
-      const outlineSegs = buildOutlineSegments(board, instance);
-      if (outlineSegs.length === 0) return state;
-      const wSign = computeOutlineWindingSign(outlineSegs);
-
       const toolRadius = contour.toolDiameter / 2;
-      const newFlip = !contour.flipOffset;
 
-      // Segmente um 2 * toolRadius verschieben — Richtung hängt davon ab,
-      // ob wir gerade ZUM Flip oder ZURÜCK wechseln:
-      //   false → true  (zum Flip):   Verschiebung in Minus-Richtung der Normalen
-      //   true  → false (zurück):     Verschiebung in Plus-Richtung der Normalen
-      // So springt die Kontur beim zweiten Klick exakt an die Originalposition zurück.
-      const flipDirection = contour.flipOffset ? 1 : -1;
+      // =====================================================================
+      // CNC-Standard Fräskompensation (wie Mastercam G41/G42)
+      // =====================================================================
+      // "Links" und "Rechts" werden relativ zur FAHRTRICHTUNG bestimmt:
+      // Wenn du in Fahrtrichtung schaust (Start → End), ist "links" links
+      // und "rechts" rechts von dir.
+      //
+      // In Screen-Koordinaten (Y-down):
+      //   Fahrtrichtung (dx, dy)
+      //   Links-Normale  = (dy, -dx) / len  (90° CW in Screen = links wenn Y-down)
+      //   Rechts-Normale = (-dy, dx) / len
+      //
+      // Für Bögen:
+      //   CW-Bogen: "links" der Fahrt = außen = Radius vergrößern  (+1)
+      //   CCW-Bogen: "links" der Fahrt = innen = Radius verkleinern (-1)
+      //   → leftSign = clockwise ? +1 : -1
+      // =====================================================================
 
-      const flippedSegments: RoutingSegment[] = contour.segments.map((seg) => {
+      // Hilfsfunktion: Links-Normale einer Linie in Screen-Koordinaten (Y-down)
+      const getLeftNormal = (seg: RoutingSegment): { nx: number; ny: number } => {
+        const dx = seg.end.x - seg.start.x;
+        const dy = seg.end.y - seg.start.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len < 0.001) return { nx: 0, ny: 0 };
+        // Links der Fahrtrichtung in Screen-Koordinaten (Y-down)
+        return { nx: dy / len, ny: -dx / len };
+      };
+
+      // Hilfsfunktion: Offset-Sign für Bögen
+      // CW-Bogen: links = außen → Radius vergrößern = +1
+      // CCW-Bogen: links = innen → Radius verkleinern = -1
+      const getArcLeftSign = (arc: NonNullable<RoutingSegment['arc']>): number => {
+        return arc.clockwise ? 1 : -1;
+      };
+
+      // --- Schritt 1: Original-Koordinaten zurückrechnen (alten Offset entfernen) ---
+      const stripOffset = (seg: RoutingSegment, oldSide: string): RoutingSegment => {
+        if (oldSide === 'none') return seg;
+
+        // 'left' → Links-Offset wurde angewendet, 'right' → Rechts-Offset
+        const sign = oldSide === 'left' ? 1 : -1; // +1 = links, -1 = rechts
+
         if (seg.arc) {
-          // Bogen: Radius-Inversion
-          // Basis-Sign aus Winding-Direction + Bogenrichtung berechnen
-          const outlineCW = wSign > 0;
-          let baseSign = (outlineCW === seg.arc.clockwise) ? 1 : -1;
-          // Wenn die Kontur bereits geflippt ist, wurde das Sign schon invertiert —
-          // wir müssen das berücksichtigen, um den Original-Radius korrekt zurückzurechnen
-          const currentSign = contour.flipOffset ? -baseSign : baseSign;
-          // Originaler Radius (ohne Offset) zurückrechnen
-          const originalRadius = seg.arc.radius - currentSign * toolRadius;
-          // Neues Sign = invertiert (andere Seite)
-          const newSign = -currentSign;
-          const newRadius = originalRadius + newSign * toolRadius;
-          if (newRadius < 0.01) return seg; // Zu kleiner Radius, Segment beibehalten
-
-          // Start/End-Punkte auf neuem Radius setzen
-          const oStart: Point = {
-            x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * newRadius,
-            y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * newRadius,
-          };
-          const oEnd: Point = {
-            x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * newRadius,
-            y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * newRadius,
-          };
-
+          const arcSign = getArcLeftSign(seg.arc) * sign;
+          const originalRadius = seg.arc.radius - arcSign * toolRadius;
+          if (originalRadius < 0.01) return seg;
           return {
-            start: oStart,
-            end: oEnd,
-            arc: {
-              ...seg.arc,
-              radius: newRadius,
+            start: {
+              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * originalRadius,
+              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * originalRadius,
             },
+            end: {
+              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * originalRadius,
+              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * originalRadius,
+            },
+            arc: { ...seg.arc, radius: originalRadius },
           };
         } else {
-          // Linie: Normale berechnen und Punkte verschieben
-          const dx = seg.end.x - seg.start.x;
-          const dy = seg.end.y - seg.start.y;
-          const len = Math.sqrt(dx * dx + dy * dy);
-          if (len < 0.001) return seg;
-
-          // Normale (basierend auf Winding-Direction)
-          const nx = wSign > 0 ? dy / len : -dy / len;
-          const ny = wSign > 0 ? -dx / len : dx / len;
-
-          // flipDirection bestimmt ob wir hin oder zurück schieben:
-          //   -1 = zum Flip (Minus-Richtung der Normalen)
-          //   +1 = zurück zur Original-Seite (Plus-Richtung)
-          const shift = 2 * toolRadius;
+          const { nx, ny } = getLeftNormal(seg);
+          if (nx === 0 && ny === 0) return seg;
+          // Rückgängig: Links-Offset subtrahieren
           return {
-            start: { x: seg.start.x + flipDirection * nx * shift, y: seg.start.y + flipDirection * ny * shift },
-            end: { x: seg.end.x + flipDirection * nx * shift, y: seg.end.y + flipDirection * ny * shift },
+            start: { x: seg.start.x - nx * sign * toolRadius, y: seg.start.y - ny * sign * toolRadius },
+            end: { x: seg.end.x - nx * sign * toolRadius, y: seg.end.y - ny * sign * toolRadius },
           };
         }
+      };
+
+      // --- Schritt 2: Neuen Offset anwenden ---
+      const applyOffset = (seg: RoutingSegment, newSide: string): RoutingSegment => {
+        if (newSide === 'none') return seg;
+
+        const sign = newSide === 'left' ? 1 : -1;
+
+        if (seg.arc) {
+          const arcSign = getArcLeftSign(seg.arc) * sign;
+          const offsetRadius = seg.arc.radius + arcSign * toolRadius;
+          if (offsetRadius < 0.01) return seg;
+          return {
+            start: {
+              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * offsetRadius,
+              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * offsetRadius,
+            },
+            end: {
+              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * offsetRadius,
+              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * offsetRadius,
+            },
+            arc: { ...seg.arc, radius: offsetRadius },
+          };
+        } else {
+          const { nx, ny } = getLeftNormal(seg);
+          if (nx === 0 && ny === 0) return seg;
+          return {
+            start: { x: seg.start.x + nx * sign * toolRadius, y: seg.start.y + ny * sign * toolRadius },
+            end: { x: seg.end.x + nx * sign * toolRadius, y: seg.end.y + ny * sign * toolRadius },
+          };
+        }
+      };
+
+      // Segmente umrechnen: alten Offset entfernen → neuen Offset anwenden
+      const newSegments = contour.segments.map((seg) => {
+        const original = stripOffset(seg, currentSide);
+        return applyOffset(original, side);
       });
 
       const updatedPanel = {
         ...state.panel,
         routingContours: state.panel.routingContours.map((c) =>
           c.id === contourId
-            ? { ...c, flipOffset: newFlip, segments: flippedSegments }
+            ? { ...c, offsetSide: side, segments: newSegments }
             : c
         ),
         modifiedAt: new Date(),
@@ -3758,177 +4628,16 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   // Kern-Algorithmus:
   // A) Board-Outline-Konturen: Für jedes Board eine Kontur mit Lücken an Tab-Positionen
   // B) Panel-Außenkontur: Einfaches Rechteck (optional mit Eckenradius-Approximation)
+  // Auto-Routing-Konturen generieren.
+  // Verwendet die reine Funktion generateAutoRoutingContours() und fügt sie dem Panel hinzu.
+  // Manuelle Konturen (free-draw, follow-outline) bleiben erhalten.
   autoGenerateRoutingContours: () => {
     saveHistory();
     set((state) => {
       const { panel } = state;
-      const { routingConfig } = panel;
-      const newContours: RoutingContour[] = [];
 
-      // === A) Board-Outline-Konturen ===
-      // Die Fräser-Mittellinie liegt NICHT auf der Board-Kante, sondern um den
-      // halben Fräser-Ø nach aussen versetzt (im Gap-Bereich). So schneidet
-      // der Fräser genau an der Board-Kante und ragt nicht ins Board hinein.
-      if (routingConfig.generateBoardOutlines) {
-        const toolRadius = routingConfig.toolDiameter / 2;
-
-        for (const instance of panel.instances) {
-          const board = panel.boards.find((b) => b.id === instance.boardId);
-          if (!board) continue;
-
-          // Board-Größe berechnen (berücksichtigt Layer-Rotation + Instanz-Rotation)
-          const layerRotation = board.layerRotation || 0;
-          const isLayerRotated = layerRotation === 90 || layerRotation === 270;
-          const effectiveW = isLayerRotated ? board.height : board.width;
-          const effectiveH = isLayerRotated ? board.width : board.height;
-          const isInstanceRotated = instance.rotation === 90 || instance.rotation === 270;
-          const displayW = isInstanceRotated ? effectiveH : effectiveW;
-          const displayH = isInstanceRotated ? effectiveW : effectiveH;
-
-          // Board-Position in absoluten Panel-Koordinaten
-          const bx = instance.position.x;
-          const by = instance.position.y;
-
-          // Versetzte Ecken (Fräser-Mittellinie im Gap)
-          // Das versetzte Rechteck ist um toolRadius grösser als das Board
-          const ox1 = bx - toolRadius;
-          const oy1 = by - toolRadius;
-          const ox2 = bx + displayW + toolRadius;
-          const oy2 = by + displayH + toolRadius;
-
-          // 4 Kanten der VERSETZTEN Kontur (Fräser-Mittellinie)
-          // Reihenfolge: bottom, right, top, left (im Uhrzeigersinn)
-          // boardEdgeLength = Kantenlänge des BOARDS (für Tab-Umrechnung)
-          const edges: Array<{
-            start: { x: number; y: number };
-            end: { x: number; y: number };
-            edgeName: 'bottom' | 'right' | 'top' | 'left';
-            boardEdgeLength: number;
-          }> = [
-            { start: { x: ox1, y: oy1 }, end: { x: ox2, y: oy1 }, edgeName: 'bottom', boardEdgeLength: displayW },
-            { start: { x: ox2, y: oy1 }, end: { x: ox2, y: oy2 }, edgeName: 'right', boardEdgeLength: displayH },
-            { start: { x: ox2, y: oy2 }, end: { x: ox1, y: oy2 }, edgeName: 'top', boardEdgeLength: displayW },
-            { start: { x: ox1, y: oy2 }, end: { x: ox1, y: oy1 }, edgeName: 'left', boardEdgeLength: displayH },
-          ];
-
-          // Alle Tabs für diese Board-Instanz holen
-          const instanceTabs = panel.tabs.filter(
-            (t) => t.boardInstanceId === instance.id
-          );
-
-          const segments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
-
-          for (const edge of edges) {
-            const tabEdge = edge.edgeName;
-
-            // Tabs an dieser Kante finden (nur nicht-vscore Tabs)
-            const edgeTabs = instanceTabs.filter(
-              (t) => t.edge === tabEdge && t.type !== 'vscore'
-            );
-
-            if (edgeTabs.length === 0) {
-              // Keine Tabs → ganze Kante als ein Segment
-              segments.push({ start: edge.start, end: edge.end });
-              continue;
-            }
-
-            // Versetzte Kantenlänge = Board-Kante + 2 × toolRadius
-            const offsetEdgeLength = edge.boardEdgeLength + 2 * toolRadius;
-
-            // Tab-Lücken berechnen: Tab-Position (0-1 auf Board-Kante) auf
-            // versetzte Kante umrechnen, dann Lücke in normalisierten Einheiten
-            const gaps = edgeTabs
-              .map((t) => {
-                // Tab-Mitte auf der versetzten Kante (normalisiert 0-1)
-                const tabCenterOnOffset = (t.position * edge.boardEdgeLength + toolRadius) / offsetEdgeLength;
-                const halfWidth = t.width / 2 / offsetEdgeLength;
-                return {
-                  start: Math.max(0, tabCenterOnOffset - halfWidth),
-                  end: Math.min(1, tabCenterOnOffset + halfWidth),
-                };
-              })
-              .sort((a, b) => a.start - b.start);
-
-            // Kante in Segmente aufteilen (zwischen den Lücken)
-            let currentPos = 0;
-
-            for (const gap of gaps) {
-              if (gap.start > currentPos) {
-                const segStart = interpolatePoint(edge.start, edge.end, currentPos);
-                const segEnd = interpolatePoint(edge.start, edge.end, gap.start);
-                segments.push({ start: segStart, end: segEnd });
-              }
-              currentPos = gap.end;
-            }
-
-            // Rest nach letztem Tab
-            if (currentPos < 1) {
-              const segStart = interpolatePoint(edge.start, edge.end, currentPos);
-              segments.push({ start: segStart, end: edge.end });
-            }
-          }
-
-          newContours.push({
-            id: uuidv4(),
-            contourType: 'boardOutline',
-            boardInstanceId: instance.id,
-            segments,
-            toolDiameter: routingConfig.toolDiameter,
-            visible: true,
-            creationMethod: 'auto',
-          });
-        }
-      }
-
-      // === B) Panel-Außenkontur ===
-      if (routingConfig.generatePanelOutline) {
-        const w = panel.width;
-        const h = panel.height;
-        const r = panel.frame.cornerRadius;
-        const panelSegments: { start: { x: number; y: number }; end: { x: number; y: number } }[] = [];
-
-        if (r > 0) {
-          // Ecken durch kurze Segmente annähern (8 Punkte pro Ecke)
-          const cornerSegments = 4; // Anzahl der Segmente pro Ecke
-
-          // Unten-links Ecke (0,0) nach (r,0) - mit Bogen
-          const blCorner = approximateCorner(r, 0, 0, r, Math.PI, Math.PI * 1.5, cornerSegments);
-          // Unten-rechts Ecke (w-r,0) nach (w,r) - mit Bogen
-          const brCorner = approximateCorner(w - r, 0, w, r, Math.PI * 1.5, Math.PI * 2, cornerSegments);
-          // Oben-rechts Ecke (w,h-r) nach (w-r,h) - mit Bogen
-          const trCorner = approximateCorner(w, h - r, w - r, h, 0, Math.PI * 0.5, cornerSegments);
-          // Oben-links Ecke (r,h) nach (0,h-r) - mit Bogen
-          const tlCorner = approximateCorner(r, h, 0, h - r, Math.PI * 0.5, Math.PI, cornerSegments);
-
-          // Bottom: BL-Ecke → gerade → BR-Ecke
-          panelSegments.push(...blCorner);
-          panelSegments.push({ start: { x: r, y: 0 }, end: { x: w - r, y: 0 } });
-          panelSegments.push(...brCorner);
-          // Right: BR-Ecke → gerade → TR-Ecke
-          panelSegments.push({ start: { x: w, y: r }, end: { x: w, y: h - r } });
-          panelSegments.push(...trCorner);
-          // Top: TR-Ecke → gerade → TL-Ecke
-          panelSegments.push({ start: { x: w - r, y: h }, end: { x: r, y: h } });
-          panelSegments.push(...tlCorner);
-          // Left: TL-Ecke → gerade → BL-Ecke
-          panelSegments.push({ start: { x: 0, y: h - r }, end: { x: 0, y: r } });
-        } else {
-          // Einfaches Rechteck: 4 Kanten
-          panelSegments.push({ start: { x: 0, y: 0 }, end: { x: w, y: 0 } }); // bottom
-          panelSegments.push({ start: { x: w, y: 0 }, end: { x: w, y: h } }); // right
-          panelSegments.push({ start: { x: w, y: h }, end: { x: 0, y: h } }); // top
-          panelSegments.push({ start: { x: 0, y: h }, end: { x: 0, y: 0 } }); // left
-        }
-
-        newContours.push({
-          id: uuidv4(),
-          contourType: 'panelOutline',
-          segments: panelSegments,
-          toolDiameter: routingConfig.toolDiameter,
-          visible: true,
-          creationMethod: 'auto',
-        });
-      }
+      // Neue Auto-Konturen via reine Funktion generieren
+      const newContours = generateAutoRoutingContours(panel);
 
       // Manuelle Konturen behalten, nur Auto-Konturen ersetzen
       const manualContours = panel.routingContours.filter(
@@ -4153,6 +4862,137 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     set(() => ({
       routeSegmentSelectState: { boardInstanceId: null, selectedSegmentIndices: [], outlineSegments: [] },
     })),
+
+  // Fügt mehrere Segment-Indizes zur Auswahl hinzu (für Rubber-Band-Selektion)
+  // Verwendet Set um Duplikate zu vermeiden
+  addSegmentsToSelection: (indices) =>
+    set((state) => {
+      const currentSet = new Set(state.routeSegmentSelectState.selectedSegmentIndices);
+      for (const idx of indices) currentSet.add(idx);
+      return {
+        routeSegmentSelectState: {
+          ...state.routeSegmentSelectState,
+          selectedSegmentIndices: Array.from(currentSet),
+        },
+      };
+    }),
+
+  // Entfernt mehrere Segment-Indizes aus der Auswahl (für Ctrl+Rubber-Band)
+  removeSegmentsFromSelection: (indices) =>
+    set((state) => {
+      const removeSet = new Set(indices);
+      return {
+        routeSegmentSelectState: {
+          ...state.routeSegmentSelectState,
+          selectedSegmentIndices: state.routeSegmentSelectState.selectedSegmentIndices.filter(
+            (idx) => !removeSet.has(idx)
+          ),
+        },
+      };
+    }),
+
+  // Erstellt Fräskontur(en) aus den ausgewählten Segmenten.
+  // Gruppiert zusammenhängende Segmente, führt Arc-Detection durch,
+  // erstellt pro Gruppe eine saubere RoutingContour.
+  finalizeSegmentSelection: () => {
+    const state = usePanelStore.getState();
+    const segState = state.routeSegmentSelectState;
+
+    if (!segState.boardInstanceId || segState.selectedSegmentIndices.length === 0 || segState.outlineSegments.length === 0) {
+      return;
+    }
+
+    const outlineSegs = segState.outlineSegments;
+    const inst = state.panel.instances.find((i: any) => i.id === segState.boardInstanceId);
+    const brd = inst ? state.panel.boards.find((b: any) => b.id === inst.boardId) : null;
+
+    if (!brd || !inst) return;
+
+    // Zusammenhängende Gruppen bilden (mit zyklischem Wrap-Around)
+    const groups = groupConsecutiveIndices(segState.selectedSegmentIndices, outlineSegs.length);
+
+    // Board-Zentrum in Panel-Koordinaten berechnen (für Auto-Offset-Erkennung)
+    const isRotated = inst.rotation === 90 || inst.rotation === 270;
+    const dispW = isRotated ? brd.height : brd.width;
+    const dispH = isRotated ? brd.width : brd.height;
+    const boardCenterX = inst.position.x + dispW / 2;
+    const boardCenterY = inst.position.y + dispH / 2;
+    const toolRadius = state.panel.routingConfig.toolDiameter / 2;
+
+    // Pro Gruppe: RoutingSegments erstellen → Auto-Offset nach außen → RoutingContour erstellen
+    for (const group of groups) {
+      const segments = mergeGroupToRoutingSegments(outlineSegs, group);
+      if (segments.length === 0) continue;
+
+      // --- Auto-Offset: Bestimme ob "links" oder "rechts" nach außen zeigt ---
+      // Mittelpunkt des ersten Segments → Vektor vom Board-Zentrum dorthin = "nach außen"
+      // Vergleiche mit der Links-Normale des Segments (Skalarprodukt)
+      let autoOffsetSide: 'none' | 'left' | 'right' = 'none';
+      const firstSeg = segments[0];
+      const segMidX = (firstSeg.start.x + firstSeg.end.x) / 2;
+      const segMidY = (firstSeg.start.y + firstSeg.end.y) / 2;
+      const outX = segMidX - boardCenterX;
+      const outY = segMidY - boardCenterY;
+      const dx = firstSeg.end.x - firstSeg.start.x;
+      const dy = firstSeg.end.y - firstSeg.start.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len > 0.001) {
+        // Links-Normale in Screen-Koordinaten (Y-down)
+        const leftNx = dy / len;
+        const leftNy = -dx / len;
+        const dot = leftNx * outX + leftNy * outY;
+        autoOffsetSide = dot > 0 ? 'left' : 'right';
+      }
+
+      // --- Offset auf Segmente anwenden ---
+      const offsetSegments = autoOffsetSide === 'none' ? segments : segments.map((seg) => {
+        const sign = autoOffsetSide === 'left' ? 1 : -1;
+        if (seg.arc) {
+          // CW-Bogen: links = außen → +1, CCW: links = innen → -1
+          const arcSign = (seg.arc.clockwise ? 1 : -1) * sign;
+          const offsetR = seg.arc.radius + arcSign * toolRadius;
+          if (offsetR < 0.01) return seg;
+          return {
+            start: {
+              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * offsetR,
+              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * offsetR,
+            },
+            end: {
+              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * offsetR,
+              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * offsetR,
+            },
+            arc: { ...seg.arc, radius: offsetR },
+          };
+        } else {
+          if (len < 0.001) return seg;
+          const sdx = seg.end.x - seg.start.x;
+          const sdy = seg.end.y - seg.start.y;
+          const slen = Math.sqrt(sdx * sdx + sdy * sdy);
+          if (slen < 0.001) return seg;
+          const nx = (sdy / slen) * toolRadius;
+          const ny = (-sdx / slen) * toolRadius;
+          return {
+            start: { x: seg.start.x + nx * sign, y: seg.start.y + ny * sign },
+            end: { x: seg.end.x + nx * sign, y: seg.end.y + ny * sign },
+          };
+        }
+      });
+
+      // addRoutingContour aufrufen (speichert History automatisch + Sync)
+      usePanelStore.getState().addRoutingContour({
+        contourType: 'boardOutline',
+        boardInstanceId: segState.boardInstanceId!,
+        segments: offsetSegments,
+        toolDiameter: state.panel.routingConfig.toolDiameter,
+        visible: true,
+        creationMethod: 'follow-outline',
+        offsetSide: autoOffsetSide,
+      });
+    }
+
+    // State zurücksetzen
+    usePanelStore.getState().clearSegmentSelectState();
+  },
 
   // --------------------------------------------------------------------------
   // Viewport-Aktionen
