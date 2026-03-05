@@ -629,12 +629,13 @@ export function PixiPanelCanvas() {
     panelTarget.addChild(frameGraphics);
 
     // Grid zeichnen (nur Major-Linien)
+    // Major-Linien = jede 10. Grid-Linie (z.B. bei Grid 0.1mm → alle 1mm)
     if (grid.visible) {
       const gridGraphics = new Graphics();
       const majorStep = grid.size * 10;
 
-      gridGraphics.stroke({ color: COLORS.gridMajor, width: 0.5 });
-
+      // Zuerst alle Linien zeichnen (moveTo/lineTo),
+      // dann am Ende stroke() aufrufen — PixiJS 8 erfordert diese Reihenfolge
       for (let x = 0; x <= panel.width; x += majorStep) {
         gridGraphics.moveTo(x * PIXELS_PER_MM, 0);
         gridGraphics.lineTo(x * PIXELS_PER_MM, panel.height * PIXELS_PER_MM);
@@ -643,6 +644,8 @@ export function PixiPanelCanvas() {
         gridGraphics.moveTo(0, y * PIXELS_PER_MM);
         gridGraphics.lineTo(panel.width * PIXELS_PER_MM, y * PIXELS_PER_MM);
       }
+      // Jetzt alle Linien auf einmal zeichnen (Farbe + Strichstärke)
+      gridGraphics.stroke({ color: COLORS.gridMajor, width: 0.5 });
 
       panelTarget.addChild(gridGraphics);
     }

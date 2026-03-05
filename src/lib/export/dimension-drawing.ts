@@ -1373,7 +1373,12 @@ export async function generateDimensionDrawing(
   }
 
   // ----------------------------------------------------------------
-  // 16. ISO-Titelblock (unten rechts) mit Logo
+  // 16. Element-Beschreibungen + Eckenradius-Bemaßung
+  // ----------------------------------------------------------------
+  drawElementDescriptions(page, font, fontBold, panel, toX, toY, scale, options);
+
+  // ----------------------------------------------------------------
+  // 17. ISO-Titelblock (unten rechts) mit Logo
   // ----------------------------------------------------------------
   drawTitleBlockISO(page, font, fontBold, logoImage, panel, boards, instances, options, scaleRatio);
 
@@ -1731,9 +1736,9 @@ function drawTitleBlockISO(
   //
   // VERWALTUNGSZONE (links, 78mm)      | IDENTIFIKATIONSZONE (rechts, 102mm)
   // ────────────────────────────────────┼────────────────────────────────────
-  // Gezeichn.  │ Datum │ Name          │  BENENNUNG (Titel)
-  // ───────────┼───────┼───────────────┤  (Panel-Name, gross)
-  // Freigabe   │ Datum │ Name          │  ZEICHNUNGS-NR.
+  // Gezeichn.  │ Datum / Name          │  BENENNUNG (Titel)
+  // ───────────┼───────────────────────┤  (Panel-Name, gross)
+  // Freigabe   │ Datum / Name          │  ZEICHNUNGS-NR.
   // ───────────┴───────┴───────┬───────┼──────┬──────┬──────┬───────────────
   // (Urspr.)   │ FIRMA / LOGO │Masst. │Format│Blatt │Bl.Anz│
   // ========================================================================
@@ -1761,35 +1766,33 @@ function drawTitleBlockISO(
   // ====================================================================
   // ZEILEN-LAYOUT (von oben nach unten, Höhen in mm)
   // ====================================================================
-  const rowH1 = mm(10);    // Zeile 1: Gezeichnet (etwas mehr Platz)
-  const rowH2 = mm(10);    // Zeile 2: Freigegeben
-  const rowH4 = mm(14);    // Zeile 3: Firma / Massstab / Format / Blatt
-  // Resthohe verteilt sich auf Feinabstimmung / untere Kante
+  const rowH1 = mm(10);    // Zeile 1: Gezeichnet
+  const rowH2 = mm(10);    // Zeile 2: Freigabe
+  const massstabH = mm(14); // Massstab-Zeile: 14mm (wie vorher)
 
   // Y-Koordinaten der Zeilengrenzen (PDF: y=0 unten)
   const rowTop  = y + h;                // Oberkante Titelblock
   const row1Bot = rowTop - rowH1;       // Unterkante Zeile 1 (Gezeichnet)
-  const row2Bot = row1Bot - rowH2;      // Unterkante Zeile 2 (Freigegeben)
-  const row3Bot = row2Bot;              // Alias: row3Bot = row2Bot (keine Geprüft-Zeile mehr)
-  const row4Bot = row3Bot - rowH4;      // Unterkante Zeile 3 (Firma etc.)
+  const row2Bot = row1Bot - rowH2;      // Unterkante Zeile 2 (Freigabe)
+  const row3Bot = row2Bot;              // Alias: Beginn unterer Bereich
+  const logoH   = row2Bot - y;          // Logo: gesamte linke Seite (26mm)
+  const massstabBot = row2Bot - massstabH; // Unterkante Massstab-Zeile (rechts)
 
   // ====================================================================
   // SPALTEN-LAYOUT (VSM-Verwaltungszone links, Identifikationszone rechts)
   // ====================================================================
-  // Verwaltungszone (links): 3 Spalten
+  // Verwaltungszone (links): 2 Spalten (Label | Datum + Name)
   const labelW = mm(28);    // Spalte "Label" (Gezeichn./Freigabe)
-  const dateW  = mm(22);    // Spalte "Datum"
-  const nameW  = mm(28);    // Spalte "Name"
-  const leftZoneW = labelW + dateW + nameW;  // = 78mm
+  const valueW = mm(50);    // Spalte "Datum + Name" (kombiniert)
+  const leftZoneW = labelW + valueW;  // = 78mm
 
   // Identifikationszone (rechts): Rest
   const rightZoneW = w - leftZoneW;  // = 102mm
 
   // X-Koordinaten der Spaltentrennungen
   const colLabel = x;                     // Linke Kante (Label)
-  const colDate  = x + labelW;            // Datum-Spalte
-  const colName  = colDate + dateW;        // Name-Spalte
-  const colRight = colName + nameW;        // Beginn rechte Zone (Benennung/Zeichn.Nr.)
+  const colValue = x + labelW;            // Datum+Name-Spalte (kombiniert)
+  const colRight = colValue + valueW;     // Beginn rechte Zone (Benennung/Zeichn.Nr.)
 
   // ====================================================================
   // HORIZONTALE TRENNLINIEN (Hauptlinien)
@@ -1800,9 +1803,6 @@ function drawTitleBlockISO(
   // ====================================================================
   // VERTIKALE TRENNLINIEN
   // ====================================================================
-  // Verwaltungszone: Datum / Name Spalten (Zeile 1-2)
-  page.drawLine({ start: { x: colDate, y: rowTop }, end: { x: colDate, y: row2Bot }, color: COLORS.black, thickness: SUB_LINE });
-  page.drawLine({ start: { x: colName, y: rowTop }, end: { x: colName, y: row2Bot }, color: COLORS.black, thickness: SUB_LINE });
   // Haupttrennung: Verwaltungszone | Identifikationszone (ganze Höhe)
   page.drawLine({ start: { x: colRight, y: rowTop }, end: { x: colRight, y: y }, color: COLORS.black, thickness: MAIN_LINE });
 
@@ -1833,10 +1833,9 @@ function drawTitleBlockISO(
     x: colLabel + labelPad, y: rowTop - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
-  // Datum — mittig in Datum-Zelle
-  drawCenteredInCell(drawnDate, colDate, dateW, row1Bot, rowH1, valueSize, font, valueColor);
-  // Name — mittig in Name-Zelle (fett)
-  drawCenteredInCell(drawnBy, colName, nameW, row1Bot, rowH1, valueSize, fontBold, valueColor);
+  // Datum + Name zusammen in einem Feld (z.B. "05.03.2026 / CSC")
+  const drawnText = drawnBy ? `${drawnDate}  /  ${drawnBy}` : drawnDate;
+  drawCenteredInCell(drawnText, colValue, valueW, row1Bot, rowH1, valueSize, fontBold, valueColor);
 
   // ====================================================================
   // ZEILE 2: FREIGEGEBEN
@@ -1848,12 +1847,11 @@ function drawTitleBlockISO(
     x: colLabel + labelPad, y: row1Bot - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
-  // Datum — mittig in Datum-Zelle (nur wenn Freigeber vorhanden)
+  // Datum + Name zusammen in einem Feld (z.B. "05.03.2026 / MKE")
   if (approvedBy) {
-    drawCenteredInCell(drawnDate, colDate, dateW, row2Bot, rowH2, valueSize, font, valueColor);
+    const approvedText = `${drawnDate}  /  ${approvedBy}`;
+    drawCenteredInCell(approvedText, colValue, valueW, row2Bot, rowH2, valueSize, fontBold, valueColor);
   }
-  // Name — mittig in Name-Zelle (fett)
-  drawCenteredInCell(approvedBy, colName, nameW, row2Bot, rowH2, valueSize, fontBold, valueColor);
 
   // ====================================================================
   // IDENTIFIKATIONSZONE RECHTS: BENENNUNG (Zeile 1+2, grosses Feld)
@@ -1888,146 +1886,117 @@ function drawTitleBlockISO(
   }
 
   // ====================================================================
-  // ZEILE 4: FIRMA / LOGO / MASSSTAB / FORMAT / BLATT (unterste Zeile)
+  // UNTERER BEREICH: LOGO (links, volle Höhe) + MASSSTAB etc. (rechts, 14mm)
   // ====================================================================
-  // Horizontale Trennlinie über Zeile 3 ist bereits gezeichnet (row2Bot)
+  //
+  // Layout:
+  //  ───────────┬──────────────────────┬──────┬──────┬──────┬──────
+  //             │                      │Masst.│Format│Blatt │Bl.Anz│ 14mm
+  //    LOGO     │                      ├──────┴──────┴──────┴──────┤
+  //             │                      │                           │
+  //  ───────────┴──────────────────────┴───────────────────────────┘
+  //     78mm (linke Zone)                    102mm (rechte Zone)
 
-  // Spaltenaufteilung Zeile 4:
-  //  [Firma/Logo ~56mm] | [Massstab ~24mm] | [Format ~24mm] | [Blatt ~24mm] | [Bl.Anz ~24mm]
-  // Diese 5 Sub-Spalten teilen nur die LINKE Verwaltungszone + rechte Zone auf
-  const z4LogoW  = leftZoneW;                      // Logo nimmt ganze linke Zone ein
-  const z4SubW   = rightZoneW / 4;                  // 4 gleiche Sub-Spalten rechts
-
-  const z4LogoX  = x;
+  // ---- Massstab-Zeile: 4 Sub-Spalten in der rechten Zone (nur obere 14mm) ----
+  const z4SubW   = rightZoneW / 4;
   const z4Col1X  = colRight;                         // Massstab
   const z4Col2X  = z4Col1X + z4SubW;                 // Format
   const z4Col3X  = z4Col2X + z4SubW;                 // Blatt
   const z4Col4X  = z4Col3X + z4SubW;                 // Bl.Anz.
 
-  // Vertikale Trennlinien in Zeile 4
-  page.drawLine({ start: { x: z4Col1X, y: row3Bot }, end: { x: z4Col1X, y: row4Bot }, color: COLORS.black, thickness: MAIN_LINE });
-  page.drawLine({ start: { x: z4Col2X, y: row3Bot }, end: { x: z4Col2X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
-  page.drawLine({ start: { x: z4Col3X, y: row3Bot }, end: { x: z4Col3X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
-  page.drawLine({ start: { x: z4Col4X, y: row3Bot }, end: { x: z4Col4X, y: row4Bot }, color: COLORS.black, thickness: SUB_LINE });
+  // Horizontale Trennlinie unter Massstab-Zeile (nur rechte Zone)
+  page.drawLine({ start: { x: colRight, y: massstabBot }, end: { x: x + w, y: massstabBot }, color: COLORS.black, thickness: SUB_LINE });
 
-  // Untere Trennlinie (falls row4Bot > y, d.h. es gibt noch Restplatz unten)
-  if (row4Bot > y + 1) {
-    page.drawLine({ start: { x, y: row4Bot }, end: { x: x + w, y: row4Bot }, color: COLORS.black, thickness: MAIN_LINE });
-  }
+  // Vertikale Trennlinien in Massstab-Zeile (nur 14mm hoch, rechte Zone)
+  page.drawLine({ start: { x: z4Col2X, y: row2Bot }, end: { x: z4Col2X, y: massstabBot }, color: COLORS.black, thickness: SUB_LINE });
+  page.drawLine({ start: { x: z4Col3X, y: row2Bot }, end: { x: z4Col3X, y: massstabBot }, color: COLORS.black, thickness: SUB_LINE });
+  page.drawLine({ start: { x: z4Col4X, y: row2Bot }, end: { x: z4Col4X, y: massstabBot }, color: COLORS.black, thickness: SUB_LINE });
 
-  // ---- Firma / Logo (linke Zone, Zeile 4) ----
+  // ---- LOGO (linke Zone, volle Höhe von row2Bot bis y = 26mm) ----
+  const logoZoneW = leftZoneW;
+  const logoZoneX = x;
+
   if (logoImage) {
-    // Logo-Originalgrösse für Seitenverhältnis
     const logoDim = logoImage.scale(1);
     const logoAspect = logoDim.width / logoDim.height;
     const cellPad = 4;
-    const maxLogoW = z4LogoW - cellPad * 2;
-    const maxLogoH = rowH4 - cellPad * 2;
+    const logoScale = 0.65;  // Logo auf 65% der Zellgrösse begrenzen
+    const maxLogoW = (logoZoneW - cellPad * 2) * logoScale;
+    const maxLogoH = (logoH - cellPad * 2) * logoScale;
     let logoW = maxLogoW;
-    let logoH = logoW / logoAspect;
-    if (logoH > maxLogoH) {
-      logoH = maxLogoH;
-      logoW = logoH * logoAspect;
+    let lH = logoW / logoAspect;
+    if (lH > maxLogoH) {
+      lH = maxLogoH;
+      logoW = lH * logoAspect;
     }
-    // Zentriert in der Zelle
-    const logoX = z4LogoX + (z4LogoW - logoW) / 2;
-    const logoY = row4Bot + (rowH4 - logoH) / 2;
-    page.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: logoH });
+    // Zentriert in der grossen Logo-Zelle
+    const logoX = logoZoneX + (logoZoneW - logoW) / 2;
+    const logoY = y + (logoH - lH) / 2;
+    page.drawImage(logoImage, { x: logoX, y: logoY, width: logoW, height: lH });
   } else {
-    // Fallback: Firmenname als Text
+    // Fallback: Firmenname als Text (vertikal zentriert)
+    const textCenterY = y + logoH / 2;
     page.drawText('SMTEC AG', {
-      x: z4LogoX + labelPad, y: row3Bot - mm(5),
-      size: 9, font: fontBold, color: valueColor,
+      x: logoZoneX + labelPad, y: textCenterY + 2,
+      size: 11, font: fontBold, color: valueColor,
     });
     page.drawText('Electronic Solution', {
-      x: z4LogoX + labelPad, y: row3Bot - mm(9),
-      size: 5, font, color: rgb(0.1, 0.4, 0.85),
+      x: logoZoneX + labelPad, y: textCenterY - mm(4),
+      size: 6, font, color: rgb(0.1, 0.4, 0.85),
     });
   }
 
   // ---- Massstab ----
-  // Korrektes Label: scaleRatio < 1 = Vergrösserung (z.B. 0.5 → "2:1"),
-  //                  scaleRatio = 1 → "1:1",
-  //                  scaleRatio > 1 = Verkleinerung (z.B. 2 → "1:2")
-  // Vergrösserungsfaktor sauber formatieren (z.B. 1.5, 2, 5 — ohne unnötige Nullen)
   const fmtRatio = (v: number) => Number.isInteger(v) ? `${v}` : `${parseFloat(v.toFixed(1))}`;
   const scaleLabel = scaleRatio < 1
-    ? `${fmtRatio(1 / scaleRatio)}:1`     // Vergrösserung, z.B. "2:1", "1.5:1"
+    ? `${fmtRatio(1 / scaleRatio)}:1`
     : scaleRatio === 1
       ? '1:1'
-      : `1:${fmtRatio(scaleRatio)}`;      // Verkleinerung, z.B. "1:2", "1:1.5"
+      : `1:${fmtRatio(scaleRatio)}`;
   page.drawText('Massstab', {
-    x: z4Col1X + labelPad, y: row3Bot - mm(3.5),
+    x: z4Col1X + labelPad, y: row2Bot - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(scaleLabel, {
-    x: z4Col1X + labelPad, y: row3Bot - mm(9),
+    x: z4Col1X + labelPad, y: row2Bot - mm(9),
     size: 8, font: fontBold, color: valueColor,
   });
 
   // ---- Format ----
   page.drawText('Format', {
-    x: z4Col2X + labelPad, y: row3Bot - mm(3.5),
+    x: z4Col2X + labelPad, y: row2Bot - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
-  // Dynamisch: A4 / A3 / custom
   const pageWmm = Math.round(PAGE_WIDTH / MM_TO_PT);
   const pageHmm = Math.round(PAGE_HEIGHT / MM_TO_PT);
   let formatLabel = `${pageWmm}x${pageHmm}`;
   if (pageWmm === 297 && pageHmm === 210) formatLabel = 'A4';
   else if (pageWmm === 420 && pageHmm === 297) formatLabel = 'A3';
   page.drawText(formatLabel, {
-    x: z4Col2X + labelPad, y: row3Bot - mm(9),
+    x: z4Col2X + labelPad, y: row2Bot - mm(9),
     size: 7, font: fontBold, color: valueColor,
   });
 
   // ---- Blatt ----
   page.drawText('Blatt', {
-    x: z4Col3X + labelPad, y: row3Bot - mm(3.5),
+    x: z4Col3X + labelPad, y: row2Bot - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(`${options.sheetNumber || 1}`, {
-    x: z4Col3X + labelPad, y: row3Bot - mm(9),
+    x: z4Col3X + labelPad, y: row2Bot - mm(9),
     size: 8, font: fontBold, color: valueColor,
   });
 
   // ---- Blatt-Anzahl ----
   page.drawText('Bl. Anz.', {
-    x: z4Col4X + labelPad, y: row3Bot - mm(3.5),
+    x: z4Col4X + labelPad, y: row2Bot - mm(3.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(`${options.totalSheets || 1}`, {
-    x: z4Col4X + labelPad, y: row3Bot - mm(9),
+    x: z4Col4X + labelPad, y: row2Bot - mm(9),
     size: 8, font: fontBold, color: valueColor,
   });
 
-  // ====================================================================
-  // RESTBEREICH (unter Zeile 4, falls Platz vorhanden): Ausgabe-Nr.
-  // ====================================================================
-  if (row4Bot > y + mm(2)) {
-    const restH = row4Bot - y;
-    // Ausgabe-Nr. links
-    page.drawText('Ausgabe', {
-      x: x + labelPad, y: y + restH / 2 - 1,
-      size: 4, font, color: labelColor,
-    });
-    page.drawText(options.issueNumber || '01', {
-      x: x + mm(15), y: y + restH / 2 - 1,
-      size: 5.5, font: fontBold, color: valueColor,
-    });
-
-    // Panel-Dimensionen rechts unten
-    let dimText = `${panel.width.toFixed(1)} x ${panel.height.toFixed(1)} mm`;
-    if (instances.length > 1) {
-      const xs = Array.from(new Set(instances.map(i => Math.round(i.position.x * 10) / 10))).sort((a, b) => a - b);
-      const ys = Array.from(new Set(instances.map(i => Math.round(i.position.y * 10) / 10))).sort((a, b) => a - b);
-      dimText = `Panel ${xs.length} x ${ys.length}  (${dimText})`;
-    }
-    page.drawText(dimText, {
-      x: colRight + labelPad, y: y + restH / 2 - 1,
-      size: 5, font, color: labelColor,
-    });
-  }
 }
 
 // ============================================================================
@@ -2192,26 +2161,26 @@ function drawElementDescriptions(
     });
   }
 
-  // ---- Eckenradius-Bemaßung (Führungslinie + R-Wert an der unteren rechten Ecke) ----
-  // Nicht am Nullpunkt (oben links) bemassen, da dort Ordinatenachsen stören.
+  // ---- Eckenradius-Bemaßung (Führungslinie + R-Wert an der oberen rechten Ecke) ----
   {
     const cr = panel.frame.cornerRadius || 0;
     if (cr > 0) {
       const w = panel.width;
-      const h = panel.height;
 
-      // Punkt auf dem Bogen (45°-Position der unteren rechten Ecke)
-      // Ecke unten rechts (Canvas: Y nach unten): Bogenzentrum bei (w - cr, h - cr)
-      // Bogen von 0° bis 90°, 45°-Mitte = PI/4
-      const angle = Math.PI / 4;
+      // Punkt auf dem Bogen (45°-Position der oberen rechten Ecke)
+      // Canvas: Y nach unten → obere rechte Ecke: Bogenzentrum bei (w - cr, cr)
+      // Bogen bei 315° (= -45° = nach rechts oben raus)
+      const angle = -Math.PI / 4;
       const centerX = w - cr;
-      const centerY = h - cr;
+      const centerY = cr;
       const arcPtX = centerX + cr * Math.cos(angle); // mm Panel-Koordinaten
       const arcPtY = centerY + cr * Math.sin(angle); // mm Panel-Koordinaten
 
-      // Führungslinie: vom Bogen diagonal nach rechts unten raus (weg vom Panel)
-      const leaderEndX = arcPtX + cr * 0.8;
-      const leaderEndY = arcPtY + cr * 0.8;
+      // Führungslinie: vom Bogen diagonal nach rechts oben raus (weg vom Panel)
+      // Länger gezogen (cr * 1.5) damit Pfeil sauber am Radius sitzt
+      const leaderLen = Math.max(cr * 1.5, 5); // mindestens 5mm lang
+      const leaderEndX = arcPtX + leaderLen * Math.cos(angle);
+      const leaderEndY = arcPtY + leaderLen * Math.sin(angle);
 
       // In PDF-Koordinaten umrechnen
       const pdfArcX = toX(arcPtX);
@@ -2244,7 +2213,7 @@ function drawElementDescriptions(
 
       // Text "R X.X" am Ende der Führungslinie (rechts davon)
       page.drawText(`R ${cr.toFixed(1)}`, {
-        x: pdfEndX + 1, y: pdfEndY - 2,
+        x: pdfEndX + 2, y: pdfEndY,
         size: 5, font: fontBold, color: rgb(0.2, 0.2, 0.2),
       });
     }

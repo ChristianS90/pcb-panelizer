@@ -629,9 +629,9 @@ const initialViewport: Viewport = {
  * Initiale Grid-Konfiguration
  */
 const initialGrid: GridConfig = {
-  visible: true,
+  visible: false,   // Grid standardmässig ausgeblendet
   size: 0.1, // 0.1mm Grid für präzises Messen
-  snapEnabled: true,
+  snapEnabled: false, // Snap standardmässig deaktiviert
 };
 
 /**

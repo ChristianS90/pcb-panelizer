@@ -108,7 +108,8 @@ pcb-panelizer/
 - Ursprung (0,0) ist links oben (PixiJS Standard)
 - Canvas zeigt rotes **Fadenkreuz am Nullpunkt** zur Orientierung
 - `PIXELS_PER_MM = 4` als Skalierungsfaktor für Rendering
-- Grid-Standard: **0.1 mm** (für präzises Messen)
+- Grid-Standard: **0.1 mm** (für präzises Messen), **standardmässig ausgeblendet**
+- Snap: **standardmässig deaktiviert**
 
 ### State Management (Zustand)
 
@@ -398,7 +399,8 @@ Der `usePanelStore` enthält:
   - Massstab wird sowohl im PDF-Export als auch in der Canvas-Vorschau berücksichtigt
   - Neues Feld `pdfScaleOverride` auf Panel-Typ
 - [x] **Eckenverrundung bemasst**
-  - **Leader-Line mit Pfeilspitze** an der unteren rechten Ecke (technische Zeichnung, R-Wert)
+  - **Leader-Line mit Pfeilspitze** an der **oberen rechten Ecke** (technische Zeichnung, R-Wert)
+  - Führungslinie diagonal nach rechts oben, verlängert für saubere Pfeildarstellung
   - Im Canvas und PDF identisch dargestellt
   - **Detail-Legende**: "Eckenradius: R X.X" Eintrag mit Viertelkreis-Symbol
   - **Default: 2mm Eckenradius** bei neuen Panels
@@ -407,7 +409,9 @@ Der `usePanelStore` enthält:
   - Canvas: Titel 7→8px, Einträge 5→6px, Zeilenhöhe 4→5mm, Breite 40→48mm
 - [x] **Vergrösserte Schriften im Zeichnungskopf**
   - Werte 6→7pt, Benennung/Zeichnungs-Nr 8→9pt, Massstab/Blatt 7→8pt
-  - **Zentrierte Darstellung** von Datum und Name in Gezeichn./Freigabe-Zellen (`drawCenteredInCell()` Helper)
+  - **Titelblock vereinfacht**: Gezeichn./Freigabe mit Datum+Name in einem kombinierten Feld (z.B. "05.03.2026 / CSC")
+  - **Logo-Zelle vergrössert**: Ausgabe-Zeile entfernt, Logo nimmt gesamte linke Seite ein (78mm × 26mm)
+  - **Massstab/Format/Blatt/Bl.Anz** nur noch rechts oben (14mm hoch, wie vorher)
 
 ### Phase 13 - Erledigt
 
@@ -442,10 +446,10 @@ Der `usePanelStore` enthält:
 - [x] **Default-Eckenradius 2mm**
   - Neues Panel startet mit `cornerRadius: 2` statt 0
   - Eckenradius-Bemaßung erscheint automatisch bei jedem neuen Panel
-- [x] **Eckenradius-Bemaßung an unterer rechter Ecke**
-  - Leader-Line mit Pfeilspitze und R-Wert jetzt an der **unteren rechten Ecke** (nicht mehr am Nullpunkt)
+- [x] **Eckenradius-Bemaßung an oberer rechter Ecke**
+  - Leader-Line mit Pfeilspitze und R-Wert an der **oberen rechten Ecke**
+  - Führungslinie verlängert (1.5× Radius, min. 5mm) für saubere Pfeildarstellung
   - Vermeidet Überlappung mit Ordinatenachsen und Nullpunkt-Marker
-  - Im Canvas und PDF identisch dargestellt
 
 ### Phase 14 - Erledigt
 
@@ -640,11 +644,11 @@ Der `usePanelStore` enthält:
    - **Tabs** farbcodiert (Orange=Solid, Cyan=Mouse Bites, Pink=V-Score)
    - **Fiducials** und **Tooling Holes** als Symbole
    - **Fräskonturen** (Cyan=Board, Orange=Panel) mit 3 Linien (Mittellinie + tangentiale Außenlinien) und Start-/Endkreisen
-   - **Eckenverrundung** mit Leader-Line, Pfeilspitze und R-Wert
+   - **Eckenverrundung** mit Leader-Line, Pfeilspitze und R-Wert (obere rechte Ecke)
    - **Ordinatenbemaßung**: X-Achse, Y-Achse, Nullpunkt, Tick-Marks, Hilfslinien
    - **Detail-Legende** mit Farbcode, Parametern und Eckenradius (feste Grösse, massstabsunabhängig)
    - **Zeichnungsrahmen** mit Gitterreferenz-System (dynamische Spalten/Reihen)
-   - **ISO-Titelblock** mit SMTEC AG Logo, korrektem Massstab, zentriertem Datum/Name
+   - **ISO-Titelblock** mit grossem SMTEC AG Logo (linke Seite), Datum/Name kombiniert in Gezeichn./Freigabe-Feldern
 5. Ausgeblendete Elemente erscheinen nicht im PDF
 
 ---
