@@ -3,9 +3,12 @@
 ## Projektübersicht
 
 Desktop-/Web-Anwendung zur Erstellung von Leiterplatten-Nutzen (Panels) aus Gerber-Daten.
+Verfügbar als **Web-App** und als **Tauri Desktop-App (.exe)**.
 
-**URL:** http://localhost:3003
-**Start:** `npm run dev` oder Doppelklick auf `PCB-Panelizer-Starten.bat`
+**Web-App:** http://localhost:3003
+**Start Web:** `npm run dev` oder Doppelklick auf `PCB-Panelizer-Starten.bat`
+**Start Desktop:** `npm run tauri:dev` (Entwicklung) oder `pcb-panelizer.exe` (Release)
+**Build Desktop:** `npm run tauri:build` → erzeugt .exe + Installer
 
 ---
 
@@ -13,17 +16,20 @@ Desktop-/Web-Anwendung zur Erstellung von Leiterplatten-Nutzen (Panels) aus Gerb
 
 | Technologie | Zweck |
 |-------------|-------|
-| Next.js 14 | Framework (App Router) |
+| Next.js 14 | Framework (App Router, Static Export für Tauri) |
 | TypeScript | Typsicherheit |
+| **Tauri v2** | Desktop-App (.exe) mit WebView2 |
 | **PixiJS 8** | WebGL Canvas-Rendering (Hardware-beschleunigt) |
 | Zustand | State Management |
 | Tailwind CSS | Styling |
 | @tracespace/parser | Gerber-Parsing |
 | pdf-lib | PDF-Generierung (Maßzeichnung) |
 | jszip | ZIP-Handling |
-| file-saver | Datei-Download |
+| @tauri-apps/plugin-fs | Dateisystem-Zugriff (Desktop) |
+| @tauri-apps/plugin-opener | Dateien im Standard-Viewer öffnen (Desktop) |
 
 **Wichtig:** React StrictMode ist deaktiviert (`next.config.js`) um doppelte PixiJS-Initialisierung zu vermeiden.
+**Wichtig:** `next.config.js` hat `output: 'export'` für Static Export (Tauri braucht statische HTML-Dateien). `npm run dev` funktioniert weiterhin normal.
 
 ---
 
@@ -73,10 +79,23 @@ pcb-panelizer/
 │       └── file-system-access.d.ts # TypeScript-Typen für File System Access API
 │
 ├── public/                     # Statische Assets
+├── src-tauri/                  # Tauri Desktop-App (Rust)
+│   ├── tauri.conf.json         # Tauri-Konfiguration (App-Name, Fenster, Build)
+│   ├── Cargo.toml              # Rust-Dependencies
+│   ├── capabilities/default.json # Berechtigungen (fs, opener)
+│   ├── src/lib.rs              # Rust Entry-Point (Plugin-Registrierung)
+│   ├── src/main.rs             # Windows Entry-Point
+│   ├── icons/                  # App-Icons
+│   └── target/release/         # Build-Output
+│       ├── pcb-panelizer.exe   # Portable .exe (~9 MB)
+│       └── bundle/
+│           ├── nsis/           # Setup-Installer (~3 MB)
+│           └── msi/            # MSI-Installer (~4 MB)
+├── out/                        # Static Export Output (von next build)
 ├── package.json
 ├── tsconfig.json
 ├── tailwind.config.ts
-├── next.config.js              # StrictMode: false für PixiJS
+├── next.config.js              # StrictMode: false, output: 'export'
 └── CLAUDE.md                   # Diese Datei
 ```
 
@@ -413,6 +432,41 @@ Der `usePanelStore` enthält:
   - **Logo-Zelle vergrössert**: Ausgabe-Zeile entfernt, Logo nimmt gesamte linke Seite ein (78mm × 26mm)
   - **Massstab/Format/Blatt/Bl.Anz** nur noch rechts oben (14mm hoch, wie vorher)
 
+### Phase 15 - Erledigt
+
+- [x] **Kompakterer Zeichnungskopf (PDF + Vorschau)**
+  - **PDF-Titelblock**: 180×46mm → 135×32mm (proportional verkleinert, spart Platz für PCB)
+  - **Canvas-Vorschau**: Identisch angepasst (135×32mm, Schriften proportional kleiner)
+  - **Details-Box**: PDF 58→45mm, Canvas 48→38mm (schmaler, Schrift/Symbole gleich gross)
+  - Alle Felder bleiben erhalten, nur proportional kleiner
+- [x] **Fiducial-Positionierung mit Fixwerten**
+  - Fiducials immer auf Stirnseiten (kurze Seiten) des Panels
+  - Fiducial 1 & 2: **10mm** von den Längskanten nach innen
+  - Fiducial 3: **15mm** von der Längskante (asymmetrisch, 3er-Variante)
+  - Fiducial 4: **15mm** von der Längskante (asymmetrisch, nur bei 4er-Variante)
+  - Stirnseiten-Offset (Abstand vom Panelrand) weiterhin einstellbar
+- [x] **Master-Badmark auf Stirnseite mit Fixwert**
+  - Position immer auf der Stirnseite (kurze Seite) des Panels
+  - Fix **20mm** von der oberen Längskante nach unten gemessen
+- [x] **Vollständige Neuberechnung bei Array-Änderungen**
+  - `applyArrayChange` regeneriert jetzt ALLE Elemente statt nur Smart Anchor:
+    - **Fiducials**: Neu berechnet mit Fixwerten (10/15mm von Längskanten)
+    - **Tooling Holes**: Neu berechnet in Ecken (inkl. Asymmetrie-Offset)
+    - **Master-Badmarks**: Neu berechnet auf Stirnseite (20mm von oben)
+    - **Tabs**: Automatisch neu verteilt (gleiche Config aus bestehenden Tabs)
+    - V-Scores, Auto-Konturen, Board-Badmarks: Wie bisher
+- [x] **Nutzenrand Oben/Unten korrigiert**
+  - Labels "Oben" und "Unten" im Properties Panel waren vertauscht (frame.top ↔ frame.bottom)
+  - "Einheitliche Breite" ist jetzt Standard (default: true)
+- [x] **Tab-Synchronisation über alle Board-Instanzen**
+  - `addTab` repliziert einzeln gesetzte Tabs automatisch auf alle Instanzen des gleichen Boards
+  - Gleiche Kante, gleiche Position — wie bei Badmarks und Fräskonturen
+  - `removeTab` entfernte bereits synchron — jetzt auch `addTab` konsistent
+- [x] **Auto-Open Sidebar bei Element-Selektion im Canvas**
+  - Klick auf ein Element im Canvas öffnet automatisch die richtige Sektion im Properties Panel
+  - ScrollIntoView zum ausgewählten Element (bei vielen Einträgen)
+  - Mapping: Fiducial→Fiducials, Badmark→Badmarks, Tab→Tabs, V-Score→V-Score, etc.
+
 ### Phase 13 - Erledigt
 
 - [x] **Automatische Repositionierung aller Panel-Elemente bei Nutzenrand-/Array-Änderungen**
@@ -466,6 +520,23 @@ Der `usePanelStore` enthält:
 - [x] **Eckenradius-Symbol in Legende (Canvas + PDF)**
   - Nur ein Viertelkreis-Bogen als Symbol (Außenradius)
   - Identisch in Canvas und PDF dargestellt
+
+### Phase 15 - Erledigt
+
+- [x] **SMTEC Logo als App-Icon** für Desktop-App (.exe, Installer)
+  - `app-icon.png` (1024x1024) aus `Logo_S.png` generiert
+  - `npx tauri icon` erstellt alle Formate (ICO, ICNS, diverse PNGs)
+- [x] **PDF öffnet sich im Standard-PDF-Programm** (Desktop-App)
+  - Tauri `writeFile` → Temp-Ordner, dann `openPath` zum Öffnen
+  - Scope-Berechtigung `$TEMP/**` in `capabilities/default.json`
+  - Pfad-Konstruktion mit `join()` aus `@tauri-apps/api/path`
+- [x] **PDF öffnet sich in neuem Tab** (Browser/Web-Version)
+  - `window.open(blobUrl, '_blank')` statt automatischer Download
+- [x] **PDF-Zeichnung bereinigt** — überflüssige Texte entfernt:
+  - Englische Hinweistexte ("Fiducials and tooling holes...", "Do not change...", "Ignore V-Cut...")
+  - Fräskonturen-Legende ("Fräskontur Board" / "Fräskontur Panel")
+  - Fiducial-Beschreibung ("Fiducial (Nx) on both sides", "D=...Copper, D=...Soldermask")
+  - Tooling-Hole-Beschreibung ("Tooling Hole (Nx)", "D=...mm (not plated)")
 
 ### Noch offen
 
@@ -631,7 +702,7 @@ Der `usePanelStore` enthält:
 
 ### PDF-Maßzeichnung exportieren
 1. Klick auf **"Zeichnung"** im Header
-2. PDF wird generiert und heruntergeladen
+2. PDF wird generiert: **Desktop** → öffnet im Standard-PDF-Programm, **Browser** → öffnet in neuem Tab
 3. **Massstab-Skalierung:**
    - **Manuell wählbar** im Properties Panel → Dimensionen → PDF-Massstab
    - Vergrösserung: 10:1, 5:1, 3:1, 2:1, 1.5:1 (für kleine Boards)
@@ -673,7 +744,7 @@ Der `usePanelStore` enthält:
 
 ## Entwicklung
 
-### Starten
+### Web-App starten
 
 ```bash
 cd C:\Users\SMTEC\pcb-panelizer
@@ -682,12 +753,43 @@ npm run dev
 
 Öffnet http://localhost:3003
 
-### Build
+### Desktop-App (Tauri)
+
+```bash
+# Entwicklung mit Hot-Reload (startet Next.js + Tauri-Fenster)
+npm run tauri:dev
+
+# Release-Build: Erzeugt .exe + Installer
+npm run tauri:build
+```
+
+**Voraussetzungen für Tauri-Build:**
+- Rust (via rustup, `stable-x86_64-pc-windows-msvc`)
+- Visual Studio Build Tools 2022 mit C++ Workload
+- WebView2 (auf Windows 10/11 vorinstalliert)
+
+**Build-Output:**
+- `src-tauri/target/release/pcb-panelizer.exe` — Portable .exe (~9 MB)
+- `src-tauri/target/release/bundle/nsis/PCB Panelizer_0.1.0_x64-setup.exe` — Setup-Installer (~3 MB)
+- `src-tauri/target/release/bundle/msi/PCB Panelizer_0.1.0_x64_en-US.msi` — MSI-Installer (~4 MB)
+
+**Tauri-Konfiguration:**
+- `src-tauri/tauri.conf.json` — App-Name, Fenstergrösse (1400×900), Identifier (`com.smtec.pcb-panelizer`)
+- `src-tauri/capabilities/default.json` — Berechtigungen (fs:temp-read/write, opener mit `$TEMP/**` Scope)
+- `src-tauri/src/lib.rs` — Plugin-Registrierung (fs, opener, log)
+
+**Browser vs. Desktop Unterschiede:**
+- PDF-Export: Browser → neuer Tab (Chrome PDF-Viewer), Desktop → öffnet im Standard-PDF-Programm (via Temp-Ordner + opener)
+- Erkennung: `window.__TAURI_INTERNALS__` prüft ob Tauri-Umgebung
+- Tauri-Plugins (fs, opener) werden per `await import()` dynamisch geladen (nur in Desktop)
+
+### Web-Build (Static Export)
 
 ```bash
 npm run build
-npm start
 ```
+
+Generiert statische Dateien in `out/` (wird von Tauri verwendet)
 
 ---
 
@@ -870,9 +972,17 @@ Duplikat-Check: Wenn ein erkannter Linienbogen denselben Mittelpunkt/Radius hat 
 | Sync-Kopien | Via syncMasterContours / syncMasterBadmarks |
 
 **applyArrayChange-Repositionierung (bei Array-Änderungen):**
+- **Fiducials**: Komplett neu berechnet mit Fixwerten (10/15mm von Längskanten, auf Stirnseiten)
+- **Tooling Holes**: Komplett neu berechnet in Ecken (Asymmetrie-Offset beibehalten)
+- **Master-Badmarks**: Komplett neu berechnet (Stirnseite, 20mm von oben)
+- **Tabs**: Automatisch neu verteilt (Config aus bestehenden Tabs abgeleitet: Typ, Breite, tabsPerEdge)
 - Board-Badmarks + manuelle Konturen: Auf neue Master-Instanz übertragen (relative Position beibehalten)
 - V-Scores: Komplett neu generiert basierend auf neuen Board-Positionen
-- Tabs + Mousebites: Geleert (neue boardInstanceIds)
+- Free Mousebites: Geleert (neue boardInstanceIds)
+
+**Tab-Synchronisation (bei einzelner Tab-Platzierung):**
+- `addTab` repliziert Tabs automatisch auf alle Instanzen des gleichen Boards (gleiche Kante + Position)
+- `removeTab` entfernt synchron den gleichen Tab auf allen Instanzen
 
 ### Master-Board Fräskonturen-Synchronisation (`panel-store.ts`)
 

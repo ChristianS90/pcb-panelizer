@@ -2986,16 +2986,94 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       const dx = frame.left - panel.frame.left;
       const dy = frame.bottom - panel.frame.bottom;
 
-      // --- Fiducials + Tooling Holes: Smart Anchor ---
-      const newFiducials = panel.fiducials.map((f) => ({
-        ...f,
-        position: smartAnchorReposition(f.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
-      }));
+      // --- Fiducials: Komplett neu berechnen mit Fixwerten ---
+      let newFiducials: Fiducial[] = [];
+      if (panel.fiducials.length > 0) {
+        const first = panel.fiducials[0];
+        const count = panel.fiducials.length;
+        const EDGE_12 = 10; // Fiducial 1,2,(3): 10mm von Längskanten
+        const EDGE_3 = 15;  // Fiducial 3 (bei 3er): 15mm (asymmetrisch)
+        const EDGE_4 = 15;  // Fiducial 4 (bei 4er): 15mm (asymmetrisch)
 
-      const newToolingHoles = panel.toolingHoles.map((h) => ({
-        ...h,
-        position: smartAnchorReposition(h.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
-      }));
+        // Stirnseiten-Offset aus bestehenden Fiducials ableiten
+        let stirnOffset: number;
+        if (newWidth >= newHeight) {
+          const leftFids = panel.fiducials.filter(f => f.position.x < oldW / 2);
+          stirnOffset = leftFids.length > 0 ? Math.min(...leftFids.map(f => f.position.x)) : frame.left / 2;
+        } else {
+          const topFids = panel.fiducials.filter(f => f.position.y < oldH / 2);
+          stirnOffset = topFids.length > 0 ? Math.min(...topFids.map(f => f.position.y)) : frame.top / 2;
+        }
+
+        if (newWidth >= newHeight) {
+          // Querformat: Stirnseiten = links/rechts, Längskanten = oben/unten
+          if (count >= 4) {
+            newFiducials = [
+              { ...first, id: uuidv4(), position: { x: stirnOffset, y: EDGE_12 } },
+              { ...first, id: uuidv4(), position: { x: stirnOffset, y: newHeight - EDGE_12 } },
+              { ...first, id: uuidv4(), position: { x: newWidth - stirnOffset, y: EDGE_12 } },
+              { ...first, id: uuidv4(), position: { x: newWidth - stirnOffset, y: newHeight - EDGE_4 } },
+            ];
+          } else {
+            newFiducials = [
+              { ...first, id: uuidv4(), position: { x: stirnOffset, y: EDGE_12 } },
+              { ...first, id: uuidv4(), position: { x: stirnOffset, y: newHeight - EDGE_12 } },
+              { ...first, id: uuidv4(), position: { x: newWidth - stirnOffset, y: EDGE_3 } },
+            ];
+          }
+        } else {
+          // Hochformat: Stirnseiten = oben/unten, Längskanten = links/rechts
+          if (count >= 4) {
+            newFiducials = [
+              { ...first, id: uuidv4(), position: { x: EDGE_12, y: stirnOffset } },
+              { ...first, id: uuidv4(), position: { x: newWidth - EDGE_12, y: stirnOffset } },
+              { ...first, id: uuidv4(), position: { x: EDGE_12, y: newHeight - stirnOffset } },
+              { ...first, id: uuidv4(), position: { x: newWidth - EDGE_4, y: newHeight - stirnOffset } },
+            ];
+          } else {
+            newFiducials = [
+              { ...first, id: uuidv4(), position: { x: EDGE_12, y: stirnOffset } },
+              { ...first, id: uuidv4(), position: { x: newWidth - EDGE_12, y: stirnOffset } },
+              { ...first, id: uuidv4(), position: { x: EDGE_3, y: newHeight - stirnOffset } },
+            ];
+          }
+        }
+      }
+
+      // --- Tooling Holes: Komplett neu berechnen in Ecken ---
+      let newToolingHoles: ToolingHole[] = [];
+      if (panel.toolingHoles.length > 0) {
+        const first = panel.toolingHoles[0];
+        // Offset aus bestehenden Positionen ableiten (kleinstes x oder y)
+        const holeOffset = Math.min(
+          ...panel.toolingHoles.map(h => Math.min(h.position.x, h.position.y, oldW - h.position.x, oldH - h.position.y))
+        );
+        // Asymmetrie-Offset ableiten (die eine Bohrung, die weiter innen liegt)
+        const offsets = panel.toolingHoles.map(h => ({
+          x: Math.min(h.position.x, oldW - h.position.x),
+          y: Math.min(h.position.y, oldH - h.position.y),
+        }));
+        const maxOffset = Math.max(...offsets.map(o => Math.min(o.x, o.y)));
+        const insetOffset = maxOffset > holeOffset * 1.3 ? maxOffset : holeOffset * 2;
+
+        const positions = [
+          { x: holeOffset, y: holeOffset },                                  // unten-links
+          { x: newWidth - insetOffset, y: holeOffset },                      // unten-rechts (Orientierung)
+          { x: holeOffset, y: newHeight - holeOffset },                      // oben-links
+          { x: newWidth - holeOffset, y: newHeight - holeOffset },           // oben-rechts
+        ];
+
+        // Gleiche Anzahl Holes beibehalten
+        for (let i = 0; i < Math.min(panel.toolingHoles.length, positions.length); i++) {
+          newToolingHoles.push({
+            ...first,
+            id: uuidv4(),
+            position: positions[i],
+            diameter: panel.toolingHoles[i].diameter,
+            plated: panel.toolingHoles[i].plated,
+          });
+        }
+      }
 
       // --- V-Scores: Komplett neu generieren wenn welche existierten ---
       let newVScoreLines: VScoreLine[] = [];
@@ -3064,18 +3142,23 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         }
       }
 
-      // --- Badmarks: Master per Smart Anchor, Board-Badmarks auf neue Instanzen übertragen ---
+      // --- Badmarks: Master neu berechnen, Board-Badmarks auf neue Instanzen übertragen ---
       const newBadmarks: Badmark[] = [];
 
-      // Master-Badmarks: Smart Anchor (Panel-Rand-Elemente)
-      panel.badmarks
-        .filter(b => !b.isSyncCopy && b.isMasterBadmark)
-        .forEach((b) => {
-          newBadmarks.push({
-            ...b,
-            position: smartAnchorReposition(b.position, oldW, oldH, dx, dy, widthDiff, heightDiff),
-          });
-        });
+      // Master-Badmarks: Fix neu berechnen (Stirnseite, 20mm von oben)
+      const oldMasterBadmarks = panel.badmarks.filter(b => !b.isSyncCopy && b.isMasterBadmark);
+      oldMasterBadmarks.forEach((b) => {
+        const OFFSET_FROM_TOP = 20;
+        let mx: number, my: number;
+        if (newWidth >= newHeight) {
+          mx = frame.left / 2;
+          my = OFFSET_FROM_TOP;
+        } else {
+          mx = OFFSET_FROM_TOP;
+          my = frame.top / 2;
+        }
+        newBadmarks.push({ ...b, position: { x: mx, y: my } });
+      });
 
       // Board-Badmarks: Auf die neue Master-Instanz übertragen
       // Die Badmark-Position wird relativ zur alten Board-Instanz berechnet
@@ -3111,7 +3194,47 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         }
       }
 
-      // --- Tabs + Mousebites: Leeren (neue Board-Instanzen) ---
+      // --- Tabs: Automatisch neu verteilen wenn welche existierten ---
+      let newTabs: Tab[] = [];
+      if (panel.tabs.length > 0) {
+        const firstTab = panel.tabs[0];
+        // Tab-Config aus bestehenden Tabs ableiten
+        const tabType = firstTab.type;
+        const tabWidth = firstTab.width;
+        const holeDiameter = firstTab.holeDiameter;
+        const holeSpacing = firstTab.holeSpacing;
+        // tabsPerEdge: Anzahl Tabs pro (Instanz, Kante) Kombination
+        const tabsByInstEdge = new Map<string, number>();
+        for (const t of panel.tabs) {
+          const key = `${t.boardInstanceId}:${t.edge}`;
+          tabsByInstEdge.set(key, (tabsByInstEdge.get(key) || 0) + 1);
+        }
+        const tabsPerEdge = tabsByInstEdge.size > 0
+          ? Math.round(Array.from(tabsByInstEdge.values()).reduce((a, b) => a + b, 0) / tabsByInstEdge.size)
+          : 2;
+
+        // Tabs für alle neuen Instanzen generieren
+        for (const instance of allInstances) {
+          const instBoard = panel.boards.find(b => b.id === instance.boardId);
+          if (!instBoard) continue;
+          const edges: Array<'top' | 'bottom' | 'left' | 'right'> = ['top', 'bottom', 'left', 'right'];
+          for (const edge of edges) {
+            for (let i = 0; i < tabsPerEdge; i++) {
+              const position = (i + 1) / (tabsPerEdge + 1);
+              newTabs.push({
+                id: uuidv4(),
+                position,
+                edge,
+                boardInstanceId: instance.id,
+                type: tabType,
+                width: tabWidth,
+                holeDiameter,
+                holeSpacing,
+              });
+            }
+          }
+        }
+      }
 
       // --- Manuelle Routing-Konturen: Auf neue Master-Instanz übertragen ---
       const manualContours = panel.routingContours.filter(
@@ -3162,7 +3285,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         fiducials: newFiducials,
         toolingHoles: newToolingHoles,
         vscoreLines: newVScoreLines,
-        tabs: [], // Tabs müssen neu verteilt werden
+        tabs: newTabs, // Tabs automatisch neu verteilt
         freeMousebites: [], // Mousebites müssen neu erstellt werden
         badmarks: newBadmarks,
         routingContours: transferredContours, // Manuelle Konturen auf neue Master-Instanz übertragen
@@ -3609,13 +3732,33 @@ export const usePanelStore = create<PanelStore>((set, get) => {
 
   addTab: (tab) => {
     saveHistory();
-    set((state) => ({
-      panel: {
-        ...state.panel,
-        tabs: [...state.panel.tabs, { ...tab, id: uuidv4() }],
-        modifiedAt: new Date(),
-      },
-    }));
+    set((state) => {
+      const panel = state.panel;
+      const newTabs: Tab[] = [{ ...tab, id: uuidv4() }];
+
+      // Tab automatisch auf alle anderen Instanzen des gleichen Boards kopieren
+      const sourceInstance = panel.instances.find(i => i.id === tab.boardInstanceId);
+      if (sourceInstance) {
+        const otherInstances = panel.instances.filter(
+          i => i.id !== tab.boardInstanceId && i.boardId === sourceInstance.boardId
+        );
+        for (const other of otherInstances) {
+          newTabs.push({
+            ...tab,
+            id: uuidv4(),
+            boardInstanceId: other.id,
+          });
+        }
+      }
+
+      return {
+        panel: {
+          ...panel,
+          tabs: [...panel.tabs, ...newTabs],
+          modifiedAt: new Date(),
+        },
+      };
+    });
   },
 
   // Entfernt einen Tab UND alle "entsprechenden" Tabs an anderen Instanzen
@@ -3916,16 +4059,17 @@ export const usePanelStore = create<PanelStore>((set, get) => {
     saveHistory();
     set((state) => {
       const panel = state.panel;
-      // Kurze Seite ermitteln und Position berechnen
+      // Stirnseite = kurze Seite des Panels, fix 20mm von der Oberkante
+      const OFFSET_FROM_TOP = 20; // mm von der oberen Längsseite nach unten
       let x: number, y: number;
       if (panel.width >= panel.height) {
-        // Querformat: kurze Seiten = links/rechts → Master auf linker Seite
-        x = panel.width * 0.20;
-        y = panel.frame.top / 2; // Mitte des oberen Nutzenrands
-      } else {
-        // Hochformat: kurze Seiten = oben/unten → Master auf oberer Seite
+        // Querformat: Stirnseite = links (kurze Seite)
         x = panel.frame.left / 2; // Mitte des linken Nutzenrands
-        y = panel.height * 0.20;
+        y = OFFSET_FROM_TOP;       // Fix 20mm von oben
+      } else {
+        // Hochformat: Stirnseite = oben (kurze Seite)
+        x = OFFSET_FROM_TOP;       // Fix 20mm von der linken Längsseite
+        y = panel.frame.top / 2;   // Mitte des oberen Nutzenrands
       }
 
       const masterBadmark: Badmark = {

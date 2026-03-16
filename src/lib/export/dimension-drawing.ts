@@ -36,8 +36,8 @@ let BORDER_TOP = PAGE_HEIGHT - MARGIN - INNER_MARGIN;
 
 // Titelblock-Dimensionen nach VSM/ISO 7200 (unten rechts)
 // VSM-Norm: 180mm Breite, Höhe flexibel (~46mm)
-const TITLE_BLOCK_WIDTH = 180 * MM_TO_PT;  // 180mm = 510pt (VSM-Standard)
-const TITLE_BLOCK_HEIGHT = 46 * MM_TO_PT;  // 46mm = 130pt
+const TITLE_BLOCK_WIDTH = 135 * MM_TO_PT;  // 135mm (kompakter, spart Platz für PCB)
+const TITLE_BLOCK_HEIGHT = 32 * MM_TO_PT;  // 32mm (kompakter, spart Platz für PCB)
 let TITLE_BLOCK_X = BORDER_RIGHT - TITLE_BLOCK_WIDTH;
 let TITLE_BLOCK_Y = BORDER_BOTTOM;
 
@@ -1226,7 +1226,7 @@ export async function generateDimensionDrawing(
     if (allPdfEntries.length > 0) {
       const lineH = 6;
       const legendPad = 3;
-      const legendW = 58;
+      const legendW = 45;
       const titleH = 6;
       const legendH = legendPad * 2 + allPdfEntries.length * lineH + titleH;
 
@@ -1732,9 +1732,9 @@ function drawTitleBlockISO(
   // ========================================================================
   // Titelblock nach VSM / SN EN ISO 7200
   //
-  // Aufbau (180mm breit, ~46mm hoch):
+  // Aufbau (135mm breit, ~32mm hoch):
   //
-  // VERWALTUNGSZONE (links, 78mm)      | IDENTIFIKATIONSZONE (rechts, 102mm)
+  // VERWALTUNGSZONE (links, 58mm)      | IDENTIFIKATIONSZONE (rechts, 77mm)
   // ────────────────────────────────────┼────────────────────────────────────
   // Gezeichn.  │ Datum / Name          │  BENENNUNG (Titel)
   // ───────────┼───────────────────────┤  (Panel-Name, gross)
@@ -1766,9 +1766,9 @@ function drawTitleBlockISO(
   // ====================================================================
   // ZEILEN-LAYOUT (von oben nach unten, Höhen in mm)
   // ====================================================================
-  const rowH1 = mm(10);    // Zeile 1: Gezeichnet
-  const rowH2 = mm(10);    // Zeile 2: Freigabe
-  const massstabH = mm(14); // Massstab-Zeile: 14mm (wie vorher)
+  const rowH1 = mm(7);     // Zeile 1: Gezeichnet (kompakter)
+  const rowH2 = mm(7);     // Zeile 2: Freigabe (kompakter)
+  const massstabH = mm(10); // Massstab-Zeile: 10mm (kompakter)
 
   // Y-Koordinaten der Zeilengrenzen (PDF: y=0 unten)
   const rowTop  = y + h;                // Oberkante Titelblock
@@ -1782,8 +1782,8 @@ function drawTitleBlockISO(
   // SPALTEN-LAYOUT (VSM-Verwaltungszone links, Identifikationszone rechts)
   // ====================================================================
   // Verwaltungszone (links): 2 Spalten (Label | Datum + Name)
-  const labelW = mm(28);    // Spalte "Label" (Gezeichn./Freigabe)
-  const valueW = mm(50);    // Spalte "Datum + Name" (kombiniert)
+  const labelW = mm(21);    // Spalte "Label" (Gezeichn./Freigabe)
+  const valueW = mm(37);    // Spalte "Datum + Name" (kombiniert)
   const leftZoneW = labelW + valueW;  // = 78mm
 
   // Identifikationszone (rechts): Rest
@@ -1809,11 +1809,11 @@ function drawTitleBlockISO(
   // ====================================================================
   // ZEILE 1: GEZEICHNET (oben)
   // ====================================================================
-  const labelSize = 5;        // Schriftgrösse für Labels
-  const valueSize = 7;        // Schriftgrösse für Werte (vergrössert)
+  const labelSize = 4;        // Schriftgrösse für Labels (kompakter)
+  const valueSize = 5.5;      // Schriftgrösse für Werte (kompakter)
   const labelColor = COLORS.gray;
   const valueColor = COLORS.black;
-  const labelPad = 3;         // Abstand vom linken Zellenrand
+  const labelPad = 2;         // Abstand vom linken Zellenrand (kompakter)
   const drawnDate = options.date || new Date().toLocaleDateString('de-CH');
   const drawnBy = options.drawnBy || '';
 
@@ -1830,7 +1830,7 @@ function drawTitleBlockISO(
 
   // Label "Gezeichn." (oben links in der Zelle)
   page.drawText('Gezeichn.', {
-    x: colLabel + labelPad, y: rowTop - mm(3.5),
+    x: colLabel + labelPad, y: rowTop - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   // Datum + Name zusammen in einem Feld (z.B. "05.03.2026 / CSC")
@@ -1844,7 +1844,7 @@ function drawTitleBlockISO(
 
   // Label "Freigabe" (oben links in der Zelle)
   page.drawText('Freigabe', {
-    x: colLabel + labelPad, y: row1Bot - mm(3.5),
+    x: colLabel + labelPad, y: row1Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   // Datum + Name zusammen in einem Feld (z.B. "05.03.2026 / MKE")
@@ -1859,13 +1859,13 @@ function drawTitleBlockISO(
   const titleText = options.title || options.projectName || panel.name;
   // Benennung-Label (klein, oben)
   page.drawText('Benennung', {
-    x: colRight + labelPad, y: rowTop - mm(3.5),
+    x: colRight + labelPad, y: rowTop - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   // Titel gross und fett
   page.drawText(titleText, {
-    x: colRight + labelPad, y: rowTop - mm(8),
-    size: 9, font: fontBold, color: valueColor,
+    x: colRight + labelPad, y: rowTop - mm(5.5),
+    size: 7, font: fontBold, color: valueColor,
   });
 
   // ====================================================================
@@ -1874,14 +1874,14 @@ function drawTitleBlockISO(
   const drawingNum = options.drawingNumber || '';
   // Label
   page.drawText('Zeichnungs-Nr.', {
-    x: colRight + labelPad, y: row1Bot - mm(3.5),
+    x: colRight + labelPad, y: row1Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   // Zeichnungsnummer gross und fett
   if (drawingNum) {
     page.drawText(drawingNum, {
-      x: colRight + labelPad, y: row1Bot - mm(8),
-      size: 9, font: fontBold, color: valueColor,
+      x: colRight + labelPad, y: row1Bot - mm(5.5),
+      size: 7, font: fontBold, color: valueColor,
     });
   }
 
@@ -1919,7 +1919,7 @@ function drawTitleBlockISO(
   if (logoImage) {
     const logoDim = logoImage.scale(1);
     const logoAspect = logoDim.width / logoDim.height;
-    const cellPad = 4;
+    const cellPad = 3;
     const logoScale = 0.65;  // Logo auf 65% der Zellgrösse begrenzen
     const maxLogoW = (logoZoneW - cellPad * 2) * logoScale;
     const maxLogoH = (logoH - cellPad * 2) * logoScale;
@@ -1937,12 +1937,12 @@ function drawTitleBlockISO(
     // Fallback: Firmenname als Text (vertikal zentriert)
     const textCenterY = y + logoH / 2;
     page.drawText('SMTEC AG', {
-      x: logoZoneX + labelPad, y: textCenterY + 2,
-      size: 11, font: fontBold, color: valueColor,
+      x: logoZoneX + labelPad, y: textCenterY + 1,
+      size: 8.5, font: fontBold, color: valueColor,
     });
     page.drawText('Electronic Solution', {
-      x: logoZoneX + labelPad, y: textCenterY - mm(4),
-      size: 6, font, color: rgb(0.1, 0.4, 0.85),
+      x: logoZoneX + labelPad, y: textCenterY - mm(3),
+      size: 5, font, color: rgb(0.1, 0.4, 0.85),
     });
   }
 
@@ -1954,17 +1954,17 @@ function drawTitleBlockISO(
       ? '1:1'
       : `1:${fmtRatio(scaleRatio)}`;
   page.drawText('Massstab', {
-    x: z4Col1X + labelPad, y: row2Bot - mm(3.5),
+    x: z4Col1X + labelPad, y: row2Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(scaleLabel, {
-    x: z4Col1X + labelPad, y: row2Bot - mm(9),
-    size: 8, font: fontBold, color: valueColor,
+    x: z4Col1X + labelPad, y: row2Bot - mm(6.5),
+    size: 6.5, font: fontBold, color: valueColor,
   });
 
   // ---- Format ----
   page.drawText('Format', {
-    x: z4Col2X + labelPad, y: row2Bot - mm(3.5),
+    x: z4Col2X + labelPad, y: row2Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   const pageWmm = Math.round(PAGE_WIDTH / MM_TO_PT);
@@ -1973,28 +1973,28 @@ function drawTitleBlockISO(
   if (pageWmm === 297 && pageHmm === 210) formatLabel = 'A4';
   else if (pageWmm === 420 && pageHmm === 297) formatLabel = 'A3';
   page.drawText(formatLabel, {
-    x: z4Col2X + labelPad, y: row2Bot - mm(9),
-    size: 7, font: fontBold, color: valueColor,
+    x: z4Col2X + labelPad, y: row2Bot - mm(6.5),
+    size: 5.5, font: fontBold, color: valueColor,
   });
 
   // ---- Blatt ----
   page.drawText('Blatt', {
-    x: z4Col3X + labelPad, y: row2Bot - mm(3.5),
+    x: z4Col3X + labelPad, y: row2Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(`${options.sheetNumber || 1}`, {
-    x: z4Col3X + labelPad, y: row2Bot - mm(9),
-    size: 8, font: fontBold, color: valueColor,
+    x: z4Col3X + labelPad, y: row2Bot - mm(6.5),
+    size: 6.5, font: fontBold, color: valueColor,
   });
 
   // ---- Blatt-Anzahl ----
   page.drawText('Bl. Anz.', {
-    x: z4Col4X + labelPad, y: row2Bot - mm(3.5),
+    x: z4Col4X + labelPad, y: row2Bot - mm(2.5),
     size: labelSize, font, color: labelColor,
   });
   page.drawText(`${options.totalSheets || 1}`, {
-    x: z4Col4X + labelPad, y: row2Bot - mm(9),
-    size: 8, font: fontBold, color: valueColor,
+    x: z4Col4X + labelPad, y: row2Bot - mm(6.5),
+    size: 6.5, font: fontBold, color: valueColor,
   });
 
 }
@@ -2113,42 +2113,7 @@ function drawElementDescriptions(
   const tinySize = 3.5;
   let descY = toY(panel.height) - 30;
 
-  // ---- Fiducial-Beschreibung ----
-  if (panel.fiducials.length > 0) {
-    const fid0 = panel.fiducials[0];
-    const fidCount = panel.fiducials.length;
 
-    page.drawText(`Fiducial (${fidCount}x) on both sides`, {
-      x: toX(0), y: descY,
-      size: smallSize, font: fontBold, color: COLORS.green,
-    });
-    descY -= 8;
-    page.drawText(`D=${fid0.padDiameter.toFixed(1)}mm Copper, D=${fid0.maskDiameter.toFixed(1)}mm Soldermask`, {
-      x: toX(0), y: descY,
-      size: tinySize, font, color: COLORS.black,
-    });
-    descY -= 12;
-  }
-
-  // ---- Tooling Hole Beschreibung ----
-  if (panel.toolingHoles.length > 0) {
-    const hole0 = panel.toolingHoles[0];
-    const holeCount = panel.toolingHoles.length;
-    const holeType = hole0.plated ? 'plated' : 'not plated';
-
-    // Beschreibung rechts neben dem Panel positionieren
-    const thDescX = toX(panel.width) + 5;
-    const thDescY = toY(panel.height / 2);
-
-    page.drawText(`Tooling Hole (${holeCount}x)`, {
-      x: thDescX, y: thDescY,
-      size: smallSize, font: fontBold, color: COLORS.red,
-    });
-    page.drawText(`D=${hole0.diameter.toFixed(1)}mm (${holeType})`, {
-      x: thDescX, y: thDescY - 8,
-      size: tinySize, font, color: COLORS.black,
-    });
-  }
 
   // ---- Milling/Fräser Beschreibung ----
   if (options.millingDiameter && options.millingDiameter > 0) {
@@ -2219,42 +2184,6 @@ function drawElementDescriptions(
     }
   }
 
-  // ---- Fräskonturen-Legende ----
-  const visibleContoursLegend = (panel.routingContours || []).filter(c => c.visible);
-  if (visibleContoursLegend.length > 0) {
-    const hasBoardContours = visibleContoursLegend.some(c => c.contourType === 'boardOutline');
-    const hasPanelContours = visibleContoursLegend.some(c => c.contourType === 'panelOutline');
-
-    if (hasBoardContours) {
-      const lineY = descY - 1;
-      page.drawLine({
-        start: { x: toX(0), y: lineY },
-        end: { x: toX(0) + 15, y: lineY },
-        color: COLORS.routingCyan,
-        thickness: 1.5,
-      });
-      page.drawText('Fräskontur Board', {
-        x: toX(0) + 18, y: descY - 3,
-        size: tinySize, font, color: COLORS.routingCyan,
-      });
-      descY -= 8;
-    }
-
-    if (hasPanelContours) {
-      const lineY = descY - 1;
-      page.drawLine({
-        start: { x: toX(0), y: lineY },
-        end: { x: toX(0) + 15, y: lineY },
-        color: COLORS.routingOrange,
-        thickness: 1.5,
-      });
-      page.drawText('Fräskontur Panel', {
-        x: toX(0) + 18, y: descY - 3,
-        size: tinySize, font, color: COLORS.routingOrange,
-      });
-      descY -= 8;
-    }
-  }
 
   if ((panel.freeMousebites || []).length > 0) {
     page.drawCircle({
@@ -2271,20 +2200,6 @@ function drawElementDescriptions(
     descY -= 8;
   }
 
-  // ---- Hinweistext unten ----
-  const hinweisY = descY - 5;
-  page.drawText('Fiducials and tooling holes are all in defined position.', {
-    x: toX(0), y: hinweisY,
-    size: tinySize, font: fontBold, color: COLORS.black,
-  });
-  page.drawText('Do not change any dimension.', {
-    x: toX(0), y: hinweisY - 8,
-    size: tinySize, font, color: COLORS.black,
-  });
-  page.drawText('Ignore V-Cut for Solder Mask opening', {
-    x: toX(0), y: hinweisY - 16,
-    size: tinySize, font, color: COLORS.black,
-  });
 }
 
 

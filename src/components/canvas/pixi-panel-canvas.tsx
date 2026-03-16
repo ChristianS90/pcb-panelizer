@@ -4966,9 +4966,9 @@ function createDrawingFrame(
 
   frame.addChild(gridGraphics);
 
-  // --- Vereinfachter Titelblock (unten rechts, 180mm × 46mm) ---
-  const tbW = 180 * px;
-  const tbH = 46 * px;
+  // --- Vereinfachter Titelblock (unten rechts, 135mm × 32mm) ---
+  const tbW = 135 * px;
+  const tbH = 32 * px;
   const tbX = innerX + innerW - tbW;
   const tbY = innerY + innerH - tbH;
 
@@ -4986,65 +4986,65 @@ function createDrawingFrame(
       .stroke({ color: 0x000000, width: 0.3 });
   }
 
-  // Vertikale Trennlinie (links: ~56mm für Firma, rechts: Details)
-  const leftZoneW = 56 * px;
+  // Vertikale Trennlinie (links: ~42mm für Firma, rechts: Details)
+  const leftZoneW = 42 * px;
   titleBlock.moveTo(tbX + leftZoneW, tbY)
     .lineTo(tbX + leftZoneW, tbY + tbH)
     .stroke({ color: 0x000000, width: 0.3 });
 
   frame.addChild(titleBlock);
 
-  // Titelblock-Texte
-  const titleStyle = new TextStyle({ fontSize: 10, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' });
-  const labelStyle = new TextStyle({ fontSize: 6, fontFamily: 'Arial, sans-serif', fill: 0x666666 });
-  const valueStyle = new TextStyle({ fontSize: 8, fontFamily: 'Arial, sans-serif', fill: 0x000000 });
+  // Titelblock-Texte (kompakt)
+  const titleStyle = new TextStyle({ fontSize: 8, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' });
+  const labelStyle = new TextStyle({ fontSize: 5, fontFamily: 'Arial, sans-serif', fill: 0x666666 });
+  const valueStyle = new TextStyle({ fontSize: 7, fontFamily: 'Arial, sans-serif', fill: 0x000000 });
 
   // SMTEC AG (links oben im Titelblock)
   const companyText = new Text({ text: 'SMTEC AG', style: titleStyle });
-  companyText.position.set(tbX + 4 * px, tbY + 4 * px);
+  companyText.position.set(tbX + 3 * px, tbY + 3 * px);
   frame.addChild(companyText);
 
   // Panel-Name (rechts oben im Titelblock, über der Trennlinie)
   const nameLabel = new Text({ text: 'Benennung', style: labelStyle });
-  nameLabel.position.set(tbX + leftZoneW + 3 * px, tbY + 2 * px);
+  nameLabel.position.set(tbX + leftZoneW + 2 * px, tbY + 1.5 * px);
   frame.addChild(nameLabel);
   const nameValue = new Text({ text: panel.name || 'Panel', style: valueStyle });
-  nameValue.position.set(tbX + leftZoneW + 3 * px, tbY + 8 * px);
+  nameValue.position.set(tbX + leftZoneW + 2 * px, tbY + 5.5 * px);
   frame.addChild(nameValue);
 
   // Massstab (Zeile 4 rechts)
   const scaleLabel = new Text({ text: 'Massstab', style: labelStyle });
-  scaleLabel.position.set(tbX + leftZoneW + 3 * px, tbY + 3 * tbRowH + 2 * px);
+  scaleLabel.position.set(tbX + leftZoneW + 2 * px, tbY + 3 * tbRowH + 1.5 * px);
   frame.addChild(scaleLabel);
-  const scaleValue = new Text({ text: `1:${config.scaleRatio}`, style: new TextStyle({ fontSize: 10, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' }) });
-  scaleValue.position.set(tbX + leftZoneW + 3 * px, tbY + 3 * tbRowH + 10 * px);
+  const scaleValue = new Text({ text: `1:${config.scaleRatio}`, style: new TextStyle({ fontSize: 8, fontFamily: 'Arial, sans-serif', fill: 0x000000, fontWeight: 'bold' }) });
+  scaleValue.position.set(tbX + leftZoneW + 2 * px, tbY + 3 * tbRowH + 7 * px);
   frame.addChild(scaleValue);
 
   // Format (rechts neben Massstab)
   const subColW = (tbW - leftZoneW) / 4;
   const formatLabel = new Text({ text: 'Format', style: labelStyle });
-  formatLabel.position.set(tbX + leftZoneW + subColW + 3 * px, tbY + 3 * tbRowH + 2 * px);
+  formatLabel.position.set(tbX + leftZoneW + subColW + 2 * px, tbY + 3 * tbRowH + 1.5 * px);
   frame.addChild(formatLabel);
   const formatValue = new Text({ text: 'A4', style: valueStyle });
-  formatValue.position.set(tbX + leftZoneW + subColW + 3 * px, tbY + 3 * tbRowH + 10 * px);
+  formatValue.position.set(tbX + leftZoneW + subColW + 2 * px, tbY + 3 * tbRowH + 7 * px);
   frame.addChild(formatValue);
 
   // Datum
   const dateLabel = new Text({ text: 'Datum', style: labelStyle });
-  dateLabel.position.set(tbX + leftZoneW + 3 * px, tbY + tbRowH + 2 * px);
+  dateLabel.position.set(tbX + leftZoneW + 2 * px, tbY + tbRowH + 1.5 * px);
   frame.addChild(dateLabel);
   const today = new Date().toLocaleDateString('de-CH');
   const dateValue = new Text({ text: today, style: valueStyle });
-  dateValue.position.set(tbX + leftZoneW + 3 * px, tbY + tbRowH + 8 * px);
+  dateValue.position.set(tbX + leftZoneW + 2 * px, tbY + tbRowH + 5.5 * px);
   frame.addChild(dateValue);
 
   // Zeichnungsnummer (falls vorhanden)
   if (panel.drawingNumber) {
     const dnLabel = new Text({ text: 'Zeichnungs-Nr.', style: labelStyle });
-    dnLabel.position.set(tbX + leftZoneW + 2 * subColW + 3 * px, tbY + 2 * px);
+    dnLabel.position.set(tbX + leftZoneW + 2 * subColW + 2 * px, tbY + 1.5 * px);
     frame.addChild(dnLabel);
     const dnValue = new Text({ text: panel.drawingNumber, style: valueStyle });
-    dnValue.position.set(tbX + leftZoneW + 2 * subColW + 3 * px, tbY + 8 * px);
+    dnValue.position.set(tbX + leftZoneW + 2 * subColW + 2 * px, tbY + 5.5 * px);
     frame.addChild(dnValue);
   }
 
@@ -5433,7 +5433,7 @@ function createDimensionOverlay(
       if (allEntries.length > 0) {
         const lineH = 5;
         const pad = 2;
-        const legendW = 48;
+        const legendW = 38;
         const titleH = 6;
         const legendH = pad * 2 + allEntries.length * lineH + titleH;
 
@@ -5446,7 +5446,7 @@ function createDimensionOverlay(
           // Seitenrahmen-Konstanten in mm (identisch zu createDrawingFrame)
           const FRAME_MARGIN = 7;
           const FRAME_INNER = 2;
-          const TB_HEIGHT = 46;       // Titelblock-Höhe in mm
+          const TB_HEIGHT = 32;       // Titelblock-Höhe in mm (kompakt)
           const GAP_MM = 8 / (72 / 25.4); // 8pt Abstand wie im PDF ≈ 2.82mm
 
           // Ziel-Position auf der Seite in mm (vom Page-Ursprung oben links)

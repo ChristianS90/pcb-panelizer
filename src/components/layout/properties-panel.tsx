@@ -60,9 +60,27 @@ export function PropertiesPanel() {
   // Aktives Werkzeug abfragen, um die passende Sektion automatisch aufzuklappen
   const activeTool = useActiveTool();
 
+  // Auswahl-States abfragen für automatisches Öffnen der richtigen Sektion
+  const selectedFiducialId = usePanelStore((state) => state.selectedFiducialId);
+  const selectedToolingHoleId = usePanelStore((state) => state.selectedToolingHoleId);
+  const selectedBadmarkId = useSelectedBadmarkId();
+  const selectedTabId = useSelectedTabId();
+  const selectedVScoreLineId = useSelectedVScoreLineId();
+  const selectedRoutingContourId = useSelectedRoutingContourId();
+  const selectedFreeMousebiteId = useSelectedFreeMousebiteId();
+
+  // Hilfsfunktion: Alle Sektionen schließen, eine öffnen
+  const openSection = (section: keyof typeof expandedSections) => {
+    setExpandedSections({
+      frame: false, array: false, tabs: false, vscore: false,
+      routing: false, fiducials: false, badmarks: false,
+      tooling: false, drawingHead: false, dimensions: false,
+      [section]: true,
+    });
+  };
+
   // Automatisch die passende Sektion öffnen wenn ein Werkzeug gewählt wird
   useEffect(() => {
-    // Zuordnung: Werkzeug → Sektion die aufgeklappt werden soll
     const toolToSection: Record<string, keyof typeof expandedSections> = {
       'place-hole': 'tooling',
       'place-fiducial': 'fiducials',
@@ -75,23 +93,34 @@ export function PropertiesPanel() {
     };
 
     const section = toolToSection[activeTool];
-    if (section) {
-      // Akkordeon: Alle anderen schließen, nur passende Sektion öffnen
-      setExpandedSections({
-        frame: false,
-        array: false,
-        tabs: false,
-        vscore: false,
-        routing: false,
-        fiducials: false,
-        badmarks: false,
-        tooling: false,
-        drawingHead: false,
-        dimensions: false,
-        [section]: true,
-      });
-    }
+    if (section) openSection(section);
   }, [activeTool]);
+
+  // Automatisch die richtige Sektion öffnen und zum Element scrollen
+  // wenn ein Element im Canvas angeklickt wird
+  useEffect(() => {
+    let section: keyof typeof expandedSections | null = null;
+    let elementId: string | null = null;
+
+    if (selectedFiducialId) { section = 'fiducials'; elementId = selectedFiducialId; }
+    else if (selectedBadmarkId) { section = 'badmarks'; elementId = selectedBadmarkId; }
+    else if (selectedToolingHoleId) { section = 'tooling'; elementId = selectedToolingHoleId; }
+    else if (selectedTabId) { section = 'tabs'; elementId = selectedTabId; }
+    else if (selectedVScoreLineId) { section = 'vscore'; elementId = selectedVScoreLineId; }
+    else if (selectedRoutingContourId) { section = 'routing'; elementId = selectedRoutingContourId; }
+    else if (selectedFreeMousebiteId) { section = 'tabs'; elementId = selectedFreeMousebiteId; }
+
+    if (section) {
+      openSection(section);
+      // Nach dem Rendern zum ausgewählten Element scrollen
+      if (elementId) {
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`[data-element-id="${elementId}"]`);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        });
+      }
+    }
+  }, [selectedFiducialId, selectedBadmarkId, selectedToolingHoleId, selectedTabId, selectedVScoreLineId, selectedRoutingContourId, selectedFreeMousebiteId]);
 
   // Akkordeon-Verhalten: Nur eine Sektion gleichzeitig offen
   const toggleSection = (section: keyof typeof expandedSections) => {
@@ -379,7 +408,7 @@ function NumberInput({
 function FrameConfig() {
   const panel = usePanel();
   const setFrame = usePanelStore((state) => state.setFrame);
-  const [uniform, setUniform] = useState(false);
+  const [uniform, setUniform] = useState(true);
 
   // Bei einheitlicher Breite: Alle vier Seiten auf denselben Wert setzen
   const handleChange = (side: 'left' | 'right' | 'top' | 'bottom', value: number) => {
@@ -440,13 +469,13 @@ function FrameConfig() {
           />
           <NumberInput
             label="Oben"
-            value={panel.frame.top}
-            onChange={(v) => handleChange('top', v)}
+            value={panel.frame.bottom}
+            onChange={(v) => handleChange('bottom', v)}
           />
           <NumberInput
             label="Unten"
-            value={panel.frame.bottom}
-            onChange={(v) => handleChange('bottom', v)}
+            value={panel.frame.top}
+            onChange={(v) => handleChange('top', v)}
           />
         </div>
       )}
@@ -992,6 +1021,7 @@ function TabItem({
 
   return (
     <div
+      data-element-id={tab.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -1277,6 +1307,7 @@ function VScoreLineItem({
 
   return (
     <div
+      data-element-id={line.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -1598,6 +1629,7 @@ function RoutingContourItem({
   return (
     <div
       ref={itemRef}
+      data-element-id={contour.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -1823,35 +1855,34 @@ function FiducialsConfig() {
   // In der SMT-Fertigung klemmt die Maschine das Panel an den langen Seiten.
   // Fiducials auf den kurzen Seiten werden dadurch nicht abgedeckt.
   //
-  // Die Fiducials sitzen bei 25% und 75% der Stirnseiten-Länge,
-  // damit sie NICHT an den Ecken liegen (dort sind die Tooling Holes).
+  // Fixe Abstände von den Längskanten (lange Seiten):
+  //   Fiducial 1 & 2: 10mm von den Längskanten nach innen
+  //   Fiducial 3 & 4: 15mm von den Längskanten nach innen (asymmetrisch → SMT-Orientierung)
   //
   // Breiter als hoch (width >= height):
-  //   Stirnseiten = links & rechts
-  //   Fiducials bei (offset, 25%/75% der Höhe) und (width-offset, 50%)
+  //   Stirnseiten = links & rechts, Längskanten = oben & unten
   //
   // Höher als breit (height > width):
-  //   Stirnseiten = oben & unten
-  //   Fiducials bei (25%/75% der Breite, offset) und (50%, height-offset)
+  //   Stirnseiten = oben & unten, Längskanten = links & rechts
 
   const addCornerFiducials = () => {
+    const EDGE_OFFSET_12 = 10; // Fiducial 1 & 2: 10mm von Längskanten
+    const EDGE_OFFSET_3 = 15;  // Fiducial 3: 15mm von Längskante (asymmetrisch)
     let positions;
 
     if (panel.width >= panel.height) {
-      // Breiter als hoch: Stirnseiten sind links und rechts
-      // 2 Fiducials links (5% und 95%), 1 rechts (10%)
+      // Breiter als hoch: Stirnseiten = links/rechts, Längskanten = oben/unten
       positions = [
-        { x: offset, y: panel.height * 0.05 },              // links, 5%
-        { x: offset, y: panel.height * 0.95 },              // links, 95%
-        { x: panel.width - offset, y: panel.height * 0.10 }, // rechts, 10%
+        { x: offset, y: EDGE_OFFSET_12 },                        // links, 10mm von oben
+        { x: offset, y: panel.height - EDGE_OFFSET_12 },         // links, 10mm von unten
+        { x: panel.width - offset, y: EDGE_OFFSET_3 },           // rechts, 15mm von oben
       ];
     } else {
-      // Höher als breit: Stirnseiten sind oben und unten
-      // 2 Fiducials oben (5% und 95%), 1 unten (10%)
+      // Höher als breit: Stirnseiten = oben/unten, Längskanten = links/rechts
       positions = [
-        { x: panel.width * 0.05, y: panel.height - offset }, // oben, 5%
-        { x: panel.width * 0.95, y: panel.height - offset }, // oben, 95%
-        { x: panel.width * 0.10, y: offset },                // unten, 10%
+        { x: EDGE_OFFSET_12, y: offset },                        // oben, 10mm von links
+        { x: panel.width - EDGE_OFFSET_12, y: offset },          // oben, 10mm von rechts
+        { x: EDGE_OFFSET_3, y: panel.height - offset },          // unten, 15mm von links
       ];
     }
 
@@ -1861,23 +1892,25 @@ function FiducialsConfig() {
   };
 
   const addAllCornerFiducials = () => {
+    const EDGE_OFFSET = 10;    // Fiducial 1, 2 & 3: 10mm von Längskanten
+    const EDGE_OFFSET_4 = 15;  // Fiducial 4: 15mm von Längskante (asymmetrisch)
     let positions;
 
     if (panel.width >= panel.height) {
       // Breiter als hoch: je 2 Fiducials auf linker und rechter Stirnseite
       positions = [
-        { x: offset, y: panel.height * 0.05 },              // links, 5%
-        { x: offset, y: panel.height * 0.95 },              // links, 95%
-        { x: panel.width - offset, y: panel.height * 0.05 }, // rechts, 5%
-        { x: panel.width - offset, y: panel.height * 0.95 }, // rechts, 95%
+        { x: offset, y: EDGE_OFFSET },                              // links, 10mm von oben
+        { x: offset, y: panel.height - EDGE_OFFSET },               // links, 10mm von unten
+        { x: panel.width - offset, y: EDGE_OFFSET },                // rechts, 10mm von oben
+        { x: panel.width - offset, y: panel.height - EDGE_OFFSET_4 }, // rechts, 15mm von unten
       ];
     } else {
       // Höher als breit: je 2 Fiducials auf oberer und unterer Stirnseite
       positions = [
-        { x: panel.width * 0.05, y: offset },                 // unten, 5%
-        { x: panel.width * 0.95, y: offset },                 // unten, 95%
-        { x: panel.width * 0.05, y: panel.height - offset },  // oben, 5%
-        { x: panel.width * 0.95, y: panel.height - offset },  // oben, 95%
+        { x: EDGE_OFFSET, y: offset },                              // oben, 10mm von links
+        { x: panel.width - EDGE_OFFSET, y: offset },                // oben, 10mm von rechts
+        { x: EDGE_OFFSET, y: panel.height - offset },               // unten, 10mm von links
+        { x: panel.width - EDGE_OFFSET_4, y: panel.height - offset }, // unten, 15mm von rechts
       ];
     }
 
@@ -2006,6 +2039,7 @@ function FiducialItem({ index, fiducial, isSelected, onSelect, onUpdatePosition,
 
   return (
     <div
+      data-element-id={fiducial.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -2221,6 +2255,7 @@ function BadmarkItem({ index, badmark, isSelected, onSelect, onUpdatePosition, o
   }, [badmark.position]);
 
   const isSyncCopy = badmark.isSyncCopy;
+  // data-element-id wird im return-div gesetzt
 
   const handleXBlur = () => {
     if (isSyncCopy) return;
@@ -2240,6 +2275,7 @@ function BadmarkItem({ index, badmark, isSelected, onSelect, onUpdatePosition, o
 
   return (
     <div
+      data-element-id={badmark.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
@@ -2494,6 +2530,7 @@ function ToolingHoleItem({ index, hole, isSelected, onSelect, onUpdatePosition, 
 
   return (
     <div
+      data-element-id={hole.id}
       onClick={onSelect}
       className={cn(
         "rounded p-2 text-xs cursor-pointer transition-all",
