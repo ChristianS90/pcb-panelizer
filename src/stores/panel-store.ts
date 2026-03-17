@@ -16,6 +16,7 @@ import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { extractBoardOutline, calculateCombinedBoundingBox } from '@/lib/gerber';
 import { getNextDrawingNumber, incrementRevision } from '@/lib/utils/drawing-number';
+import { computeOffsetPath, stripSegmentOffset } from '@/lib/routing/offset';
 import type {
   Board,
   BoardInstance,
@@ -408,6 +409,12 @@ interface PanelStore {
   /** Setzt die Offset-Seite einer Fräskontur ('none' | 'left' | 'right') und berechnet Segmente neu */
   setRoutingContourOffsetSide: (contourId: string, side: 'none' | 'left' | 'right') => void;
 
+  /** Setzt die Offset-Seite eines einzelnen Source-Segments und berechnet die Kontur neu */
+  setSegmentOffsetSide: (contourId: string, segIndex: number, side: 'none' | 'left' | 'right') => void;
+
+  /** Berechnet den Offset-Pfad einer Kontur aus ihren sourceSegments neu */
+  recomputeContourOffset: (contourId: string) => void;
+
   /** Aktualisiert die Fräskonturen-Konfiguration */
   setRoutingConfig: (config: Partial<RoutingConfig>) => void;
 
@@ -430,7 +437,7 @@ interface PanelStore {
   updateRoutingContourEndpoints: (contourId: string, startPoint?: Point, endPoint?: Point) => void;
 
   /** Ersetzt alle Segmente einer Fräskontur (für Neuberechnung bei follow-outline) */
-  replaceRoutingContourSegments: (contourId: string, segments: RoutingSegment[], outlineDirection?: 'forward' | 'reverse') => void;
+  replaceRoutingContourSegments: (contourId: string, segments: RoutingSegment[], outlineDirection?: 'forward' | 'reverse', sourceSegments?: RoutingSegment[]) => void;
 
   /** Setzt den Segment-Auswahl-State (Board + Outline-Segmente) */
   setRouteSegmentSelectState: (state: { boardInstanceId: string | null; selectedSegmentIndices: number[]; outlineSegments: OutlinePathSegment[] }) => void;
@@ -833,6 +840,22 @@ function syncMasterContours(panel: Panel): RoutingContour[] {
         return newSeg;
       });
 
+      // sourceSegments ebenfalls translieren (für Offset-Neuberechnung)
+      const translatedSourceSegments: RoutingSegment[] | undefined =
+        masterContour.sourceSegments?.map(seg => {
+          const newSeg: RoutingSegment = {
+            start: { x: seg.start.x + dx, y: seg.start.y + dy },
+            end: { x: seg.end.x + dx, y: seg.end.y + dy },
+          };
+          if (seg.arc) {
+            newSeg.arc = {
+              ...seg.arc,
+              center: { x: seg.arc.center.x + dx, y: seg.arc.center.y + dy },
+            };
+          }
+          return newSeg;
+        });
+
       // Bestehende Kopie wiederverwenden (stabile ID für PixiJS Rendering)
       const copyKey = `${masterContour.id}:${target.id}`;
       const existing = existingCopies.get(copyKey);
@@ -842,6 +865,10 @@ function syncMasterContours(panel: Panel): RoutingContour[] {
         contourType: masterContour.contourType,
         boardInstanceId: target.id,
         segments: translatedSegments,
+        sourceSegments: translatedSourceSegments,
+        perSegmentOffsetSides: masterContour.perSegmentOffsetSides
+          ? [...masterContour.perSegmentOffsetSides]
+          : undefined,
         toolDiameter: masterContour.toolDiameter,
         visible: masterContour.visible,
         creationMethod: masterContour.creationMethod,
@@ -4629,117 +4656,29 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       const currentSide = contour.offsetSide || 'none';
       if (currentSide === side) return state;
 
-      const instance = state.panel.instances.find((i) => i.id === contour.boardInstanceId);
-      if (!instance) return state;
-      const board = state.panel.boards.find((b) => b.id === instance.boardId);
-      if (!board) return state;
-
       const toolRadius = contour.toolDiameter / 2;
+      let newSegments: RoutingSegment[];
 
-      // =====================================================================
-      // CNC-Standard Fräskompensation (wie Mastercam G41/G42)
-      // =====================================================================
-      // "Links" und "Rechts" werden relativ zur FAHRTRICHTUNG bestimmt:
-      // Wenn du in Fahrtrichtung schaust (Start → End), ist "links" links
-      // und "rechts" rechts von dir.
-      //
-      // In Screen-Koordinaten (Y-down):
-      //   Fahrtrichtung (dx, dy)
-      //   Links-Normale  = (dy, -dx) / len  (90° CW in Screen = links wenn Y-down)
-      //   Rechts-Normale = (-dy, dx) / len
-      //
-      // Für Bögen:
-      //   CW-Bogen: "links" der Fahrt = außen = Radius vergrößern  (+1)
-      //   CCW-Bogen: "links" der Fahrt = innen = Radius verkleinern (-1)
-      //   → leftSign = clockwise ? +1 : -1
-      // =====================================================================
-
-      // Hilfsfunktion: Links-Normale einer Linie in Screen-Koordinaten (Y-down)
-      const getLeftNormal = (seg: RoutingSegment): { nx: number; ny: number } => {
-        const dx = seg.end.x - seg.start.x;
-        const dy = seg.end.y - seg.start.y;
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len < 0.001) return { nx: 0, ny: 0 };
-        // Links der Fahrtrichtung in Screen-Koordinaten (Y-down)
-        return { nx: dy / len, ny: -dx / len };
-      };
-
-      // Hilfsfunktion: Offset-Sign für Bögen
-      // CW-Bogen: links = außen → Radius vergrößern = +1
-      // CCW-Bogen: links = innen → Radius verkleinern = -1
-      const getArcLeftSign = (arc: NonNullable<RoutingSegment['arc']>): number => {
-        return arc.clockwise ? 1 : -1;
-      };
-
-      // --- Schritt 1: Original-Koordinaten zurückrechnen (alten Offset entfernen) ---
-      const stripOffset = (seg: RoutingSegment, oldSide: string): RoutingSegment => {
-        if (oldSide === 'none') return seg;
-
-        // 'left' → Links-Offset wurde angewendet, 'right' → Rechts-Offset
-        const sign = oldSide === 'left' ? 1 : -1; // +1 = links, -1 = rechts
-
-        if (seg.arc) {
-          const arcSign = getArcLeftSign(seg.arc) * sign;
-          const originalRadius = seg.arc.radius - arcSign * toolRadius;
-          if (originalRadius < 0.01) return seg;
-          return {
-            start: {
-              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * originalRadius,
-              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * originalRadius,
-            },
-            end: {
-              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * originalRadius,
-              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * originalRadius,
-            },
-            arc: { ...seg.arc, radius: originalRadius },
-          };
-        } else {
-          const { nx, ny } = getLeftNormal(seg);
-          if (nx === 0 && ny === 0) return seg;
-          // Rückgängig: Links-Offset subtrahieren
-          return {
-            start: { x: seg.start.x - nx * sign * toolRadius, y: seg.start.y - ny * sign * toolRadius },
-            end: { x: seg.end.x - nx * sign * toolRadius, y: seg.end.y - ny * sign * toolRadius },
-          };
-        }
-      };
-
-      // --- Schritt 2: Neuen Offset anwenden ---
-      const applyOffset = (seg: RoutingSegment, newSide: string): RoutingSegment => {
-        if (newSide === 'none') return seg;
-
-        const sign = newSide === 'left' ? 1 : -1;
-
-        if (seg.arc) {
-          const arcSign = getArcLeftSign(seg.arc) * sign;
-          const offsetRadius = seg.arc.radius + arcSign * toolRadius;
-          if (offsetRadius < 0.01) return seg;
-          return {
-            start: {
-              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * offsetRadius,
-              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * offsetRadius,
-            },
-            end: {
-              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * offsetRadius,
-              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * offsetRadius,
-            },
-            arc: { ...seg.arc, radius: offsetRadius },
-          };
-        } else {
-          const { nx, ny } = getLeftNormal(seg);
-          if (nx === 0 && ny === 0) return seg;
-          return {
-            start: { x: seg.start.x + nx * sign * toolRadius, y: seg.start.y + ny * sign * toolRadius },
-            end: { x: seg.end.x + nx * sign * toolRadius, y: seg.end.y + ny * sign * toolRadius },
-          };
-        }
-      };
-
-      // Segmente umrechnen: alten Offset entfernen → neuen Offset anwenden
-      const newSegments = contour.segments.map((seg) => {
-        const original = stripOffset(seg, currentSide);
-        return applyOffset(original, side);
-      });
+      if (contour.sourceSegments && contour.sourceSegments.length > 0) {
+        // ===================================================================
+        // Neuer Weg: Saubere Neuberechnung aus sourceSegments
+        // ===================================================================
+        newSegments = computeOffsetPath(
+          contour.sourceSegments,
+          toolRadius,
+          side,
+          contour.perSegmentOffsetSides
+        );
+      } else {
+        // ===================================================================
+        // Fallback für alte Projekte ohne sourceSegments:
+        // Offset zurückrechnen und neu anwenden (wie bisher)
+        // ===================================================================
+        const stripped = contour.segments.map((seg) =>
+          stripSegmentOffset(seg, currentSide, toolRadius)
+        );
+        newSegments = computeOffsetPath(stripped, toolRadius, side);
+      }
 
       const updatedPanel = {
         ...state.panel,
@@ -4755,6 +4694,79 @@ export const usePanelStore = create<PanelStore>((set, get) => {
       updatedPanel.routingContours = syncMasterContours(updatedPanel);
 
       return { panel: updatedPanel };
+    });
+  },
+
+  // Setzt die Offset-Seite eines einzelnen Source-Segments und berechnet die Kontur neu
+  setSegmentOffsetSide: (contourId, segIndex, side) => {
+    saveHistory();
+    set((state) => {
+      const contour = state.panel.routingContours.find((c) => c.id === contourId);
+      if (!contour || contour.isSyncCopy || !contour.sourceSegments) return state;
+
+      const toolRadius = contour.toolDiameter / 2;
+
+      // Per-Segment-Array initialisieren wenn nötig
+      const perSegmentSides: ('none' | 'left' | 'right')[] =
+        contour.perSegmentOffsetSides
+          ? [...contour.perSegmentOffsetSides]
+          : contour.sourceSegments.map(() => contour.offsetSide || 'none');
+
+      // Sicherstellen dass das Array lang genug ist
+      while (perSegmentSides.length < contour.sourceSegments.length) {
+        perSegmentSides.push(contour.offsetSide || 'none');
+      }
+
+      perSegmentSides[segIndex] = side;
+
+      // Offset mit neuen Per-Segment-Einstellungen neu berechnen
+      const newSegments = computeOffsetPath(
+        contour.sourceSegments,
+        toolRadius,
+        contour.offsetSide || 'none',
+        perSegmentSides
+      );
+
+      const updatedPanel = {
+        ...state.panel,
+        routingContours: state.panel.routingContours.map((c) =>
+          c.id === contourId
+            ? { ...c, perSegmentOffsetSides: perSegmentSides, segments: newSegments }
+            : c
+        ),
+        modifiedAt: new Date(),
+      };
+
+      updatedPanel.routingContours = syncMasterContours(updatedPanel);
+      return { panel: updatedPanel };
+    });
+  },
+
+  // Berechnet den Offset-Pfad einer Kontur aus ihren sourceSegments neu
+  recomputeContourOffset: (contourId) => {
+    set((state) => {
+      const contour = state.panel.routingContours.find((c) => c.id === contourId);
+      if (!contour || !contour.sourceSegments || contour.sourceSegments.length === 0) return state;
+
+      const toolRadius = contour.toolDiameter / 2;
+      const newSegments = computeOffsetPath(
+        contour.sourceSegments,
+        toolRadius,
+        contour.offsetSide || 'none',
+        contour.perSegmentOffsetSides
+      );
+
+      return {
+        panel: {
+          ...state.panel,
+          routingContours: state.panel.routingContours.map((c) =>
+            c.id === contourId
+              ? { ...c, segments: newSegments }
+              : c
+          ),
+          modifiedAt: new Date(),
+        },
+      };
     });
   },
 
@@ -4956,7 +4968,7 @@ export const usePanelStore = create<PanelStore>((set, get) => {
   // Ersetzt alle Segmente einer Fräskontur komplett (für follow-outline Neuberechnung)
   // Sync-Kopien sind schreibgeschützt und werden ignoriert.
   // Nach Änderung wird die Master-Board-Synchronisation ausgeführt.
-  replaceRoutingContourSegments: (contourId, segments, outlineDirection?) =>
+  replaceRoutingContourSegments: (contourId, segments, outlineDirection?, sourceSegments?) =>
     set((state) => {
       // Prüfe ob es eine Sync-Kopie ist → nicht bearbeiten
       const targetContour = state.panel.routingContours.find(c => c.id === contourId);
@@ -4966,10 +4978,10 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         ...state.panel,
         routingContours: state.panel.routingContours.map((c) => {
           if (c.id !== contourId) return c;
-          // Richtung nur aktualisieren wenn explizit angegeben
-          return outlineDirection
-            ? { ...c, segments, outlineDirection }
-            : { ...c, segments };
+          const updated = { ...c, segments };
+          if (outlineDirection) updated.outlineDirection = outlineDirection;
+          if (sourceSegments) updated.sourceSegments = sourceSegments;
+          return updated;
         }),
         modifiedAt: new Date(),
       };
@@ -5065,14 +5077,15 @@ export const usePanelStore = create<PanelStore>((set, get) => {
 
     // Pro Gruppe: RoutingSegments erstellen → Auto-Offset nach außen → RoutingContour erstellen
     for (const group of groups) {
-      const segments = mergeGroupToRoutingSegments(outlineSegs, group);
-      if (segments.length === 0) continue;
+      // Source-Segmente = die Original-Outline-Segmente (vor Offset)
+      const sourceSegments = mergeGroupToRoutingSegments(outlineSegs, group);
+      if (sourceSegments.length === 0) continue;
 
       // --- Auto-Offset: Bestimme ob "links" oder "rechts" nach außen zeigt ---
       // Mittelpunkt des ersten Segments → Vektor vom Board-Zentrum dorthin = "nach außen"
       // Vergleiche mit der Links-Normale des Segments (Skalarprodukt)
       let autoOffsetSide: 'none' | 'left' | 'right' = 'none';
-      const firstSeg = segments[0];
+      const firstSeg = sourceSegments[0];
       const segMidX = (firstSeg.start.x + firstSeg.end.x) / 2;
       const segMidY = (firstSeg.start.y + firstSeg.end.y) / 2;
       const outX = segMidX - boardCenterX;
@@ -5088,45 +5101,15 @@ export const usePanelStore = create<PanelStore>((set, get) => {
         autoOffsetSide = dot > 0 ? 'left' : 'right';
       }
 
-      // --- Offset auf Segmente anwenden ---
-      const offsetSegments = autoOffsetSide === 'none' ? segments : segments.map((seg) => {
-        const sign = autoOffsetSide === 'left' ? 1 : -1;
-        if (seg.arc) {
-          // CW-Bogen: links = außen → +1, CCW: links = innen → -1
-          const arcSign = (seg.arc.clockwise ? 1 : -1) * sign;
-          const offsetR = seg.arc.radius + arcSign * toolRadius;
-          if (offsetR < 0.01) return seg;
-          return {
-            start: {
-              x: seg.arc.center.x + Math.cos(seg.arc.startAngle) * offsetR,
-              y: seg.arc.center.y + Math.sin(seg.arc.startAngle) * offsetR,
-            },
-            end: {
-              x: seg.arc.center.x + Math.cos(seg.arc.endAngle) * offsetR,
-              y: seg.arc.center.y + Math.sin(seg.arc.endAngle) * offsetR,
-            },
-            arc: { ...seg.arc, radius: offsetR },
-          };
-        } else {
-          if (len < 0.001) return seg;
-          const sdx = seg.end.x - seg.start.x;
-          const sdy = seg.end.y - seg.start.y;
-          const slen = Math.sqrt(sdx * sdx + sdy * sdy);
-          if (slen < 0.001) return seg;
-          const nx = (sdy / slen) * toolRadius;
-          const ny = (-sdx / slen) * toolRadius;
-          return {
-            start: { x: seg.start.x + nx * sign, y: seg.start.y + ny * sign },
-            end: { x: seg.end.x + nx * sign, y: seg.end.y + ny * sign },
-          };
-        }
-      });
+      // --- Offset mit korrektem Corner-Handling berechnen ---
+      const offsetSegments = computeOffsetPath(sourceSegments, toolRadius, autoOffsetSide);
 
       // addRoutingContour aufrufen (speichert History automatisch + Sync)
       usePanelStore.getState().addRoutingContour({
         contourType: 'boardOutline',
         boardInstanceId: segState.boardInstanceId!,
         segments: offsetSegments,
+        sourceSegments: sourceSegments,  // Original-Outline für spätere Neuberechnung
         toolDiameter: state.panel.routingConfig.toolDiameter,
         visible: true,
         creationMethod: 'follow-outline',

@@ -1371,6 +1371,7 @@ function RoutingContoursConfig() {
   const removeRoutingContour = usePanelStore((state) => state.removeRoutingContour);
   const toggleRoutingContourVisibility = usePanelStore((state) => state.toggleRoutingContourVisibility);
   const setRoutingContourOffsetSide = usePanelStore((state) => state.setRoutingContourOffsetSide);
+  const setSegmentOffsetSide = usePanelStore((state) => state.setSegmentOffsetSide);
   const toggleRoutingDimensions = usePanelStore((state) => state.toggleRoutingDimensions);
   const selectRoutingContour = usePanelStore((state) => state.selectRoutingContour);
   const selectedRoutingContourId = useSelectedRoutingContourId();
@@ -1577,6 +1578,7 @@ function RoutingContoursConfig() {
                 onSelect={() => selectRoutingContour(contour.id)}
                 onToggleVisibility={() => toggleRoutingContourVisibility(contour.id)}
                 onSetOffsetSide={(side) => setRoutingContourOffsetSide(contour.id, side)}
+                onSetSegmentOffsetSide={(segIdx, side) => setSegmentOffsetSide(contour.id, segIdx, side)}
                 onRemove={() => removeRoutingContour(contour.id)}
                 onUpdateEndpoints={(start, end) => updateRoutingContourEndpoints(contour.id, start, end)}
               />
@@ -1601,6 +1603,7 @@ interface RoutingContourItemProps {
   onSelect: () => void;
   onToggleVisibility: () => void;
   onSetOffsetSide: (side: 'none' | 'left' | 'right') => void;
+  onSetSegmentOffsetSide?: (segIndex: number, side: 'none' | 'left' | 'right') => void;
   onRemove: () => void;
   onUpdateEndpoints: (start?: { x: number; y: number }, end?: { x: number; y: number }) => void;
 }
@@ -1613,6 +1616,7 @@ function RoutingContourItem({
   onSelect,
   onToggleVisibility,
   onSetOffsetSide,
+  onSetSegmentOffsetSide,
   onRemove,
   onUpdateEndpoints,
 }: RoutingContourItemProps) {
@@ -1760,7 +1764,73 @@ function RoutingContourItem({
       {/* Segment-Anzahl */}
       <div className="text-[10px] text-gray-400">
         {contour.segments.length} Segment(e)
+        {contour.sourceSegments && contour.sourceSegments.length > 0 && (
+          <span className="ml-1 text-gray-300">
+            ({contour.sourceSegments.length} Quell-Seg.)
+          </span>
+        )}
       </div>
+
+      {/* Per-Segment Offset-Kontrolle (nur bei follow-outline mit sourceSegments, wenn ausgewählt) */}
+      {isSelected && contour.creationMethod === 'follow-outline' && !contour.isSyncCopy &&
+        contour.sourceSegments && contour.sourceSegments.length > 0 && onSetSegmentOffsetSide && (
+        <div className="mt-1.5 space-y-0.5">
+          <div className="text-[10px] font-medium text-gray-500 mb-0.5">
+            Offset pro Segment:
+          </div>
+          {contour.sourceSegments.map((seg, segIdx) => {
+            const effSide = contour.perSegmentOffsetSides?.[segIdx] || contour.offsetSide || 'none';
+            const isArc = !!seg.arc;
+            const segLen = isArc
+              ? (seg.arc!.radius * Math.abs(seg.arc!.endAngle - seg.arc!.startAngle)).toFixed(1)
+              : Math.sqrt((seg.end.x - seg.start.x) ** 2 + (seg.end.y - seg.start.y) ** 2).toFixed(1);
+            return (
+              <div key={segIdx} className="flex items-center gap-1 text-[10px]">
+                <span className="text-gray-400 w-8 shrink-0">
+                  {segIdx + 1}.
+                </span>
+                <span className="text-gray-500 truncate flex-1" title={
+                  isArc ? `Bogen R=${seg.arc!.radius.toFixed(2)}mm` : `Linie ${segLen}mm`
+                }>
+                  {isArc ? `⌒ R${seg.arc!.radius.toFixed(1)}` : `— ${segLen}mm`}
+                </span>
+                <div className="flex items-center border rounded overflow-hidden shrink-0">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSetSegmentOffsetSide(segIdx, 'left'); }}
+                    className={cn(
+                      "px-1 py-0 text-[9px] leading-tight",
+                      effSide === 'left'
+                        ? "bg-blue-500 text-white"
+                        : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                    )}
+                    title="Offset links"
+                  >L</button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSetSegmentOffsetSide(segIdx, 'none'); }}
+                    className={cn(
+                      "px-1 py-0 text-[9px] leading-tight border-x",
+                      effSide === 'none'
+                        ? "bg-blue-500 text-white"
+                        : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                    )}
+                    title="Kein Offset"
+                  >M</button>
+                  <button
+                    onClick={(e) => { e.stopPropagation(); onSetSegmentOffsetSide(segIdx, 'right'); }}
+                    className={cn(
+                      "px-1 py-0 text-[9px] leading-tight",
+                      effSide === 'right'
+                        ? "bg-blue-500 text-white"
+                        : "text-gray-400 hover:text-blue-600 hover:bg-gray-50"
+                    )}
+                    title="Offset rechts"
+                  >R</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Koordinaten-Editor: Direkt im Item, wenn ausgewählt + manuell + nicht Sync-Kopie */}
       {isSelected && contour.creationMethod !== 'auto' && !contour.isSyncCopy && (() => {

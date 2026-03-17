@@ -538,6 +538,52 @@ Der `usePanelStore` enthält:
   - Fiducial-Beschreibung ("Fiducial (Nx) on both sides", "D=...Copper, D=...Soldermask")
   - Tooling-Hole-Beschreibung ("Tooling Hole (Nx)", "D=...mm (not plated)")
 
+### Phase 16 - In Arbeit: Fräskontur-Offset Verbesserung
+
+**Ziel:** Kontur folgen mit sauberem Offset und Ecken-Rundung (wie in modernen CAM-Systemen)
+
+**Bereits umgesetzt:**
+- [x] **Neue Offset-Utility** `src/lib/routing/offset.ts` mit reinen Funktionen
+  - `computeOffsetPath()` — Hauptfunktion: Offset pro Segment + Eckenbehandlung
+  - `offsetSegment()` — Einzelnes Segment versetzen (Linie parallel, Bogen konzentrisch)
+  - `mergeConsecutiveArcsInList()` — Kleine Bogen-Teilstücke zusammenfassen
+  - Geometrie-Hilfsfunktionen: `lineLineIntersection`, `cross2D`, `exitDirection`, `entryDirection`, etc.
+- [x] **sourceSegments** auf RoutingContour — Original-Outline-Segmente werden gespeichert
+  - Ermöglicht saubere Neuberechnung bei Offset-Änderung (statt fehleranfälligem stripOffset→applyOffset)
+- [x] **perSegmentOffsetSides** auf RoutingContour — Per-Segment Offset-Kontrolle
+- [x] **Store-Actions** vereinfacht:
+  - `setRoutingContourOffsetSide` nutzt jetzt `computeOffsetPath` aus sourceSegments
+  - Neue Actions: `setSegmentOffsetSide`, `recomputeContourOffset`
+- [x] **syncMasterContours** synchronisiert auch sourceSegments + perSegmentOffsetSides
+- [x] **Per-Segment UI** im Properties Panel (L/M/R Buttons pro Segment)
+- [x] **Projekt-Migration** für sourceSegments (alte Projekte werden automatisch migriert)
+- [x] **Grundlegender Offset** funktioniert korrekt (jedes Segment parallel versetzt)
+- [x] **90°-Ecken-Rundung** bei Linie→Linie funktioniert (z.B. Board-Ecken)
+
+**Noch offen (Corner-Handling bei Einfräsungen):**
+- [ ] Ecken-Rundung bei Linie↔Bogen Übergängen (z.B. U-förmige Einfräsungen)
+  - Problem: Outline besteht aus vielen kleinen Segmenten (Linien oder Bögen)
+  - Die Bogen-Zusammenfassung (`mergeConsecutiveArcsInList`) hilft bei echten Bögen
+  - Bei Linien-Approximationen (viele kleine Geraden statt Bögen) greift sie nicht
+  - **Nächster Schritt:** Debuggen mit Console-Output um die tatsächlichen Source-Segment-Daten zu sehen
+  - **Ansatz:** Eventuell Linien-Approximationen zu Bögen erkennen (Least-Squares Circle Fit)
+  - **Wichtig:** Offset-Segmente NIEMALS in-place modifizieren (erzeugt Kaskaden-Fehler)
+
+**Architektur-Erkenntnisse:**
+- `computeOffsetPath` in `src/lib/routing/offset.ts` — Reine Funktion, kein State
+- sourceSegments bleiben unverändert, offset wird daraus berechnet
+- Verbindungsbögen: Center = Original-Eckpunkt, Radius ≈ toolRadius
+- `shortestArcDirection()` wählt den kürzeren Weg (≤180°) um die Ecke
+- Plausibilitätsprüfung: r1/r2 nahe toolRadius (±50%) + Winkel-Check
+
+**Kritische Dateien:**
+- `src/lib/routing/offset.ts` — Kern-Algorithmus (NEU)
+- `src/types/index.ts` — sourceSegments, perSegmentOffsetSides Felder
+- `src/stores/panel-store.ts` — finalizeSegmentSelection, setRoutingContourOffsetSide
+- `src/components/canvas/pixi-panel-canvas.tsx` — Drag-Logik verwendet computeOffsetPath
+- `src/lib/storage/project-file.ts` — Migration für sourceSegments
+- `src/components/layout/properties-panel.tsx` — Per-Segment UI
+
 ### Noch offen
 
 - [ ] Gerber-Export (RS-274X)

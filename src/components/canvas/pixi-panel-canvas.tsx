@@ -37,6 +37,7 @@ import {
 } from '@/stores/panel-store';
 import { snapToGrid } from '@/lib/utils';
 import { renderGerberLayers, PIXELS_PER_MM } from '@/lib/canvas/gerber-renderer';
+import { computeOffsetPath } from '@/lib/routing/offset';
 import type { BoardInstance, Board, GerberFile, Fiducial, Badmark, ToolingHole, Tab, VScoreLine, FreeMousebite, RoutingContour, RoutingSegment, Panel, Point, OutlinePathSegment, DimensionLabelOffset, DrawingPreviewConfig } from '@/types';
 
 // ============================================================================
@@ -1874,14 +1875,27 @@ export function PixiPanelCanvas() {
               : { segIndex: info.fixedSegIdx, t: info.fixedT };
 
             const savedDirection = contour.outlineDirection || 'forward';
+            // Source-Segmente ohne Offset holen (toolRadius=0, offsetSide='none')
             const result = getOutlineSubpath(
               currentState.panel, contour.boardInstanceId,
-              fromPt, toPt, toolRadius, savedDirection, fromHint, toHint,
-              contour.offsetSide
+              fromPt, toPt, 0, savedDirection, fromHint, toHint,
+              'none'
             );
 
             if (result.segments.length > 0) {
-              replaceRoutingContourSegments(draggedItemIdRef.current!, result.segments, savedDirection);
+              // Offset mit Corner-Handling über computeOffsetPath berechnen
+              const offsetSegs = computeOffsetPath(
+                result.segments,
+                toolRadius,
+                contour.offsetSide || 'none',
+                contour.perSegmentOffsetSides
+              );
+              replaceRoutingContourSegments(
+                draggedItemIdRef.current!,
+                offsetSegs,
+                savedDirection,
+                result.segments  // sourceSegments mitspeichern
+              );
             }
           }
         } else if (contour) {

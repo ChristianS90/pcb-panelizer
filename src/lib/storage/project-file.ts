@@ -9,7 +9,8 @@
  * behalten und beim Laden mit parseGerberFile() neu geparst.
  */
 
-import type { Panel, ProjectFile, Unit, GridConfig } from '@/types';
+import type { Panel, ProjectFile, Unit, GridConfig, RoutingSegment } from '@/types';
+import { stripSegmentOffset } from '@/lib/routing/offset';
 import {
   parseGerberFile,
   normalizeGerberLayers,
@@ -210,6 +211,37 @@ export async function deserializeProject(
     }
   }
 
+  // 6a2. Migration: sourceSegments für follow-outline Konturen setzen
+  // Ältere Projekte speichern keine sourceSegments. Wir berechnen sie
+  // aus den Offset-Segmenten zurück, damit der Offset neu berechenbar ist.
+  if (panel.routingContours) {
+    for (const contour of panel.routingContours) {
+      const c = contour as any;
+      if (c.creationMethod === 'follow-outline' && !c.sourceSegments) {
+        const currentSide = c.offsetSide || 'none';
+        const toolRadius = (c.toolDiameter || 2) / 2;
+        if (currentSide !== 'none' && c.segments && c.segments.length > 0) {
+          // Offset zurückrechnen → sourceSegments
+          c.sourceSegments = c.segments
+            .map((seg: RoutingSegment) => stripSegmentOffset(seg, currentSide, toolRadius))
+            // Übergangsbögen herausfiltern (diese hatten radius ≈ toolRadius und center auf der Outline)
+            .filter((seg: RoutingSegment) => {
+              if (!seg.arc) return true;
+              // Übergangsbögen haben Radius ≈ toolRadius → herausfiltern
+              return Math.abs(seg.arc.radius - toolRadius) > 0.05;
+            });
+        } else {
+          // Kein Offset aktiv → segments SIND die sourceSegments
+          c.sourceSegments = c.segments ? c.segments.map((seg: RoutingSegment) => ({
+            start: { ...seg.start },
+            end: { ...seg.end },
+            ...(seg.arc ? { arc: { ...seg.arc, center: { ...seg.arc.center } } } : {}),
+          })) : [];
+        }
+      }
+    }
+  }
+
   // 6b. Migration: badmarks-Array für ältere Projekte setzen
   if (!(panel as any).badmarks) {
     (panel as any).badmarks = [];
@@ -329,7 +361,14 @@ export async function saveProjectAs(
     // Jedes Speichern loest einen Download aus.
     const blob = new Blob([jsonString], { type: 'application/json' });
     const filename = `${safeName}.panelizer.json`;
-    saveAs(blob, filename);
+    // Kompatibler Download (Browser + Tauri WebView2)
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 100);
     console.log('Projekt heruntergeladen (Fallback):', filename);
   }
 }

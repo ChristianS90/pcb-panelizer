@@ -409,6 +409,12 @@ export interface RoutingContour {
    *  'left' = Fräser um toolRadius nach links versetzt
    *  'right' = Fräser um toolRadius nach rechts versetzt */
   offsetSide?: 'none' | 'left' | 'right';
+  /** Original-Outline-Segmente vor Offset-Berechnung (nur bei follow-outline).
+   *  Werden beim Erstellen gespeichert und für Offset-Neuberechnung verwendet. */
+  sourceSegments?: RoutingSegment[];
+  /** Per-Segment Offset-Seite (Index korrespondiert zu sourceSegments).
+   *  Wenn nicht gesetzt oder Element undefined, gilt offsetSide für dieses Segment. */
+  perSegmentOffsetSides?: ('none' | 'left' | 'right')[];
   /** ID der Master-Kontur (nur bei synchronisierten Kopien gesetzt) */
   masterContourId?: string;
   /** true = diese Kontur ist eine synchronisierte Kopie vom Master-Board (schreibgeschützt) */
